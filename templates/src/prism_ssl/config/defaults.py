@@ -12,6 +12,7 @@ from prism_ssl.config.schema import (
     CheckpointConfig,
     DataConfig,
     LossConfig,
+    ModelConfig,
     QuotaConfig,
     RunConfig,
     RunMetadataConfig,
@@ -39,6 +40,7 @@ def load_run_config(config_path: str) -> RunConfig:
     wandb_cfg = _section_from_dict(WandbConfig, raw.get("wandb", {}))
     data_cfg = _section_from_dict(DataConfig, raw.get("data", {}))
     train_cfg = _section_from_dict(TrainConfig, raw.get("train", {}))
+    model_cfg = _section_from_dict(ModelConfig, raw.get("model", {}))
     loss_cfg = _section_from_dict(LossConfig, raw.get("loss", {}))
     ckpt_cfg = _section_from_dict(CheckpointConfig, raw.get("checkpoint", {}))
     quota_cfg = _section_from_dict(QuotaConfig, raw.get("quota", {}))
@@ -53,6 +55,7 @@ def load_run_config(config_path: str) -> RunConfig:
         wandb=wandb_cfg,
         data=data_cfg,
         train=train_cfg,
+        model=model_cfg,
         loss=loss_cfg,
         checkpoint=ckpt_cfg,
         quota=quota_cfg,

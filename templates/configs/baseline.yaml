@@ -8,11 +8,20 @@ wandb:
   entity: ""
   tags: ["baseline", "single-gpu", "betty"]
 
+model:
+  name: vit_l
+  d_model: 1024
+  num_layers: 24
+  num_heads: 16
+  mlp_ratio: 4.0
+  dropout: 0.1
+  proj_dim: 256
+
 data:
   catalog_path: data/pmbb_catalog.csv.gz
   n_scans: 5000
   modality_filter: [CT, MR]
-  n_patches: 1024
+  n_patches: 256
   patch_mm: 16.0
   method: optimized_fused
   storage_mode: sharded
@@ -27,7 +36,7 @@ data:
   max_broken_series_log: 2000
 
 train:
-  batch_size: 32
+  batch_size: 8
   max_steps: 50000
   log_every: 100
   precision: bf16

@@ -175,8 +175,19 @@ def run_training(config: RunConfig) -> dict[str, Any]:
     data_iter = iter(loader)
 
     patch_dim = 16 * 16 * 1
-    model = PrismSSLModel(patch_dim=patch_dim).to(device)
+    model = PrismSSLModel(
+        patch_dim=patch_dim,
+        model_name=config.model.name,
+        d_model=config.model.d_model,
+        proj_dim=config.model.proj_dim,
+        num_layers=config.model.num_layers,
+        num_heads=config.model.num_heads,
+        mlp_ratio=config.model.mlp_ratio,
+        dropout=config.model.dropout,
+    ).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.train.lr, weight_decay=config.train.weight_decay)
+
+    result["model_param_count"] = int(sum(p.numel() for p in model.parameters()))
 
     distance_loss_fn = nn.SmoothL1Loss()
     rotation_loss_fn = nn.SmoothL1Loss()

@@ -8,7 +8,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from prism_ssl.model.backbone import PatchPositionEncoder
+from prism_ssl.model.backbone import PatchPositionEncoder, TransformerPatchPositionEncoder
 
 
 @dataclass
@@ -21,9 +21,32 @@ class PrismModelOutput:
 
 
 class PrismSSLModel(nn.Module):
-    def __init__(self, patch_dim: int = 256, d_model: int = 256, proj_dim: int = 128):
+    def __init__(
+        self,
+        patch_dim: int = 256,
+        model_name: str = "patch_mlp",
+        d_model: int = 256,
+        proj_dim: int = 128,
+        num_layers: int = 24,
+        num_heads: int = 16,
+        mlp_ratio: float = 4.0,
+        dropout: float = 0.1,
+    ):
         super().__init__()
-        self.encoder = PatchPositionEncoder(patch_dim=patch_dim, d_model=d_model)
+        key = model_name.strip().lower()
+        if key in {"patch_mlp", "mlp"}:
+            self.encoder = PatchPositionEncoder(patch_dim=patch_dim, d_model=d_model, dropout=dropout)
+        elif key in {"vit_l", "vit_large", "vit-large"}:
+            self.encoder = TransformerPatchPositionEncoder(
+                patch_dim=patch_dim,
+                d_model=d_model,
+                num_layers=num_layers,
+                num_heads=num_heads,
+                mlp_ratio=mlp_ratio,
+                dropout=dropout,
+            )
+        else:
+            raise ValueError(f"Unknown model.name='{model_name}'. Supported: patch_mlp, vit_l")
 
         self.distance_head = nn.Sequential(nn.LayerNorm(d_model * 2), nn.Linear(d_model * 2, 1))
         self.rotation_head = nn.Sequential(nn.LayerNorm(d_model * 2), nn.Linear(d_model * 2, 3))

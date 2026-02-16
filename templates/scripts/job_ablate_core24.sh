@@ -33,10 +33,13 @@ cleanup_tmp() {
 }
 trap cleanup_tmp EXIT
 
-BATCHES=(32 64)
+BATCHES=(4 8)
 POOLS=(16 24)
 SUPCON_WEIGHTS=(0.1 0.2 0.4)
 RAMP_STEPS=(2000 5000)
+MODEL_NAME="${MODEL_NAME:-vit_l}"
+N_PATCHES="${N_PATCHES:-256}"
+WORKERS="${WORKERS:-8}"
 
 TASK_ID=${SLURM_ARRAY_TASK_ID}
 B_IDX=$(( TASK_ID / (2 * 3 * 2) ))
@@ -70,6 +73,9 @@ PY
 uv run python scripts/train_prism_ssl.py \
   --config configs/baseline.yaml \
   --catalog-path "$CATALOG_PATH" \
+  --model-name "$MODEL_NAME" \
+  --n-patches "$N_PATCHES" \
+  --workers "$WORKERS" \
   --batch-size "$BATCH" \
   --warm-pool-size "$POOL" \
   --loss-weight-supcon "$SUPCON" \

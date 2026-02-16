@@ -34,6 +34,10 @@ trap cleanup_tmp EXIT
 
 SUMMARY_PATH="results/train/prism_ssl_${SLURM_JOB_ID}.json"
 CATALOG_PATH="${CATALOG_PATH:-data/pmbb_catalog.csv.gz}"
+MODEL_NAME="${MODEL_NAME:-vit_l}"
+BATCH_SIZE="${BATCH_SIZE:-8}"
+N_PATCHES="${N_PATCHES:-256}"
+WORKERS="${WORKERS:-8}"
 
 uv run python - <<'PY'
 import torch
@@ -45,6 +49,10 @@ PY
 uv run python scripts/train_prism_ssl.py \
   --config configs/baseline.yaml \
   --catalog-path "$CATALOG_PATH" \
+  --model-name "$MODEL_NAME" \
+  --batch-size "$BATCH_SIZE" \
+  --n-patches "$N_PATCHES" \
+  --workers "$WORKERS" \
   --wandb-mode online \
   --tmp-run-dir "$TMP_BASE" \
   --summary-output "$SUMMARY_PATH"

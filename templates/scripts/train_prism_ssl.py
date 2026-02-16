@@ -19,11 +19,20 @@ def parse_args() -> argparse.Namespace:
 
     p.add_argument("--n-scans", type=int, default=None)
     p.add_argument("--catalog-path", type=str, default=None)
+    p.add_argument("--n-patches", type=int, default=None)
     p.add_argument("--batch-size", type=int, default=None)
     p.add_argument("--workers", type=int, default=None)
     p.add_argument("--warm-pool-size", type=int, default=None)
     p.add_argument("--visits-per-scan", type=int, default=None)
     p.add_argument("--max-prefetch-replacements", type=int, default=None)
+
+    p.add_argument("--model-name", type=str, default=None, choices=["patch_mlp", "vit_l"])
+    p.add_argument("--model-d-model", type=int, default=None)
+    p.add_argument("--model-num-layers", type=int, default=None)
+    p.add_argument("--model-num-heads", type=int, default=None)
+    p.add_argument("--model-mlp-ratio", type=float, default=None)
+    p.add_argument("--model-dropout", type=float, default=None)
+    p.add_argument("--model-proj-dim", type=int, default=None)
 
     p.add_argument("--loss-weight-supcon", type=float, default=None)
     p.add_argument("--supcon-warmup-steps", type=int, default=None)
@@ -54,11 +63,19 @@ def main() -> int:
     overrides = {
         "data.n_scans": args.n_scans,
         "data.catalog_path": args.catalog_path,
+        "data.n_patches": args.n_patches,
         "train.batch_size": args.batch_size,
         "data.workers": args.workers,
         "data.warm_pool_size": args.warm_pool_size,
         "data.visits_per_scan": args.visits_per_scan,
         "data.max_prefetch_replacements": args.max_prefetch_replacements,
+        "model.name": args.model_name,
+        "model.d_model": args.model_d_model,
+        "model.num_layers": args.model_num_layers,
+        "model.num_heads": args.model_num_heads,
+        "model.mlp_ratio": args.model_mlp_ratio,
+        "model.dropout": args.model_dropout,
+        "model.proj_dim": args.model_proj_dim,
         "loss.w_supcon_target": args.loss_weight_supcon,
         "loss.supcon_warmup_steps": args.supcon_warmup_steps,
         "loss.supcon_ramp_steps": args.supcon_ramp_steps,

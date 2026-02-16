@@ -79,6 +79,17 @@ class TrainConfig:
 
 
 @dataclass
+class ModelConfig:
+    name: str = "patch_mlp"
+    d_model: int = 256
+    num_layers: int = 24
+    num_heads: int = 16
+    mlp_ratio: float = 4.0
+    dropout: float = 0.1
+    proj_dim: int = 128
+
+
+@dataclass
 class CheckpointConfig:
     artifact_every_steps: int = 5000
     max_local_checkpoints: int = 1
@@ -104,6 +115,7 @@ class RunConfig:
     wandb: WandbConfig = field(default_factory=WandbConfig)
     data: DataConfig = field(default_factory=DataConfig)
     train: TrainConfig = field(default_factory=TrainConfig)
+    model: ModelConfig = field(default_factory=ModelConfig)
     loss: LossConfig = field(default_factory=LossConfig)
     checkpoint: CheckpointConfig = field(default_factory=CheckpointConfig)
     quota: QuotaConfig = field(default_factory=QuotaConfig)
