@@ -188,6 +188,13 @@ def run_training(config: RunConfig) -> dict[str, Any]:
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.train.lr, weight_decay=config.train.weight_decay)
 
     result["model_param_count"] = int(sum(p.numel() for p in model.parameters()))
+    print(
+        "[model] "
+        f"name={config.model.name} d_model={config.model.d_model} "
+        f"layers={config.model.num_layers} heads={config.model.num_heads} "
+        f"proj_dim={config.model.proj_dim} params={result['model_param_count']}",
+        flush=True,
+    )
 
     distance_loss_fn = nn.SmoothL1Loss()
     rotation_loss_fn = nn.SmoothL1Loss()
