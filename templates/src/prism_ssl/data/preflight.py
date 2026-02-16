@@ -11,6 +11,7 @@ from typing import Any
 
 import nibabel as nib
 import numpy as np
+from scipy import ndimage
 import torch
 import torch.nn.functional as F
 
@@ -27,6 +28,21 @@ class NiftiLoadError(RuntimeError):
 
 class SmallScanError(RuntimeError):
     pass
+
+
+def _canonical_method_name(method: str) -> str:
+    name = str(method)
+    aliases = {
+        "naive_volume": "legacy_loop",
+        "optimized_local": "legacy_loop",
+        "optimized_patch": "optimized_fused",
+        "fused_vectorized": "optimized_fused",
+    }
+    canonical = aliases.get(name, name)
+    valid = {"legacy_loop", "optimized_fused"}
+    if canonical not in valid:
+        raise ValueError(f"Unknown sampling method '{method}'. Expected one of {sorted(valid)}")
+    return canonical
 
 
 def resolve_nifti_path(series_path: str) -> str:
@@ -169,14 +185,63 @@ class NiftiScan:
         raise SmallScanError(f"Unexpected patch rank: {arr.ndim}")
 
     def _resize_patch(self, patch_2d: np.ndarray) -> np.ndarray:
-        t = torch.from_numpy(np.ascontiguousarray(patch_2d)).unsqueeze(0).unsqueeze(0).float()
+        return self._resize_patches_batch(patch_2d)[0]
+
+    def _resize_patches_batch(self, patches_2d: np.ndarray) -> np.ndarray:
+        arr = np.asarray(patches_2d, dtype=np.float32)
+        if arr.ndim == 2:
+            arr = arr[np.newaxis, ...]
+        t = torch.from_numpy(np.ascontiguousarray(arr)).unsqueeze(1).float()
         t = F.interpolate(
             t,
             size=(self.target_patch_size, self.target_patch_size),
             mode="bilinear",
             align_corners=False,
         )
-        return t.squeeze(0).squeeze(0).numpy().astype(np.float32, copy=False)
+        return t.squeeze(1).cpu().numpy().astype(np.float32, copy=False)
+
+    @staticmethod
+    def _patches_to_2d(patches_3d: np.ndarray) -> np.ndarray:
+        arr = np.asarray(patches_3d, dtype=np.float32)
+        if arr.ndim == 3:
+            return NiftiScan._patch_to_2d(arr)
+        if arr.ndim != 4:
+            raise SmallScanError(f"Unexpected patch batch rank: {arr.ndim}")
+
+        thin_axis = int(np.argmin(arr.shape[1:]))
+        center_idx = int(arr.shape[thin_axis + 1] // 2)
+        if thin_axis == 0:
+            return arr[:, center_idx, :, :]
+        if thin_axis == 1:
+            return arr[:, :, center_idx, :]
+        return arr[:, :, :, center_idx]
+
+    def _extract_patches_legacy_loop(self, centers_vox: np.ndarray) -> np.ndarray:
+        return np.stack(
+            [self._resize_patch(self._patch_to_2d(self._extract_patch(c))) for c in centers_vox],
+            axis=0,
+        )
+
+    def _extract_patches_optimized_fused(self, centers_vox: np.ndarray) -> np.ndarray:
+        patch_shape = self.patch_shape_vox.astype(np.int64)
+        offsets = [np.arange(int(d), dtype=np.float32) - (float(d) - 1.0) / 2.0 for d in patch_shape]
+        mesh = np.meshgrid(*offsets, indexing="ij")
+        offset_vectors = np.stack([m.reshape(-1) for m in mesh], axis=1)
+
+        centers = np.asarray(centers_vox, dtype=np.float32)
+        all_src_vox = centers[:, np.newaxis, :] + offset_vectors[np.newaxis, :, :]
+        flat_src_vox = all_src_vox.reshape(-1, 3)
+
+        sampled = ndimage.map_coordinates(
+            self.data,
+            [flat_src_vox[:, 0], flat_src_vox[:, 1], flat_src_vox[:, 2]],
+            order=1,
+            mode="constant",
+            cval=0.0,
+        )
+        patches_3d = sampled.reshape(centers.shape[0], int(patch_shape[0]), int(patch_shape[1]), int(patch_shape[2]))
+        patches_2d = self._patches_to_2d(patches_3d)
+        return self._resize_patches_batch(patches_2d)
 
     def train_sample(
         self,
@@ -187,7 +252,7 @@ class NiftiScan:
         wc: float | None = None,
         ww: float | None = None,
     ) -> dict[str, Any]:
-        del method  # Reserved for future extraction variants.
+        method_name = _canonical_method_name(method)
         rng = np.random.default_rng(seed)
 
         half_patch = np.ceil(self.patch_shape_vox / 2.0).astype(np.int64)
@@ -214,10 +279,10 @@ class NiftiScan:
             centers.append(center)
         centers_arr = np.asarray(centers, dtype=np.int64)
 
-        raw_patches = np.stack(
-            [self._resize_patch(self._patch_to_2d(self._extract_patch(c))) for c in centers_arr],
-            axis=0,
-        )
+        if method_name == "optimized_fused":
+            raw_patches = self._extract_patches_optimized_fused(centers_arr)
+        else:
+            raw_patches = self._extract_patches_legacy_loop(centers_arr)
 
         if wc is None or ww is None:
             wc = float(rng.uniform(self.robust_median - self.robust_std, self.robust_median + self.robust_std))
@@ -241,6 +306,7 @@ class NiftiScan:
         rotation_matrix = _euler_xyz_to_matrix(rotation_degrees)
 
         return {
+            "method": method_name,
             "raw_patches": raw_patches,
             "normalized_patches": normalized.astype(np.float32, copy=False),
             "patch_centers_pt": patch_centers_pt,

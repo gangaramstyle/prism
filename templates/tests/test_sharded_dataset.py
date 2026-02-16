@@ -94,3 +94,42 @@ def test_broken_ratio_abort(tmp_path: Path):
 
     with pytest.raises(BrokenScanRateExceeded):
         next(iter(ds))
+
+
+def test_scratch_staging_is_bounded_and_cleaned(tmp_path: Path):
+    records = [_valid_record(tmp_path, i) for i in range(5)]
+    scratch_root = tmp_path / "scratch"
+
+    ds = ShardedScanDataset(
+        scan_records=records,
+        n_patches=8,
+        base_patch_mm=16.0,
+        method="optimized_fused",
+        warm_pool_size=2,
+        visits_per_scan=1,
+        seed=17,
+        max_prefetch_replacements=1,
+        strict_background_errors=False,
+        broken_abort_ratio=0.99,
+        broken_abort_min_attempts=200,
+        max_broken_series_log=100,
+        broken_series_log_path=str(tmp_path / "broken_scratch.jsonl"),
+        scratch_dir=str(scratch_root),
+        pair_views=True,
+    )
+
+    it = iter(ds)
+    max_files_seen = 0
+    try:
+        for _ in range(16):
+            _ = next(it)
+            worker_dir = scratch_root / "worker_0"
+            if worker_dir.exists():
+                file_count = sum(1 for p in worker_dir.rglob("*") if p.is_file())
+                max_files_seen = max(max_files_seen, file_count)
+    finally:
+        it.close()
+
+    # One staged scan per warm-pool slot, plus up to one in-flight temp file.
+    assert max_files_seen <= 3
+    assert not (scratch_root / "worker_0").exists()

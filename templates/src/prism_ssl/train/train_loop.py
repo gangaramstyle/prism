@@ -143,6 +143,7 @@ def run_training(config: RunConfig) -> dict[str, Any]:
     if not records:
         raise RuntimeError("No candidate scan records found after modality/path filtering")
     result["cfg_resolved_n_scans"] = len(records)
+    worker_scratch_dir = str(tmp_run_dir / "scan_scratch") if config.data.use_local_scratch else None
 
     dataset = ShardedScanDataset(
         scan_records=records,
@@ -158,6 +159,7 @@ def run_training(config: RunConfig) -> dict[str, Any]:
         broken_abort_min_attempts=config.data.broken_abort_min_attempts,
         max_broken_series_log=config.data.max_broken_series_log,
         broken_series_log_path=str(broken_log_path),
+        scratch_dir=worker_scratch_dir,
         pair_views=True,
     )
 

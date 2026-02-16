@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import os
 import random
+import shutil
 import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -14,7 +17,7 @@ import torch
 from torch.utils.data import IterableDataset
 
 from prism_ssl.config.schema import ScanRecord
-from prism_ssl.data.preflight import SmallScanError, load_nifti_scan
+from prism_ssl.data.preflight import SmallScanError, load_nifti_scan, resolve_nifti_path
 from prism_ssl.utils import append_jsonl, shard_worker
 
 
@@ -67,6 +70,7 @@ class WarmPool:
         broken_abort_min_attempts: int,
         max_broken_series_log: int,
         broken_series_log_path: str,
+        scratch_dir: str | None = None,
     ) -> None:
         self._capacity = max(1, int(capacity))
         self._visits_per_scan = max(1, int(visits_per_scan))
@@ -78,6 +82,7 @@ class WarmPool:
         self._max_broken_series_log = int(max_broken_series_log)
         self._broken_series_log_path = broken_series_log_path
         self._worker_id = int(worker_id)
+        self._scratch_dir = scratch_dir
 
         self._slots: list[dict[str, Any]] = []
         self._rr_index = 0
@@ -99,6 +104,12 @@ class WarmPool:
         self._broken_series_names: list[str] = []
         self._broken_series_seen: set[str] = set()
         self._lock = threading.Lock()
+
+        if self._scratch_dir:
+            self._worker_scratch = Path(self._scratch_dir) / f"worker_{worker_id}"
+            self._worker_scratch.mkdir(parents=True, exist_ok=True)
+        else:
+            self._worker_scratch = None
 
     def __len__(self) -> int:
         return len(self._slots)
@@ -150,13 +161,71 @@ class WarmPool:
         self._broken_delta_pending = 0
         return attempted_delta, broken_delta
 
-    def _load_one(self, record: ScanRecord) -> tuple[Any, str]:
-        return load_nifti_scan(record, base_patch_mm=self._base_patch_mm)
+    def _slot_scratch_dir(self, slot_idx: int) -> Path | None:
+        if self._worker_scratch is None:
+            return None
+        slot_dir = self._worker_scratch / f"slot_{slot_idx:03d}"
+        slot_dir.mkdir(parents=True, exist_ok=True)
+        return slot_dir
+
+    @staticmethod
+    def _path_suffix(path: str) -> str:
+        p = Path(path)
+        if p.name.endswith(".nii.gz"):
+            return ".nii.gz"
+        if p.suffix:
+            return p.suffix
+        return ".nii"
+
+    def _clear_slot_scratch(self, slot_idx: int) -> None:
+        slot_dir = self._slot_scratch_dir(slot_idx)
+        if slot_dir is None:
+            return
+        for entry in slot_dir.glob("*"):
+            if entry.is_file():
+                entry.unlink(missing_ok=True)
+
+    def _stage_to_scratch(self, slot_idx: int, path: str) -> str:
+        slot_dir = self._slot_scratch_dir(slot_idx)
+        if slot_dir is None:
+            return path
+        self._clear_slot_scratch(slot_idx)
+
+        suffix = self._path_suffix(path)
+        dst = slot_dir / f"scan{suffix}"
+        tmp = slot_dir / f"scan{suffix}.tmp.{os.getpid()}.{threading.get_ident()}"
+        try:
+            shutil.copy2(path, tmp)
+            os.replace(tmp, dst)
+        finally:
+            if tmp.exists():
+                tmp.unlink(missing_ok=True)
+        return str(dst)
+
+    def _load_one(self, record: ScanRecord, slot_idx: int) -> tuple[Any, str]:
+        if self._worker_scratch is None:
+            return load_nifti_scan(record, base_patch_mm=self._base_patch_mm)
+
+        source_path = record.nifti_path or resolve_nifti_path(record.series_path)
+        staged_path = self._stage_to_scratch(slot_idx, source_path)
+        staged_record = ScanRecord(
+            scan_id=record.scan_id,
+            series_id=record.series_id,
+            modality=record.modality,
+            series_path=record.series_path,
+            nifti_path=staged_path,
+        )
+        try:
+            return load_nifti_scan(staged_record, base_patch_mm=self._base_patch_mm)
+        except Exception:
+            self._clear_slot_scratch(slot_idx)
+            raise
 
     def try_add_initial_slot(self, record: ScanRecord) -> bool:
+        slot_idx = len(self._slots)
         self._note_attempt()
         try:
-            scan, path = self._load_one(record)
+            scan, path = self._load_one(record, slot_idx)
         except Exception as exc:
             self._note_broken(record.series_path, exc, stage="initial_load")
             return False
@@ -174,6 +243,7 @@ class WarmPool:
                 "replacement_scan_id": None,
                 "future": None,
                 "future_start": 0.0,
+                "slot_idx": slot_idx,
             }
         )
         return True
@@ -191,7 +261,7 @@ class WarmPool:
             return False
 
         self._note_attempt()
-        slot["future"] = self._executor.submit(self._load_one, replacement_record)
+        slot["future"] = self._executor.submit(self._load_one, replacement_record, slot_idx)
         slot["future_start"] = time.perf_counter()
         self._inflight_replacements += 1
         return True
@@ -282,6 +352,8 @@ class WarmPool:
     def cleanup(self) -> None:
         with self._lock:
             self._executor.shutdown(wait=True, cancel_futures=False)
+            if self._worker_scratch is not None:
+                shutil.rmtree(self._worker_scratch, ignore_errors=True)
 
 
 class ShardedScanDataset(IterableDataset):
@@ -303,6 +375,7 @@ class ShardedScanDataset(IterableDataset):
         broken_abort_min_attempts: int,
         max_broken_series_log: int,
         broken_series_log_path: str,
+        scratch_dir: str | None = None,
         pair_views: bool = True,
     ) -> None:
         self.scan_records = list(scan_records)
@@ -318,6 +391,7 @@ class ShardedScanDataset(IterableDataset):
         self.broken_abort_min_attempts = int(broken_abort_min_attempts)
         self.max_broken_series_log = int(max_broken_series_log)
         self.broken_series_log_path = broken_series_log_path
+        self.scratch_dir = scratch_dir
         self.pair_views = bool(pair_views)
 
     def __iter__(self):
@@ -349,6 +423,7 @@ class ShardedScanDataset(IterableDataset):
             broken_abort_min_attempts=self.broken_abort_min_attempts,
             max_broken_series_log=self.max_broken_series_log,
             broken_series_log_path=self.broken_series_log_path,
+            scratch_dir=self.scratch_dir,
         )
 
         next_idx = 0
