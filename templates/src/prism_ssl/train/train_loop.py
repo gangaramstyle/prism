@@ -26,7 +26,6 @@ from prism_ssl.train.checkpoint import (
     load_checkpoint,
     prune_local_checkpoints,
     resolve_local_ckpt_dir,
-    select_resume_checkpoint,
     save_checkpoint,
     upload_artifact_checkpoint,
 )
@@ -187,12 +186,22 @@ def run_training(config: RunConfig) -> dict[str, Any]:
 
     start_step = 0
     if not config.checkpoint.no_resume:
-        artifact_ckpt = None
-        if run is not None and wandb_mod is not None:
+        if local_last_ckpt.exists():
+            try:
+                start_step = load_checkpoint(local_last_ckpt, model, optimizer, device)
+                print(f"[resume] Resumed from local checkpoint: {local_last_ckpt}", flush=True)
+            except Exception as exc:
+                print(f"[resume] Local checkpoint unusable; starting from step 0: {exc}", flush=True)
+                start_step = 0
+        elif run is not None and wandb_mod is not None and bool(config.wandb.resume_id):
             artifact_ckpt = download_latest_artifact_checkpoint(run, artifact_name, tmp_run_dir)
-        resume_ckpt = select_resume_checkpoint(local_last_ckpt, artifact_ckpt)
-        if resume_ckpt is not None and resume_ckpt.exists():
-            start_step = load_checkpoint(resume_ckpt, model, optimizer, device)
+            if artifact_ckpt is not None and artifact_ckpt.exists():
+                try:
+                    start_step = load_checkpoint(artifact_ckpt, model, optimizer, device)
+                    print(f"[resume] Resumed from W&B artifact checkpoint: {artifact_ckpt}", flush=True)
+                except Exception as exc:
+                    print(f"[resume] Artifact checkpoint unusable; starting from step 0: {exc}", flush=True)
+                    start_step = 0
 
     best_loss: float | None = None
     final_step = start_step
