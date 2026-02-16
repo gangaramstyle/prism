@@ -1,0 +1,27 @@
+# 24-run core ablation definition
+# Cartesian product of factors below.
+
+base:
+  inherits: baseline.yaml
+  train:
+    max_steps: 30000
+
+factors:
+  batch_size: [32, 64]
+  warm_pool_size: [16, 24]
+  w_supcon_target: [0.1, 0.2, 0.4]
+  supcon_ramp_steps: [2000, 5000]
+
+fixed:
+  data:
+    n_patches: 1024
+    workers: 8
+    visits_per_scan: 100
+    method: optimized_fused
+    use_local_scratch: true
+
+ranking:
+  primary_metric: proxy_quality_score
+  tie_breakers:
+    - throughput_effective_patches_per_sec
+    - -stall_steps_ge_2000ms

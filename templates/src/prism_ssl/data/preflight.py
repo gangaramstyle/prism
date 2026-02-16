@@ -1,0 +1,275 @@
+"""Lazy NIfTI resolution/loading utilities used by streaming dataset workers."""
+
+from __future__ import annotations
+
+import glob
+import math
+import os
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+import nibabel as nib
+import numpy as np
+
+from prism_ssl.config.schema import ScanRecord
+
+
+class NiftiResolutionError(RuntimeError):
+    pass
+
+
+class NiftiLoadError(RuntimeError):
+    pass
+
+
+class SmallScanError(RuntimeError):
+    pass
+
+
+def resolve_nifti_path(series_path: str) -> str:
+    """Resolve NIfTI path deterministically by largest file size."""
+    path = Path(series_path)
+    if path.is_file() and path.suffix in {".nii", ".gz"}:
+        return str(path)
+
+    candidates: list[str] = []
+    candidates.extend(glob.glob(os.path.join(series_path, "*.nii.gz")))
+    candidates.extend(glob.glob(os.path.join(series_path, "*.nii")))
+
+    if not candidates:
+        parent = os.path.dirname(series_path)
+        candidates.extend(glob.glob(os.path.join(parent, "*.nii.gz")))
+        candidates.extend(glob.glob(os.path.join(parent, "*.nii")))
+
+    if not candidates:
+        raise NiftiResolutionError(f"Could not resolve NIfTI for series_path={series_path}")
+
+    candidates.sort(key=lambda f: os.path.getsize(f), reverse=True)
+    return candidates[0]
+
+
+def compute_robust_stats(data: np.ndarray) -> tuple[float, float, float, float]:
+    """Return median/std and robust lower/upper bounds."""
+    arr = np.asarray(data, dtype=np.float32)
+    if arr.size == 0:
+        return 0.0, 1.0, 0.0, 1.0
+    p_low, p_high = np.percentile(arr, [0.5, 99.5])
+    clipped = np.clip(arr, p_low, p_high)
+    median = float(np.median(clipped))
+    std = float(np.std(clipped))
+    if std <= 1e-6:
+        std = 1.0
+    if p_high <= p_low:
+        p_high = p_low + 1.0
+    return median, std, float(p_low), float(p_high)
+
+
+def _euler_xyz_to_matrix(degrees_xyz: tuple[float, float, float]) -> np.ndarray:
+    x, y, z = [math.radians(v) for v in degrees_xyz]
+    cx, cy, cz = math.cos(x), math.cos(y), math.cos(z)
+    sx, sy, sz = math.sin(x), math.sin(y), math.sin(z)
+
+    rx = np.array([[1.0, 0.0, 0.0], [0.0, cx, -sx], [0.0, sx, cx]], dtype=np.float32)
+    ry = np.array([[cy, 0.0, sy], [0.0, 1.0, 0.0], [-sy, 0.0, cy]], dtype=np.float32)
+    rz = np.array([[cz, -sz, 0.0], [sz, cz, 0.0], [0.0, 0.0, 1.0]], dtype=np.float32)
+    return rz @ ry @ rx
+
+
+@dataclass
+class NiftiScan:
+    data: np.ndarray
+    affine: np.ndarray
+    spacing: np.ndarray
+    modality: str
+    base_patch_mm: float
+    robust_median: float
+    robust_std: float
+    robust_low: float
+    robust_high: float
+
+    @property
+    def patch_mm(self) -> np.ndarray:
+        mm = np.array([self.base_patch_mm, self.base_patch_mm, self.base_patch_mm], dtype=np.float32)
+        dims_mm = np.asarray(self.data.shape, dtype=np.float32) * self.spacing
+        if float(dims_mm.max() / max(dims_mm.min(), 1e-6)) < 1.5:
+            thin_axis = int(np.argmin(dims_mm))
+        else:
+            diffs = np.array(
+                [
+                    abs(dims_mm[0] - (dims_mm[1] + dims_mm[2]) / 2.0),
+                    abs(dims_mm[1] - (dims_mm[0] + dims_mm[2]) / 2.0),
+                    abs(dims_mm[2] - (dims_mm[0] + dims_mm[1]) / 2.0),
+                ],
+                dtype=np.float32,
+            )
+            thin_axis = int(np.argmax(diffs))
+        mm[thin_axis] = self.base_patch_mm / 16.0
+        return mm
+
+    @property
+    def patch_shape_vox(self) -> np.ndarray:
+        return np.maximum(np.ceil(self.patch_mm / self.spacing).astype(np.int64), 1)
+
+    def _sample_center(self, rng: np.random.Generator, sampling_radius_mm: float) -> np.ndarray:
+        shape = np.asarray(self.data.shape, dtype=np.int64)
+        radius_vox = np.ceil(sampling_radius_mm / self.spacing).astype(np.int64)
+        half_patch = np.ceil(self.patch_shape_vox / 2.0).astype(np.int64)
+        min_idx = half_patch + radius_vox
+        max_idx = shape - half_patch - radius_vox - 1
+        if np.any(max_idx < min_idx):
+            raise SmallScanError(
+                f"scan too small for patch extraction: shape={tuple(shape.tolist())} patch={tuple(self.patch_shape_vox.tolist())}"
+            )
+        return np.array([rng.integers(low=int(lo), high=int(hi) + 1) for lo, hi in zip(min_idx, max_idx)], dtype=np.int64)
+
+    def _extract_patch(self, center_vox: np.ndarray) -> np.ndarray:
+        shape = self.patch_shape_vox
+        starts = center_vox - (shape // 2)
+        ends = starts + shape
+
+        src_starts = np.maximum(starts, 0)
+        src_ends = np.minimum(ends, np.asarray(self.data.shape, dtype=np.int64))
+
+        patch = np.zeros(tuple(int(v) for v in shape.tolist()), dtype=np.float32)
+        dst_starts = src_starts - starts
+        dst_ends = dst_starts + (src_ends - src_starts)
+
+        patch[
+            slice(int(dst_starts[0]), int(dst_ends[0])),
+            slice(int(dst_starts[1]), int(dst_ends[1])),
+            slice(int(dst_starts[2]), int(dst_ends[2])),
+        ] = self.data[
+            slice(int(src_starts[0]), int(src_ends[0])),
+            slice(int(src_starts[1]), int(src_ends[1])),
+            slice(int(src_starts[2]), int(src_ends[2])),
+        ]
+
+        # Standard contract expects (N, 16, 16) style data with singleton depth squeezed.
+        if patch.shape[0] == 1:
+            patch = patch[0]
+        elif patch.shape[1] == 1:
+            patch = patch[:, 0, :]
+        elif patch.shape[2] == 1:
+            patch = patch[:, :, 0]
+        return patch.astype(np.float32, copy=False)
+
+    def train_sample(
+        self,
+        n_patches: int,
+        *,
+        seed: int | None = None,
+        method: str = "optimized_fused",
+        wc: float | None = None,
+        ww: float | None = None,
+    ) -> dict[str, Any]:
+        del method  # Reserved for future extraction variants.
+        rng = np.random.default_rng(seed)
+
+        half_patch = np.ceil(self.patch_shape_vox / 2.0).astype(np.int64)
+        shape = np.asarray(self.data.shape, dtype=np.int64)
+        max_radius_vox_by_axis = ((shape - (2 * half_patch) - 1) // 2).astype(np.int64)
+        max_radius_vox = int(np.min(max_radius_vox_by_axis))
+        if max_radius_vox <= 0:
+            raise SmallScanError(
+                f"scan too small for patch extraction: shape={tuple(shape.tolist())} patch={tuple(self.patch_shape_vox.tolist())}"
+            )
+        max_radius_mm = float(max_radius_vox * float(np.min(self.spacing)))
+        target_radius = float(rng.uniform(20.0, 30.0))
+        sampling_radius_mm = min(target_radius, max_radius_mm * 0.9)
+        sampling_radius_mm = max(sampling_radius_mm, 1.0)
+        prism_center = self._sample_center(rng, sampling_radius_mm)
+
+        centers = []
+        for _ in range(int(n_patches)):
+            delta_mm = rng.uniform(-sampling_radius_mm, sampling_radius_mm, size=3)
+            if float(np.linalg.norm(delta_mm)) > sampling_radius_mm:
+                delta_mm = delta_mm * (sampling_radius_mm / max(np.linalg.norm(delta_mm), 1e-6))
+            center = prism_center + np.rint(delta_mm / self.spacing).astype(np.int64)
+            center = np.clip(center, 0, np.asarray(self.data.shape, dtype=np.int64) - 1)
+            centers.append(center)
+        centers_arr = np.asarray(centers, dtype=np.int64)
+
+        raw_patches = np.stack([self._extract_patch(c) for c in centers_arr], axis=0)
+
+        if wc is None or ww is None:
+            wc = float(rng.uniform(self.robust_median - self.robust_std, self.robust_median + self.robust_std))
+            ww = float(rng.uniform(2.0 * self.robust_std, 6.0 * self.robust_std))
+        ww = max(float(ww), 1e-3)
+
+        w_min = float(wc) - 0.5 * ww
+        w_max = float(wc) + 0.5 * ww
+        clipped = np.clip(raw_patches, w_min, w_max)
+        normalized = ((clipped - w_min) / max(w_max - w_min, 1e-6)) * 2.0 - 1.0
+
+        prism_center_pt = (prism_center.astype(np.float32) * self.spacing.astype(np.float32)).astype(np.float32)
+        patch_centers_pt = (centers_arr.astype(np.float32) * self.spacing.astype(np.float32)).astype(np.float32)
+        relative_patch_centers_pt = patch_centers_pt - prism_center_pt
+
+        rotation_degrees = (
+            float(rng.integers(-20, 21)),
+            float(rng.integers(-20, 21)),
+            float(rng.integers(-20, 21)),
+        )
+        rotation_matrix = _euler_xyz_to_matrix(rotation_degrees)
+
+        return {
+            "raw_patches": raw_patches,
+            "normalized_patches": normalized.astype(np.float32, copy=False),
+            "patch_centers_pt": patch_centers_pt,
+            "relative_patch_centers_pt": relative_patch_centers_pt,
+            "prism_center_pt": prism_center_pt,
+            "rotation_degrees": np.asarray(rotation_degrees, dtype=np.float32),
+            "rotation_matrix_ras": rotation_matrix,
+            "wc": float(wc),
+            "ww": float(ww),
+            "w_min": float(w_min),
+            "w_max": float(w_max),
+            "sampling_radius_mm": float(sampling_radius_mm),
+        }
+
+
+def load_nifti_scan(record: ScanRecord | dict[str, Any], base_patch_mm: float) -> tuple[NiftiScan, str]:
+    """Load a scan object from a record; resolve NIfTI path lazily if needed."""
+    if isinstance(record, ScanRecord):
+        rec = record
+        modality = rec.modality
+        series_path = rec.series_path
+        nifti_path = rec.nifti_path
+    else:
+        modality = str(record.get("modality", "CT"))
+        series_path = str(record.get("series_path", ""))
+        nifti_path = str(record.get("nifti_path", ""))
+
+    effective_path = nifti_path if nifti_path else resolve_nifti_path(series_path)
+    try:
+        raw = nib.load(effective_path)
+        try:
+            img = nib.as_closest_canonical(raw)
+        except Exception:
+            img = raw
+        data = np.asarray(img.get_fdata(), dtype=np.float32)
+        if data.ndim == 4:
+            data = data[..., 0]
+        if data.ndim != 3:
+            raise NiftiLoadError(f"Expected 3D volume, got shape={data.shape}")
+        spacing = np.asarray(img.header.get_zooms()[:3], dtype=np.float32)
+        if np.any(spacing <= 0):
+            raise NiftiLoadError(f"Invalid spacing for {effective_path}: {spacing}")
+        median, std, p_low, p_high = compute_robust_stats(data)
+        scan = NiftiScan(
+            data=data,
+            affine=np.asarray(img.affine, dtype=np.float32),
+            spacing=spacing,
+            modality=modality.upper(),
+            base_patch_mm=float(base_patch_mm),
+            robust_median=median,
+            robust_std=std,
+            robust_low=p_low,
+            robust_high=p_high,
+        )
+        return scan, effective_path
+    except (NiftiResolutionError, NiftiLoadError):
+        raise
+    except Exception as exc:
+        raise NiftiLoadError(f"Failed loading NIfTI '{effective_path}': {exc}") from exc

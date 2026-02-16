@@ -1,0 +1,62 @@
+run:
+  name: prism_ssl_baseline
+  seed: 42
+
+wandb:
+  mode: online
+  project: nvreason-prism-ssl
+  entity: ""
+  tags: ["baseline", "single-gpu", "betty"]
+
+data:
+  catalog_path: data/pmbb_catalog.csv.gz
+  n_scans: 5000
+  modality_filter: [CT, MR]
+  n_patches: 1024
+  patch_mm: 16.0
+  method: optimized_fused
+  storage_mode: sharded
+  workers: 8
+  warm_pool_size: 16
+  visits_per_scan: 100
+  max_prefetch_replacements: 2
+  strict_background_errors: false
+  use_local_scratch: true
+  broken_abort_ratio: 0.10
+  broken_abort_min_attempts: 200
+  max_broken_series_log: 2000
+
+train:
+  batch_size: 32
+  max_steps: 50000
+  log_every: 100
+  precision: bf16
+  lr: 1.0e-4
+  weight_decay: 1.0e-2
+  seed: 42
+  device: auto
+  allow_failures: false
+
+loss:
+  w_distance: 1.0
+  w_rotation: 1.0
+  w_window: 1.0
+  w_supcon_target: 0.2
+  supcon_temperature: 0.1
+  supcon_warmup_steps: 2000
+  supcon_ramp_steps: 3000
+  normalize_targets: true
+
+checkpoint:
+  artifact_every_steps: 5000
+  max_local_checkpoints: 1
+  local_ckpt_dir: ~/prism_ssl/checkpoints/<run_id>
+  no_resume: false
+
+quota:
+  home_soft_limit_gb: 25.0
+  home_hard_limit_gb: 28.0
+
+runtime:
+  tmp_run_dir: ""
+  summary_output: ""
