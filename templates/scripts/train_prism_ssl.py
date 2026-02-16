@@ -49,6 +49,7 @@ def parse_args() -> argparse.Namespace:
 
     p.add_argument("--tmp-run-dir", type=str, default=None)
     p.add_argument("--summary-output", type=str, default=None)
+    p.add_argument("--local-ckpt-dir", type=str, default=None)
 
     p.add_argument("--no-resume", action="store_true")
     p.add_argument("--allow-failures", action="store_true")
@@ -88,6 +89,7 @@ def main() -> int:
         "wandb.mode": args.wandb_mode,
         "runtime.tmp_run_dir": args.tmp_run_dir,
         "runtime.summary_output": args.summary_output,
+        "checkpoint.local_ckpt_dir": args.local_ckpt_dir,
         "checkpoint.no_resume": args.no_resume,
         "train.allow_failures": args.allow_failures,
     }

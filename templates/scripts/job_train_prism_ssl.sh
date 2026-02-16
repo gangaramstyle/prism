@@ -55,4 +55,5 @@ uv run python scripts/train_prism_ssl.py \
   --workers "$WORKERS" \
   --wandb-mode online \
   --tmp-run-dir "$TMP_BASE" \
+  --local-ckpt-dir "$TMP_BASE/checkpoints/<run_id>" \
   --summary-output "$SUMMARY_PATH"
