@@ -89,7 +89,7 @@ class CheckpointConfig:
 @dataclass
 class QuotaConfig:
     home_soft_limit_gb: float = 25.0
-    home_hard_limit_gb: float = 28.0
+    home_hard_limit_gb: float = 42.0
 
 
 @dataclass
