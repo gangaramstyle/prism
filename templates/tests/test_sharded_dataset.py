@@ -63,6 +63,7 @@ def test_sharded_dataset_bootstrap_and_replacement(tmp_path: Path):
     samples = [next(it) for _ in range(10)]
 
     assert samples[0]["patches_a"].shape[-1] == 1
+    assert tuple(samples[0]["patches_a"].shape[1:3]) == (16, 16)
     assert samples[0]["positions_a"].shape[-1] == 3
 
     replacement_events = sum(int(s["replacement_completed_count_delta"]) + int(s["replacement_failed_count_delta"]) for s in samples)

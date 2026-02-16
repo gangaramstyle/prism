@@ -11,6 +11,8 @@ from typing import Any
 
 import nibabel as nib
 import numpy as np
+import torch
+import torch.nn.functional as F
 
 from prism_ssl.config.schema import ScanRecord
 
@@ -87,6 +89,7 @@ class NiftiScan:
     robust_std: float
     robust_low: float
     robust_high: float
+    target_patch_size: int = 16
 
     @property
     def patch_mm(self) -> np.ndarray:
@@ -154,6 +157,27 @@ class NiftiScan:
             patch = patch[:, :, 0]
         return patch.astype(np.float32, copy=False)
 
+    @staticmethod
+    def _patch_to_2d(patch: np.ndarray) -> np.ndarray:
+        arr = np.asarray(patch, dtype=np.float32)
+        if arr.ndim == 2:
+            return arr
+        if arr.ndim == 3:
+            thin_axis = int(np.argmin(arr.shape))
+            center_idx = int(arr.shape[thin_axis] // 2)
+            return np.take(arr, indices=center_idx, axis=thin_axis).astype(np.float32, copy=False)
+        raise SmallScanError(f"Unexpected patch rank: {arr.ndim}")
+
+    def _resize_patch(self, patch_2d: np.ndarray) -> np.ndarray:
+        t = torch.from_numpy(np.ascontiguousarray(patch_2d)).unsqueeze(0).unsqueeze(0).float()
+        t = F.interpolate(
+            t,
+            size=(self.target_patch_size, self.target_patch_size),
+            mode="bilinear",
+            align_corners=False,
+        )
+        return t.squeeze(0).squeeze(0).numpy().astype(np.float32, copy=False)
+
     def train_sample(
         self,
         n_patches: int,
@@ -190,7 +214,10 @@ class NiftiScan:
             centers.append(center)
         centers_arr = np.asarray(centers, dtype=np.int64)
 
-        raw_patches = np.stack([self._extract_patch(c) for c in centers_arr], axis=0)
+        raw_patches = np.stack(
+            [self._resize_patch(self._patch_to_2d(self._extract_patch(c))) for c in centers_arr],
+            axis=0,
+        )
 
         if wc is None or ww is None:
             wc = float(rng.uniform(self.robust_median - self.robust_std, self.robust_median + self.robust_std))
