@@ -11,7 +11,7 @@
 
 set -euo pipefail
 
-REPO_ROOT="${REPO_ROOT:-$HOME/prism-ssl}"
+REPO_ROOT="${REPO_ROOT:-$HOME/prism-ssl/templates}"
 cd "$REPO_ROOT"
 export PATH="$HOME/.local/bin:$PATH"
 if ! command -v uv >/dev/null 2>&1; then
