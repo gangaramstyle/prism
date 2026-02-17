@@ -163,6 +163,43 @@ def test_train_sample_allows_zero_sampling_radius() -> None:
     np.testing.assert_array_equal(centers, np.repeat(center[None, :], repeats=centers.shape[0], axis=0))
 
 
+def test_rotation_changes_patch_pixels_for_same_center() -> None:
+    scan = _make_scan(seed=44)
+    center = np.asarray([20, 20, 8], dtype=np.int64)
+    centers = np.asarray(
+        [
+            [20, 20, 8],
+            [20, 20, 8],
+            [20, 20, 8],
+        ],
+        dtype=np.int64,
+    )
+    res_a = scan.train_sample(
+        3,
+        seed=123,
+        method="optimized_fused",
+        wc=0.0,
+        ww=4.0,
+        subset_center_vox=center,
+        patch_centers_vox=centers,
+        rotation_degrees=(0.0, 0.0, 0.0),
+        target_patch_size=32,
+    )
+    res_b = scan.train_sample(
+        3,
+        seed=123,
+        method="optimized_fused",
+        wc=0.0,
+        ww=4.0,
+        subset_center_vox=center,
+        patch_centers_vox=centers,
+        rotation_degrees=(25.0, -10.0, 15.0),
+        target_patch_size=32,
+    )
+    mean_abs_delta = float(np.mean(np.abs(res_a["normalized_patches"] - res_b["normalized_patches"])))
+    assert mean_abs_delta > 1e-3
+
+
 def test_rotate_volume_about_center_identity_is_stable() -> None:
     rng = np.random.default_rng(123)
     volume = rng.normal(size=(12, 10, 8)).astype(np.float32)

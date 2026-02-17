@@ -342,20 +342,61 @@ class NiftiScan:
             return arr[:, :, center_idx, :]
         return arr[:, :, :, center_idx]
 
+    def _sampling_offset_vectors_vox(
+        self,
+        patch_shape: np.ndarray,
+        *,
+        rotation_matrix: np.ndarray | None = None,
+    ) -> np.ndarray:
+        offsets = [np.arange(int(d), dtype=np.float32) - (float(d) - 1.0) / 2.0 for d in patch_shape]
+        mesh = np.meshgrid(*offsets, indexing="ij")
+        offset_vectors = np.stack([m.reshape(-1) for m in mesh], axis=1).astype(np.float32, copy=False)
+        if rotation_matrix is None:
+            return offset_vectors
+
+        spacing = np.asarray(self.spacing, dtype=np.float32)
+        inv_rot = np.asarray(rotation_matrix, dtype=np.float32).T
+        offset_mm = offset_vectors * spacing[np.newaxis, :]
+        src_offset_mm = (inv_rot @ offset_mm.T).T
+        return (src_offset_mm / np.maximum(spacing[np.newaxis, :], 1e-6)).astype(np.float32, copy=False)
+
     def _extract_patches_legacy_loop(
         self,
         centers_vox: np.ndarray,
         *,
         target_patch_size: int | None = None,
+        rotation_matrix: np.ndarray | None = None,
     ) -> np.ndarray:
+        if rotation_matrix is None:
+            return np.stack(
+                [
+                    self._resize_patches_batch(
+                        self._patch_to_2d(self._extract_patch(c)),
+                        target_patch_size=target_patch_size,
+                    )[0]
+                    for c in centers_vox
+                ],
+                axis=0,
+            )
+
+        patch_shape = self.patch_shape_vox.astype(np.int64)
+        offset_vectors = self._sampling_offset_vectors_vox(patch_shape, rotation_matrix=rotation_matrix)
+        centers = np.asarray(centers_vox, dtype=np.float32)
+        patches: list[np.ndarray] = []
+        for center in centers:
+            src_vox = center[np.newaxis, :] + offset_vectors
+            sampled = ndimage.map_coordinates(
+                self.data,
+                [src_vox[:, 0], src_vox[:, 1], src_vox[:, 2]],
+                order=1,
+                mode="constant",
+                cval=0.0,
+            )
+            patch_3d = sampled.reshape(int(patch_shape[0]), int(patch_shape[1]), int(patch_shape[2]))
+            patch_2d = self._patch_to_2d(patch_3d)
+            patches.append(self._resize_patches_batch(patch_2d, target_patch_size=target_patch_size)[0])
         return np.stack(
-            [
-                self._resize_patches_batch(
-                    self._patch_to_2d(self._extract_patch(c)),
-                    target_patch_size=target_patch_size,
-                )[0]
-                for c in centers_vox
-            ],
+            patches,
             axis=0,
         )
 
@@ -364,11 +405,10 @@ class NiftiScan:
         centers_vox: np.ndarray,
         *,
         target_patch_size: int | None = None,
+        rotation_matrix: np.ndarray | None = None,
     ) -> np.ndarray:
         patch_shape = self.patch_shape_vox.astype(np.int64)
-        offsets = [np.arange(int(d), dtype=np.float32) - (float(d) - 1.0) / 2.0 for d in patch_shape]
-        mesh = np.meshgrid(*offsets, indexing="ij")
-        offset_vectors = np.stack([m.reshape(-1) for m in mesh], axis=1)
+        offset_vectors = self._sampling_offset_vectors_vox(patch_shape, rotation_matrix=rotation_matrix)
 
         centers = np.asarray(centers_vox, dtype=np.float32)
         all_src_vox = centers[:, np.newaxis, :] + offset_vectors[np.newaxis, :, :]
@@ -447,15 +487,33 @@ class NiftiScan:
                 )
             centers_arr = np.clip(centers_arr, 0, np.asarray(self.data.shape, dtype=np.int64) - 1)
 
+        if rotation_degrees is None:
+            if seed is None:
+                rot_rng = np.random.default_rng()
+            else:
+                rot_rng = np.random.default_rng(int(seed) + 1_000_003)
+            rotation_tuple = (
+                float(rot_rng.integers(-20, 21)),
+                float(rot_rng.integers(-20, 21)),
+                float(rot_rng.integers(-20, 21)),
+            )
+        else:
+            if len(rotation_degrees) != 3:
+                raise ValueError("rotation_degrees must be a tuple of length 3")
+            rotation_tuple = tuple(float(v) for v in rotation_degrees)
+        rotation_matrix = _euler_xyz_to_matrix(rotation_tuple)
+
         if method_name == "optimized_fused":
             raw_patches = self._extract_patches_optimized_fused(
                 centers_arr,
                 target_patch_size=resolved_target_patch_size,
+                rotation_matrix=rotation_matrix,
             )
         else:
             raw_patches = self._extract_patches_legacy_loop(
                 centers_arr,
                 target_patch_size=resolved_target_patch_size,
+                rotation_matrix=rotation_matrix,
             )
 
         if wc is None or ww is None:
@@ -471,19 +529,6 @@ class NiftiScan:
         prism_center_pt = (prism_center.astype(np.float32) * self.spacing.astype(np.float32)).astype(np.float32)
         patch_centers_pt = (centers_arr.astype(np.float32) * self.spacing.astype(np.float32)).astype(np.float32)
         relative_patch_centers_pt = patch_centers_pt - prism_center_pt
-
-        sampled_rotation_degrees = (
-            float(rng.integers(-20, 21)),
-            float(rng.integers(-20, 21)),
-            float(rng.integers(-20, 21)),
-        )
-        if rotation_degrees is None:
-            rotation_tuple = sampled_rotation_degrees
-        else:
-            if len(rotation_degrees) != 3:
-                raise ValueError("rotation_degrees must be a tuple of length 3")
-            rotation_tuple = tuple(float(v) for v in rotation_degrees)
-        rotation_matrix = _euler_xyz_to_matrix(rotation_tuple)
         relative_patch_centers_pt_rotated = (rotation_matrix @ relative_patch_centers_pt.T).T.astype(
             np.float32,
             copy=False,
@@ -508,6 +553,7 @@ class NiftiScan:
             "native_acquisition_plane": str(geometry.acquisition_plane),
             "native_baseline_rotation_degrees": np.asarray(geometry.baseline_rotation_degrees, dtype=np.float32),
             "native_inference_reason": str(geometry.inference_reason),
+            "patch_content_rotated": True,
             "wc": float(wc),
             "ww": float(ww),
             "w_min": float(w_min),
