@@ -318,6 +318,7 @@ Suggested from selected percentile window:
 @app.cell
 def _(geometry, scan):
     n_patches = mo.ui.slider(label="n_patches", start=1, stop=2048, step=1, value=256)
+    patch_output_px = mo.ui.slider(label="Patch output size (px)", start=16, stop=192, step=8, value=16)
     method = mo.ui.dropdown(options=["optimized_fused", "legacy_loop"], value="optimized_fused", label="Sampling method")
     sample_mode = mo.ui.dropdown(options=["pipeline-random", "manual-debug"], value="manual-debug", label="Sampling mode")
     sample_seed = mo.ui.number(label="Sample seed", value=1234, step=1)
@@ -351,7 +352,7 @@ def _(geometry, scan):
     mo.vstack(
         [
             mo.md("## Step 2: Select Prism Center / Rotation / Window"),
-            mo.hstack([n_patches, method, sample_mode, sample_seed, lock_b_to_a]),
+            mo.hstack([n_patches, patch_output_px, method, sample_mode, sample_seed, lock_b_to_a]),
             mo.hstack([sampling_radius_mm]),
             mo.md("### View A manual controls"),
             mo.hstack([a_center_x, a_center_y, a_center_z, a_rot_x, a_rot_y, a_rot_z, a_wc, a_ww]),
@@ -362,6 +363,7 @@ def _(geometry, scan):
 
     return (
         n_patches,
+        patch_output_px,
         method,
         sample_mode,
         sample_seed,
@@ -407,6 +409,7 @@ def _(
     lock_b_to_a,
     method,
     n_patches,
+    patch_output_px,
     sample_mode,
     sample_seed,
     sampling_radius_mm,
@@ -415,6 +418,7 @@ def _(
 ):
     common = {
         "n_patches": int(n_patches.value),
+        "target_patch_size": int(patch_output_px.value),
         "method": str(method.value),
     }
 
@@ -472,10 +476,12 @@ def _(pair_targets, view_a, view_b):
                 "a_center_mm": tuple(float(v) for v in np.asarray(view_a["prism_center_pt"]).tolist()),
                 "a_rotation_deg": tuple(float(v) for v in np.asarray(view_a["rotation_degrees"]).tolist()),
                 "a_window_wc_ww": (float(view_a["wc"]), float(view_a["ww"])),
+                "a_target_patch_size": int(view_a["target_patch_size"]),
                 "b_center_vox": tuple(int(v) for v in np.asarray(view_b["prism_center_vox"]).tolist()),
                 "b_center_mm": tuple(float(v) for v in np.asarray(view_b["prism_center_pt"]).tolist()),
                 "b_rotation_deg": tuple(float(v) for v in np.asarray(view_b["rotation_degrees"]).tolist()),
                 "b_window_wc_ww": (float(view_b["wc"]), float(view_b["ww"])),
+                "b_target_patch_size": int(view_b["target_patch_size"]),
                 "label_center_distance_mm": float(pair_targets["center_distance_mm"].item()),
                 "label_rotation_delta_deg": tuple(float(v) for v in pair_targets["rotation_delta_deg"].tolist()),
                 "label_window_delta": tuple(float(v) for v in pair_targets["window_delta"].tolist()),
@@ -772,7 +778,7 @@ def _(coord_rows, coord_view, patch_mm, preview_cols, preview_patches, scan, vie
                 f"""
 - `base_patch_mm`: `{float(patch_mm.value):.1f}`
 - `patch_shape_vox` before resize: `{tuple(int(v) for v in scan.patch_shape_vox.tolist())}`
-- final per-patch tensor shape: `(16, 16)`
+- final per-patch tensor shape: `{tuple(int(v) for v in np.asarray(view_a["normalized_patches"]).shape[1:3])}`
 """
             ),
             mo.hstack(
@@ -791,6 +797,12 @@ def _(coord_rows, coord_view, patch_mm, preview_cols, preview_patches, scan, vie
 @app.cell
 def _(dataset_item):
     batch = collate_prism_batch([dataset_item])
+    patch_hw = tuple(int(v) for v in batch["patches_a"].shape[2:4])
+    patch_size_note = (
+        "Using default training patch size (16x16)."
+        if patch_hw == (16, 16)
+        else f"Debug patch size override active: {patch_hw[0]}x{patch_hw[1]} (training default is 16x16)."
+    )
 
     step4_summary = pl.DataFrame(
         [
@@ -825,7 +837,10 @@ def _(dataset_item):
     mo.vstack(
         [
             mo.md("## Step 4: Model Inputs (exact training batch contract)"),
-            mo.callout("These tensors are created via shared `build_dataset_item` + `collate_prism_batch`, same path as training.", kind="info"),
+            mo.callout(
+                f"These tensors are created via shared `build_dataset_item` + `collate_prism_batch`, same path as training. {patch_size_note}",
+                kind="info",
+            ),
             step4_summary,
             mo.md("First 20 relative position vectors from collated batch"),
             pos_preview,

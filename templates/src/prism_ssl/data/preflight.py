@@ -301,14 +301,26 @@ class NiftiScan:
     def _resize_patch(self, patch_2d: np.ndarray) -> np.ndarray:
         return self._resize_patches_batch(patch_2d)[0]
 
-    def _resize_patches_batch(self, patches_2d: np.ndarray) -> np.ndarray:
+    def _resolve_target_patch_size(self, target_patch_size: int | None = None) -> int:
+        size = int(self.target_patch_size if target_patch_size is None else target_patch_size)
+        if size <= 0:
+            raise ValueError(f"target_patch_size must be > 0, got {size}")
+        return size
+
+    def _resize_patches_batch(
+        self,
+        patches_2d: np.ndarray,
+        *,
+        target_patch_size: int | None = None,
+    ) -> np.ndarray:
+        out_size = self._resolve_target_patch_size(target_patch_size)
         arr = np.asarray(patches_2d, dtype=np.float32)
         if arr.ndim == 2:
             arr = arr[np.newaxis, ...]
         t = torch.from_numpy(np.ascontiguousarray(arr)).unsqueeze(1).float()
         t = F.interpolate(
             t,
-            size=(self.target_patch_size, self.target_patch_size),
+            size=(out_size, out_size),
             mode="bilinear",
             align_corners=False,
         )
@@ -330,13 +342,29 @@ class NiftiScan:
             return arr[:, :, center_idx, :]
         return arr[:, :, :, center_idx]
 
-    def _extract_patches_legacy_loop(self, centers_vox: np.ndarray) -> np.ndarray:
+    def _extract_patches_legacy_loop(
+        self,
+        centers_vox: np.ndarray,
+        *,
+        target_patch_size: int | None = None,
+    ) -> np.ndarray:
         return np.stack(
-            [self._resize_patch(self._patch_to_2d(self._extract_patch(c))) for c in centers_vox],
+            [
+                self._resize_patches_batch(
+                    self._patch_to_2d(self._extract_patch(c)),
+                    target_patch_size=target_patch_size,
+                )[0]
+                for c in centers_vox
+            ],
             axis=0,
         )
 
-    def _extract_patches_optimized_fused(self, centers_vox: np.ndarray) -> np.ndarray:
+    def _extract_patches_optimized_fused(
+        self,
+        centers_vox: np.ndarray,
+        *,
+        target_patch_size: int | None = None,
+    ) -> np.ndarray:
         patch_shape = self.patch_shape_vox.astype(np.int64)
         offsets = [np.arange(int(d), dtype=np.float32) - (float(d) - 1.0) / 2.0 for d in patch_shape]
         mesh = np.meshgrid(*offsets, indexing="ij")
@@ -355,7 +383,7 @@ class NiftiScan:
         )
         patches_3d = sampled.reshape(centers.shape[0], int(patch_shape[0]), int(patch_shape[1]), int(patch_shape[2]))
         patches_2d = self._patches_to_2d(patches_3d)
-        return self._resize_patches_batch(patches_2d)
+        return self._resize_patches_batch(patches_2d, target_patch_size=target_patch_size)
 
     def train_sample(
         self,
@@ -369,8 +397,10 @@ class NiftiScan:
         rotation_degrees: tuple[float, float, float] | None = None,
         subset_center_vox: np.ndarray | None = None,
         patch_centers_vox: np.ndarray | None = None,
+        target_patch_size: int | None = None,
     ) -> dict[str, Any]:
         method_name = _canonical_method_name(method)
+        resolved_target_patch_size = self._resolve_target_patch_size(target_patch_size)
         rng = np.random.default_rng(seed)
 
         half_patch = np.ceil(self.patch_shape_vox / 2.0).astype(np.int64)
@@ -418,9 +448,15 @@ class NiftiScan:
             centers_arr = np.clip(centers_arr, 0, np.asarray(self.data.shape, dtype=np.int64) - 1)
 
         if method_name == "optimized_fused":
-            raw_patches = self._extract_patches_optimized_fused(centers_arr)
+            raw_patches = self._extract_patches_optimized_fused(
+                centers_arr,
+                target_patch_size=resolved_target_patch_size,
+            )
         else:
-            raw_patches = self._extract_patches_legacy_loop(centers_arr)
+            raw_patches = self._extract_patches_legacy_loop(
+                centers_arr,
+                target_patch_size=resolved_target_patch_size,
+            )
 
         if wc is None or ww is None:
             wc = float(rng.uniform(self.robust_median - self.robust_std, self.robust_median + self.robust_std))
@@ -458,6 +494,7 @@ class NiftiScan:
             "method": method_name,
             "raw_patches": raw_patches,
             "normalized_patches": normalized.astype(np.float32, copy=False),
+            "target_patch_size": int(resolved_target_patch_size),
             "patch_centers_pt": patch_centers_pt,
             "patch_centers_vox": centers_arr.astype(np.int64, copy=False),
             "relative_patch_centers_pt": relative_patch_centers_pt,

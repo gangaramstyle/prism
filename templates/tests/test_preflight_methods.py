@@ -142,6 +142,13 @@ def test_train_sample_exposes_rotated_relative_coordinates() -> None:
     )
 
 
+def test_train_sample_allows_target_patch_size_override() -> None:
+    scan = _make_scan(seed=9)
+    result = scan.train_sample(5, seed=4, method="optimized_fused", target_patch_size=64)
+    assert result["target_patch_size"] == 64
+    assert tuple(result["normalized_patches"].shape) == (5, 64, 64)
+
+
 def test_rotate_volume_about_center_identity_is_stable() -> None:
     rng = np.random.default_rng(123)
     volume = rng.normal(size=(12, 10, 8)).astype(np.float32)
