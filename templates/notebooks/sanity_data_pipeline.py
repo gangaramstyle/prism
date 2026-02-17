@@ -82,13 +82,14 @@ def _():
         if n == 0:
             return np.zeros((16, 16), dtype=np.uint8)
         arr = arr[:n]
-        rows = (n + cols - 1) // cols
-        pad = rows * cols - n
+        cols_eff = max(1, min(int(cols), n))
+        rows = (n + cols_eff - 1) // cols_eff
+        pad = rows * cols_eff - n
         if pad > 0:
             arr = np.concatenate([arr, np.zeros((pad, arr.shape[1], arr.shape[2]), dtype=arr.dtype)], axis=0)
         row_imgs = []
         for r in range(rows):
-            row_imgs.append(np.concatenate(arr[r * cols : (r + 1) * cols], axis=1))
+            row_imgs.append(np.concatenate(arr[r * cols_eff : (r + 1) * cols_eff], axis=1))
         grid = np.concatenate(row_imgs, axis=0)
         grid = ((grid + 1.0) * 0.5 * 255.0).clip(0, 255).astype(np.uint8)
         return grid
@@ -203,12 +204,15 @@ def _(load_nifti_scan, mo, patch_mm, selected_record):
 
     scan_shape = tuple(int(x) for x in scan.data.shape)
     spacing = tuple(float(x) for x in scan.spacing.tolist())
+    patch_shape_vox = tuple(int(x) for x in scan.patch_shape_vox.tolist())
     mo.md(
         f"""
 ### Loaded Scan
 - `resolved_nifti_path`: `{resolved_nifti_path}`
 - `shape`: `{scan_shape}`
 - `spacing_mm`: `{spacing}`
+- `base_patch_mm`: `{float(patch_mm.value):.1f}`
+- `patch_shape_vox` (before resize to 16x16): `{patch_shape_vox}`
 - `robust_median/std`: `{scan.robust_median:.3f} / {scan.robust_std:.3f}`
 """
     )
@@ -217,7 +221,7 @@ def _(load_nifti_scan, mo, patch_mm, selected_record):
 
 @app.cell
 def _(mo, scan):
-    n_patches = mo.ui.slider(label="n_patches", start=4, stop=2048, step=4, value=256)
+    n_patches = mo.ui.slider(label="n_patches", start=1, stop=2048, step=1, value=256)
     method = mo.ui.dropdown(options=["optimized_fused", "legacy_loop"], value="optimized_fused", label="Sampling method")
     sample_mode = mo.ui.dropdown(options=["pipeline-random", "manual-debug"], value="pipeline-random", label="Sampling mode")
     view_b_mode = mo.ui.dropdown(
@@ -240,11 +244,6 @@ def _(mo, scan):
     manual_center_y = mo.ui.number(label="Manual center Y", value=sy // 2, start=0, stop=sy - 1, step=1)
     manual_center_z = mo.ui.number(label="Manual center Z", value=sz // 2, start=0, stop=sz - 1, step=1)
 
-    axial_idx = mo.ui.slider(label="Axial slice (z)", start=0, stop=max(sz - 1, 0), step=1, value=sz // 2)
-    coronal_idx = mo.ui.slider(label="Coronal slice (y)", start=0, stop=max(sy - 1, 0), step=1, value=sy // 2)
-    sagittal_idx = mo.ui.slider(label="Sagittal slice (x)", start=0, stop=max(sx - 1, 0), step=1, value=sx // 2)
-    max_points_overlay = mo.ui.slider(label="Max overlay points per slice", start=20, stop=800, step=20, value=200)
-
     mo.vstack(
         [
             mo.md("## Prism Sampling Controls"),
@@ -252,12 +251,9 @@ def _(mo, scan):
             mo.hstack([manual_radius, manual_rot_x, manual_rot_y, manual_rot_z]),
             mo.hstack([manual_use_window, manual_wc, manual_ww]),
             mo.hstack([manual_center_x, manual_center_y, manual_center_z]),
-            mo.hstack([axial_idx, coronal_idx, sagittal_idx, max_points_overlay]),
         ]
     )
     return (
-        axial_idx,
-        coronal_idx,
         manual_center_x,
         manual_center_y,
         manual_center_z,
@@ -268,10 +264,8 @@ def _(mo, scan):
         manual_use_window,
         manual_wc,
         manual_ww,
-        max_points_overlay,
         method,
         n_patches,
-        sagittal_idx,
         sample_mode,
         sample_seed,
         view_b_mode,
@@ -373,12 +367,52 @@ def _(mo, pair_labels, pl, view_a, view_b):
 
 @app.cell
 def _(
+    mo,
+    scan,
+    view_a,
+    view_b,
+):
+    _sx, _sy, _sz = [int(x) for x in scan.data.shape]
+    a_center = [int(x) for x in view_a["prism_center_vox"]]
+    b_center = [int(x) for x in view_b["prism_center_vox"]]
+
+    a_axial_idx = mo.ui.slider(label="A axial slice (z)", start=0, stop=max(_sz - 1, 0), step=1, value=a_center[2])
+    a_coronal_idx = mo.ui.slider(label="A coronal slice (y)", start=0, stop=max(_sy - 1, 0), step=1, value=a_center[1])
+    a_sagittal_idx = mo.ui.slider(label="A sagittal slice (x)", start=0, stop=max(_sx - 1, 0), step=1, value=a_center[0])
+
+    b_axial_idx = mo.ui.slider(label="B axial slice (z)", start=0, stop=max(_sz - 1, 0), step=1, value=b_center[2])
+    b_coronal_idx = mo.ui.slider(label="B coronal slice (y)", start=0, stop=max(_sy - 1, 0), step=1, value=b_center[1])
+    b_sagittal_idx = mo.ui.slider(label="B sagittal slice (x)", start=0, stop=max(_sx - 1, 0), step=1, value=b_center[0])
+    max_points_overlay = mo.ui.slider(label="Max overlay points per slice", start=20, stop=800, step=20, value=200)
+
+    mo.vstack(
+        [
+            mo.md("## Overlay Slice Controls"),
+            mo.md(
+                "Orientation grounding: "
+                "Axial slider `z` moves Inferior -> Superior; "
+                "Coronal slider `y` moves Posterior -> Anterior; "
+                "Sagittal slider `x` moves Left -> Right."
+            ),
+            mo.hstack([a_axial_idx, a_coronal_idx, a_sagittal_idx]),
+            mo.hstack([b_axial_idx, b_coronal_idx, b_sagittal_idx]),
+            mo.hstack([max_points_overlay]),
+        ]
+    )
+    return a_axial_idx, a_coronal_idx, a_sagittal_idx, b_axial_idx, b_coronal_idx, b_sagittal_idx, max_points_overlay
+
+
+@app.cell
+def _(
     _overlay_slice,
-    axial_idx,
-    coronal_idx,
+    a_axial_idx,
+    a_coronal_idx,
+    a_sagittal_idx,
+    b_axial_idx,
+    b_coronal_idx,
+    b_sagittal_idx,
     max_points_overlay,
     mo,
-    sagittal_idx,
     scan,
     view_a,
     view_b,
@@ -386,7 +420,7 @@ def _(
     a_axial, a_axial_n = _overlay_slice(
         scan.data,
         axis=2,
-        slice_idx=int(axial_idx.value),
+        slice_idx=int(a_axial_idx.value),
         center_vox=view_a["prism_center_vox"],
         patch_centers_vox=view_a["patch_centers_vox"],
         wc=float(view_a["wc"]),
@@ -396,7 +430,7 @@ def _(
     a_coronal, a_coronal_n = _overlay_slice(
         scan.data,
         axis=1,
-        slice_idx=int(coronal_idx.value),
+        slice_idx=int(a_coronal_idx.value),
         center_vox=view_a["prism_center_vox"],
         patch_centers_vox=view_a["patch_centers_vox"],
         wc=float(view_a["wc"]),
@@ -406,7 +440,7 @@ def _(
     a_sagittal, a_sagittal_n = _overlay_slice(
         scan.data,
         axis=0,
-        slice_idx=int(sagittal_idx.value),
+        slice_idx=int(a_sagittal_idx.value),
         center_vox=view_a["prism_center_vox"],
         patch_centers_vox=view_a["patch_centers_vox"],
         wc=float(view_a["wc"]),
@@ -417,7 +451,7 @@ def _(
     b_axial, b_axial_n = _overlay_slice(
         scan.data,
         axis=2,
-        slice_idx=int(axial_idx.value),
+        slice_idx=int(b_axial_idx.value),
         center_vox=view_b["prism_center_vox"],
         patch_centers_vox=view_b["patch_centers_vox"],
         wc=float(view_b["wc"]),
@@ -427,7 +461,7 @@ def _(
     b_coronal, b_coronal_n = _overlay_slice(
         scan.data,
         axis=1,
-        slice_idx=int(coronal_idx.value),
+        slice_idx=int(b_coronal_idx.value),
         center_vox=view_b["prism_center_vox"],
         patch_centers_vox=view_b["patch_centers_vox"],
         wc=float(view_b["wc"]),
@@ -437,7 +471,7 @@ def _(
     b_sagittal, b_sagittal_n = _overlay_slice(
         scan.data,
         axis=0,
-        slice_idx=int(sagittal_idx.value),
+        slice_idx=int(b_sagittal_idx.value),
         center_vox=view_b["prism_center_vox"],
         patch_centers_vox=view_b["patch_centers_vox"],
         wc=float(view_b["wc"]),
@@ -450,16 +484,16 @@ def _(
             mo.md("## Scan Overlays (yellow=patch centers in slice, red=prism center)"),
             mo.hstack(
                 [
-                    mo.vstack([mo.md(f"View A axial z={axial_idx.value} ({a_axial_n} pts)"), mo.image(src=a_axial, width=320)]),
-                    mo.vstack([mo.md(f"View A coronal y={coronal_idx.value} ({a_coronal_n} pts)"), mo.image(src=a_coronal, width=320)]),
-                    mo.vstack([mo.md(f"View A sagittal x={sagittal_idx.value} ({a_sagittal_n} pts)"), mo.image(src=a_sagittal, width=320)]),
+                    mo.vstack([mo.md(f"View A axial z={a_axial_idx.value} ({a_axial_n} pts)"), mo.image(src=a_axial, width=320)]),
+                    mo.vstack([mo.md(f"View A coronal y={a_coronal_idx.value} ({a_coronal_n} pts)"), mo.image(src=a_coronal, width=320)]),
+                    mo.vstack([mo.md(f"View A sagittal x={a_sagittal_idx.value} ({a_sagittal_n} pts)"), mo.image(src=a_sagittal, width=320)]),
                 ]
             ),
             mo.hstack(
                 [
-                    mo.vstack([mo.md(f"View B axial z={axial_idx.value} ({b_axial_n} pts)"), mo.image(src=b_axial, width=320)]),
-                    mo.vstack([mo.md(f"View B coronal y={coronal_idx.value} ({b_coronal_n} pts)"), mo.image(src=b_coronal, width=320)]),
-                    mo.vstack([mo.md(f"View B sagittal x={sagittal_idx.value} ({b_sagittal_n} pts)"), mo.image(src=b_sagittal, width=320)]),
+                    mo.vstack([mo.md(f"View B axial z={b_axial_idx.value} ({b_axial_n} pts)"), mo.image(src=b_axial, width=320)]),
+                    mo.vstack([mo.md(f"View B coronal y={b_coronal_idx.value} ({b_coronal_n} pts)"), mo.image(src=b_coronal, width=320)]),
+                    mo.vstack([mo.md(f"View B sagittal x={b_sagittal_idx.value} ({b_sagittal_n} pts)"), mo.image(src=b_sagittal, width=320)]),
                 ]
             ),
         ]
@@ -469,15 +503,19 @@ def _(
 
 @app.cell
 def _(_patch_grid, mo, view_a, view_b):
-    grid_a = _patch_grid(view_a["normalized_patches"], max_patches=36, cols=6)
-    grid_b = _patch_grid(view_b["normalized_patches"], max_patches=36, cols=6)
+    n_a = int(view_a["normalized_patches"].shape[0])
+    n_b = int(view_b["normalized_patches"].shape[0])
+    show_a = min(36, max(1, n_a))
+    show_b = min(36, max(1, n_b))
+    grid_a = _patch_grid(view_a["normalized_patches"], max_patches=show_a, cols=min(6, show_a))
+    grid_b = _patch_grid(view_b["normalized_patches"], max_patches=show_b, cols=min(6, show_b))
     mo.vstack(
         [
-            mo.md("## Normalized Patch Grids (first 36 patches, each 16x16)"),
+            mo.md("## Normalized Patch Grids (preview, each patch resized to 16x16)"),
             mo.hstack(
                 [
-                    mo.vstack([mo.md("View A"), mo.image(src=grid_a, width=520)]),
-                    mo.vstack([mo.md("View B"), mo.image(src=grid_b, width=520)]),
+                    mo.vstack([mo.md(f"View A (showing {show_a}/{n_a} patches)"), mo.image(src=grid_a, width=520)]),
+                    mo.vstack([mo.md(f"View B (showing {show_b}/{n_b} patches)"), mo.image(src=grid_b, width=520)]),
                 ]
             ),
         ]
