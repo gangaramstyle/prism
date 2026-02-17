@@ -674,12 +674,14 @@ def _(scan, view_a, view_b):
         scan.data,
         center_vox=np.asarray(view_a["prism_center_vox"], dtype=np.float32),
         rotation_matrix=np.asarray(view_a["rotation_matrix_ras"], dtype=np.float32),
+        spacing_mm=scan.spacing,
         mode="constant",
     )
     rot_b = rotate_volume_about_center(
         scan.data,
         center_vox=np.asarray(view_b["prism_center_vox"], dtype=np.float32),
         rotation_matrix=np.asarray(view_b["rotation_matrix_ras"], dtype=np.float32),
+        spacing_mm=scan.spacing,
         mode="constant",
     )
     ones = np.ones_like(scan.data, dtype=np.float32)
@@ -688,6 +690,7 @@ def _(scan, view_a, view_b):
             ones,
             center_vox=np.asarray(view_a["prism_center_vox"], dtype=np.float32),
             rotation_matrix=np.asarray(view_a["rotation_matrix_ras"], dtype=np.float32),
+            spacing_mm=scan.spacing,
             interpolation_order=0,
             mode="constant",
         )
@@ -698,6 +701,7 @@ def _(scan, view_a, view_b):
             ones,
             center_vox=np.asarray(view_b["prism_center_vox"], dtype=np.float32),
             rotation_matrix=np.asarray(view_b["rotation_matrix_ras"], dtype=np.float32),
+            spacing_mm=scan.spacing,
             interpolation_order=0,
             mode="constant",
         )

@@ -164,10 +164,15 @@ def rotate_volume_about_center(
     center_vox: np.ndarray,
     rotation_matrix: np.ndarray,
     *,
+    spacing_mm: np.ndarray | tuple[float, float, float] | None = None,
     interpolation_order: int = 1,
     mode: str = "nearest",
 ) -> np.ndarray:
-    """Rotate a 3D volume around an in-volume voxel center."""
+    """Rotate a 3D volume around an in-volume voxel center.
+
+    If ``spacing_mm`` is provided, rotation is applied in physical (mm) space
+    and mapped back to voxel space so anisotropic scans are not warped.
+    """
     vol = np.asarray(volume, dtype=np.float32)
     if vol.ndim != 3:
         raise ValueError(f"Expected 3D volume, got shape={vol.shape}")
@@ -178,10 +183,20 @@ def rotate_volume_about_center(
             f"Invalid center/rotation shape: center={tuple(center.shape)} rotation={tuple(rot.shape)}"
         )
     rot_inv = np.linalg.inv(rot)
-    offset = center - rot_inv @ center
+    if spacing_mm is None:
+        matrix = rot_inv
+    else:
+        spacing = np.asarray(spacing_mm, dtype=np.float64).reshape(-1)
+        if spacing.size != 3 or np.any(spacing <= 0.0):
+            raise ValueError(f"Invalid spacing_mm: {spacing_mm}")
+        scale = np.diag(spacing)
+        inv_scale = np.diag(1.0 / spacing)
+        # x_in_vox = S^-1 R^-1 S x_out_vox + offset
+        matrix = inv_scale @ rot_inv @ scale
+    offset = center - matrix @ center
     return ndimage.affine_transform(
         vol,
-        rot_inv,
+        matrix,
         offset=offset,
         order=int(interpolation_order),
         mode=mode,

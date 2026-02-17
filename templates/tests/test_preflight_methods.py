@@ -211,6 +211,48 @@ def test_rotate_volume_about_center_identity_is_stable() -> None:
     np.testing.assert_allclose(out, volume, rtol=0.0, atol=1e-5)
 
 
+def test_rotate_volume_about_center_spacing_aware_avoids_anisotropic_warp() -> None:
+    volume = np.zeros((33, 33, 17), dtype=np.float32)
+    center = np.asarray([16.0, 16.0, 8.0], dtype=np.float32)
+    src = np.asarray([16, 16, 10], dtype=np.int64)  # +2 vox along z => +4 mm when spacing z=2
+    volume[src[0], src[1], src[2]] = 1.0
+
+    rot_x_90 = np.asarray(
+        [
+            [1.0, 0.0, 0.0],
+            [0.0, 0.0, -1.0],
+            [0.0, 1.0, 0.0],
+        ],
+        dtype=np.float32,
+    )
+
+    out_spacing = rotate_volume_about_center(
+        volume,
+        center_vox=center,
+        rotation_matrix=rot_x_90,
+        spacing_mm=np.asarray([1.0, 1.0, 2.0], dtype=np.float32),
+        interpolation_order=0,
+        mode="constant",
+    )
+    out_voxel = rotate_volume_about_center(
+        volume,
+        center_vox=center,
+        rotation_matrix=rot_x_90,
+        interpolation_order=0,
+        mode="constant",
+    )
+
+    idx_spacing = np.asarray(np.unravel_index(int(np.argmax(out_spacing)), out_spacing.shape), dtype=np.int64)
+    idx_voxel = np.asarray(np.unravel_index(int(np.argmax(out_voxel)), out_voxel.shape), dtype=np.int64)
+    disp_spacing = idx_spacing - center.astype(np.int64)
+    disp_voxel = idx_voxel - center.astype(np.int64)
+
+    assert int(disp_spacing[0]) == 0
+    assert int(disp_spacing[2]) == 0
+    assert abs(int(disp_spacing[1])) == 4  # 4 mm mapped onto y-axis with 1 mm spacing
+    assert abs(int(disp_voxel[1])) == 2  # old voxel-space behavior shrinks motion by z spacing factor
+
+
 def test_rotated_relative_points_to_voxel_rounds_and_clips() -> None:
     rel = np.asarray([[1.0, 2.0, 4.0], [-2.0, -3.0, -4.0]], dtype=np.float32)
     points = rotated_relative_points_to_voxel(
