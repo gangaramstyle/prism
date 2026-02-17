@@ -14,6 +14,7 @@ with app.setup:
     import marimo as mo
     import numpy as np
     import polars as pl
+    from PIL import Image
 
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -105,6 +106,64 @@ with app.setup:
             row_tiles.append(np.concatenate(arr[row * cols_eff : (row + 1) * cols_eff], axis=1))
         grid = np.concatenate(row_tiles, axis=0)
         return ((grid + 1.0) * 0.5 * 255.0).clip(0, 255).astype(np.uint8)
+
+    def _plane_axes_for_slice(axis: int) -> tuple[int, int]:
+        if axis == 2:  # axial -> rows=x, cols=y
+            return 0, 1
+        if axis == 1:  # coronal -> rows=x, cols=z
+            return 0, 2
+        if axis == 0:  # sagittal -> rows=y, cols=z
+            return 1, 2
+        raise ValueError(f"Invalid axis={axis}")
+
+    def _aspect_ratio_for_display(
+        image: np.ndarray,
+        axis: int,
+        spacing_mm: np.ndarray,
+        *,
+        mode: str,
+    ) -> float:
+        h, w = image.shape[:2]
+        if h <= 0 or w <= 0:
+            return 1.0
+        if mode == "spacing-aware":
+            row_axis, col_axis = _plane_axes_for_slice(axis)
+            spacing = np.asarray(spacing_mm, dtype=np.float32)
+            row_mm = float(spacing[row_axis])
+            col_mm = float(spacing[col_axis])
+            return (float(h) * row_mm) / max(float(w) * col_mm, 1e-6)
+        return float(h) / max(float(w), 1e-6)
+
+    def fit_image_for_display(
+        image: np.ndarray,
+        axis: int,
+        spacing_mm: np.ndarray,
+        *,
+        target_width_px: int,
+        max_height_px: int,
+        aspect_mode: str,
+    ) -> tuple[np.ndarray, int]:
+        arr = np.asarray(image, dtype=np.uint8)
+        aspect = _aspect_ratio_for_display(arr, axis, spacing_mm, mode=aspect_mode)
+        preferred_width = max(int(target_width_px), 64)
+        max_height = max(int(max_height_px), 64)
+
+        predicted_height = float(preferred_width) * aspect
+        if predicted_height <= max_height:
+            width = preferred_width
+        else:
+            width = max(64, int(round(float(max_height) / max(aspect, 1e-6))))
+
+        src_h, src_w = arr.shape[:2]
+        dst_h = max(64, int(round(float(width) * aspect)))
+        if dst_h > max_height:
+            dst_h = max_height
+            width = max(64, int(round(float(dst_h) / max(aspect, 1e-6))))
+        if width == src_w and dst_h == src_h:
+            return arr, width
+
+        resized = np.asarray(Image.fromarray(arr).resize((int(width), int(dst_h)), resample=Image.BILINEAR))
+        return resized, int(width)
 
 
 @app.cell
@@ -507,6 +566,13 @@ def _(scan, view_a, view_b):
     b_sagittal_idx = mo.ui.slider(label="B sagittal slice (x)", start=0, stop=max(sx - 1, 0), step=1, value=b_center[0])
 
     max_points_overlay = mo.ui.slider(label="Max patch points shown per slice", start=20, stop=1000, step=20, value=250)
+    display_aspect_mode = mo.ui.dropdown(
+        options=["spacing-aware", "voxel-grid"],
+        value="spacing-aware",
+        label="Display aspect",
+    )
+    display_target_width = mo.ui.slider(label="Target display width (px)", start=180, stop=480, step=10, value=300)
+    display_max_height = mo.ui.slider(label="Max display height (px)", start=140, stop=360, step=10, value=220)
 
     mo.vstack(
         [
@@ -514,10 +580,21 @@ def _(scan, view_a, view_b):
             mo.md("Slider grounding: `x` = Left→Right, `y` = Posterior→Anterior, `z` = Inferior→Superior."),
             mo.hstack([a_axial_idx, a_coronal_idx, a_sagittal_idx]),
             mo.hstack([b_axial_idx, b_coronal_idx, b_sagittal_idx]),
-            mo.hstack([max_points_overlay]),
+            mo.hstack([max_points_overlay, display_aspect_mode, display_target_width, display_max_height]),
         ]
     )
-    return a_axial_idx, a_coronal_idx, a_sagittal_idx, b_axial_idx, b_coronal_idx, b_sagittal_idx, max_points_overlay
+    return (
+        a_axial_idx,
+        a_coronal_idx,
+        a_sagittal_idx,
+        b_axial_idx,
+        b_coronal_idx,
+        b_sagittal_idx,
+        display_aspect_mode,
+        display_max_height,
+        display_target_width,
+        max_points_overlay,
+    )
 
 
 @app.cell
@@ -556,6 +633,10 @@ def _(
     b_axial_idx,
     b_coronal_idx,
     b_sagittal_idx,
+    display_aspect_mode,
+    display_max_height,
+    display_target_width,
+    fit_image_for_display,
     max_points_overlay,
     rot_a,
     rot_b,
@@ -688,37 +769,64 @@ def _(
         ww=float(view_b["ww"]),
         max_points=int(max_points_overlay.value),
     )
+    aspect_mode = str(display_aspect_mode.value)
+
+    def _display_ready(image: np.ndarray, axis: int) -> tuple[np.ndarray, int]:
+        return fit_image_for_display(
+            image,
+            axis,
+            scan.spacing,
+            target_width_px=int(display_target_width.value),
+            max_height_px=int(display_max_height.value),
+            aspect_mode=aspect_mode,
+        )
+
+    a_native_axial_img, a_native_axial_w = _display_ready(a_native_axial, axis=2)
+    a_native_coronal_img, a_native_coronal_w = _display_ready(a_native_coronal, axis=1)
+    a_native_sagittal_img, a_native_sagittal_w = _display_ready(a_native_sagittal, axis=0)
+
+    b_native_axial_img, b_native_axial_w = _display_ready(b_native_axial, axis=2)
+    b_native_coronal_img, b_native_coronal_w = _display_ready(b_native_coronal, axis=1)
+    b_native_sagittal_img, b_native_sagittal_w = _display_ready(b_native_sagittal, axis=0)
+
+    a_rot_axial_img, a_rot_axial_w = _display_ready(a_rot_axial, axis=2)
+    a_rot_coronal_img, a_rot_coronal_w = _display_ready(a_rot_coronal, axis=1)
+    a_rot_sagittal_img, a_rot_sagittal_w = _display_ready(a_rot_sagittal, axis=0)
+
+    b_rot_axial_img, b_rot_axial_w = _display_ready(b_rot_axial, axis=2)
+    b_rot_coronal_img, b_rot_coronal_w = _display_ready(b_rot_coronal, axis=1)
+    b_rot_sagittal_img, b_rot_sagittal_w = _display_ready(b_rot_sagittal, axis=0)
 
     mo.vstack(
         [
             mo.md("#### Native-space overlays (yellow=patch centers, red=prism center)"),
             mo.hstack(
                 [
-                    mo.vstack([mo.md(f"A axial z={a_axial_idx.value}"), mo.image(src=a_native_axial, width=300)]),
-                    mo.vstack([mo.md(f"A coronal y={a_coronal_idx.value}"), mo.image(src=a_native_coronal, width=300)]),
-                    mo.vstack([mo.md(f"A sagittal x={a_sagittal_idx.value}"), mo.image(src=a_native_sagittal, width=300)]),
+                    mo.vstack([mo.md(f"A axial z={a_axial_idx.value}"), mo.image(src=a_native_axial_img, width=a_native_axial_w)]),
+                    mo.vstack([mo.md(f"A coronal y={a_coronal_idx.value}"), mo.image(src=a_native_coronal_img, width=a_native_coronal_w)]),
+                    mo.vstack([mo.md(f"A sagittal x={a_sagittal_idx.value}"), mo.image(src=a_native_sagittal_img, width=a_native_sagittal_w)]),
                 ]
             ),
             mo.hstack(
                 [
-                    mo.vstack([mo.md(f"B axial z={b_axial_idx.value}"), mo.image(src=b_native_axial, width=300)]),
-                    mo.vstack([mo.md(f"B coronal y={b_coronal_idx.value}"), mo.image(src=b_native_coronal, width=300)]),
-                    mo.vstack([mo.md(f"B sagittal x={b_sagittal_idx.value}"), mo.image(src=b_native_sagittal, width=300)]),
+                    mo.vstack([mo.md(f"B axial z={b_axial_idx.value}"), mo.image(src=b_native_axial_img, width=b_native_axial_w)]),
+                    mo.vstack([mo.md(f"B coronal y={b_coronal_idx.value}"), mo.image(src=b_native_coronal_img, width=b_native_coronal_w)]),
+                    mo.vstack([mo.md(f"B sagittal x={b_sagittal_idx.value}"), mo.image(src=b_native_sagittal_img, width=b_native_sagittal_w)]),
                 ]
             ),
             mo.md("#### Rotated-space overlays (same centers/slices, rotated around prism center)"),
             mo.hstack(
                 [
-                    mo.vstack([mo.md(f"A axial z={a_axial_idx.value}"), mo.image(src=a_rot_axial, width=300)]),
-                    mo.vstack([mo.md(f"A coronal y={a_coronal_idx.value}"), mo.image(src=a_rot_coronal, width=300)]),
-                    mo.vstack([mo.md(f"A sagittal x={a_sagittal_idx.value}"), mo.image(src=a_rot_sagittal, width=300)]),
+                    mo.vstack([mo.md(f"A axial z={a_axial_idx.value}"), mo.image(src=a_rot_axial_img, width=a_rot_axial_w)]),
+                    mo.vstack([mo.md(f"A coronal y={a_coronal_idx.value}"), mo.image(src=a_rot_coronal_img, width=a_rot_coronal_w)]),
+                    mo.vstack([mo.md(f"A sagittal x={a_sagittal_idx.value}"), mo.image(src=a_rot_sagittal_img, width=a_rot_sagittal_w)]),
                 ]
             ),
             mo.hstack(
                 [
-                    mo.vstack([mo.md(f"B axial z={b_axial_idx.value}"), mo.image(src=b_rot_axial, width=300)]),
-                    mo.vstack([mo.md(f"B coronal y={b_coronal_idx.value}"), mo.image(src=b_rot_coronal, width=300)]),
-                    mo.vstack([mo.md(f"B sagittal x={b_sagittal_idx.value}"), mo.image(src=b_rot_sagittal, width=300)]),
+                    mo.vstack([mo.md(f"B axial z={b_axial_idx.value}"), mo.image(src=b_rot_axial_img, width=b_rot_axial_w)]),
+                    mo.vstack([mo.md(f"B coronal y={b_coronal_idx.value}"), mo.image(src=b_rot_coronal_img, width=b_rot_coronal_w)]),
+                    mo.vstack([mo.md(f"B sagittal x={b_sagittal_idx.value}"), mo.image(src=b_rot_sagittal_img, width=b_rot_sagittal_w)]),
                 ]
             ),
         ]
