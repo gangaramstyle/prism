@@ -18,6 +18,7 @@ from torch.utils.data import IterableDataset
 
 from prism_ssl.config.schema import ScanRecord
 from prism_ssl.data.preflight import SmallScanError, load_nifti_scan, resolve_nifti_path
+from prism_ssl.data.sample_contract import build_dataset_item
 from prism_ssl.utils import append_jsonl, shard_worker
 
 
@@ -487,63 +488,17 @@ class ShardedScanDataset(IterableDataset):
 
                 sample_count += 1
 
-                def _tensorize(result: dict[str, Any]) -> dict[str, torch.Tensor]:
-                    patches = result["normalized_patches"]
-                    if patches.ndim == 2:
-                        patches = patches[np.newaxis, ...]
-                    patches = torch.from_numpy(patches[..., np.newaxis].astype(np.float32, copy=False))
-                    positions = torch.from_numpy(np.atleast_2d(result["relative_patch_centers_pt"]).astype(np.float32, copy=False))
-                    rotation = torch.from_numpy(np.asarray(result["rotation_matrix_ras"], dtype=np.float32))
-                    prism_center_pt = torch.from_numpy(np.asarray(result["prism_center_pt"], dtype=np.float32).reshape(3))
-                    rotation_degrees = torch.from_numpy(np.asarray(result["rotation_degrees"], dtype=np.float32).reshape(3))
-                    window_params = torch.from_numpy(np.asarray([result["wc"], result["ww"]], dtype=np.float32))
-                    return {
-                        "patches": patches,
-                        "positions": positions,
-                        "rotation": rotation,
-                        "prism_center_pt": prism_center_pt,
-                        "rotation_degrees": rotation_degrees,
-                        "window_params": window_params,
-                    }
-
-                view_a = _tensorize(result_a)
-                view_b = _tensorize(result_b)
-                center_delta_mm = view_b["prism_center_pt"] - view_a["prism_center_pt"]
-                center_distance_mm = torch.linalg.norm(center_delta_mm, dim=0)
-                rotation_delta_deg = view_b["rotation_degrees"] - view_a["rotation_degrees"]
-                window_delta = view_b["window_params"] - view_a["window_params"]
-
-                yield {
-                    "patches": view_a["patches"],
-                    "positions": view_a["positions"],
-                    "rotation": view_a["rotation"],
-                    "prism_center_pt": view_a["prism_center_pt"],
-                    "rotation_degrees": view_a["rotation_degrees"],
-                    "window_params": view_a["window_params"],
-                    "patches_a": view_a["patches"],
-                    "positions_a": view_a["positions"],
-                    "rotation_a": view_a["rotation"],
-                    "prism_center_pt_a": view_a["prism_center_pt"],
-                    "rotation_degrees_a": view_a["rotation_degrees"],
-                    "window_params_a": view_a["window_params"],
-                    "patches_b": view_b["patches"],
-                    "positions_b": view_b["positions"],
-                    "rotation_b": view_b["rotation"],
-                    "prism_center_pt_b": view_b["prism_center_pt"],
-                    "rotation_degrees_b": view_b["rotation_degrees"],
-                    "window_params_b": view_b["window_params"],
-                    "center_delta_mm": center_delta_mm,
-                    "center_distance_mm": center_distance_mm,
-                    "rotation_delta_deg": rotation_delta_deg,
-                    "window_delta": window_delta,
-                    "scan_id": slot["scan_id"],
-                    "series_id": slot["series_id"],
-                    "replacement_completed_count_delta": events.completed,
-                    "replacement_failed_count_delta": events.failed,
-                    "replacement_wait_time_ms_delta": events.wait_ms,
-                    "attempted_series_delta": events.attempted_delta,
-                    "broken_series_delta": events.broken_delta,
-                    "replacement_requested": replacement_requested,
-                }
+                yield build_dataset_item(
+                    result_a=result_a,
+                    result_b=result_b,
+                    scan_id=str(slot["scan_id"]),
+                    series_id=str(slot["series_id"]),
+                    replacement_completed_count_delta=events.completed,
+                    replacement_failed_count_delta=events.failed,
+                    replacement_wait_time_ms_delta=events.wait_ms,
+                    attempted_series_delta=events.attempted_delta,
+                    broken_series_delta=events.broken_delta,
+                    replacement_requested=replacement_requested,
+                )
         finally:
             pool.cleanup()

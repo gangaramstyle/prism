@@ -159,6 +159,63 @@ def _euler_xyz_to_matrix(degrees_xyz: tuple[float, float, float]) -> np.ndarray:
     return rz @ ry @ rx
 
 
+def rotate_volume_about_center(
+    volume: np.ndarray,
+    center_vox: np.ndarray,
+    rotation_matrix: np.ndarray,
+    *,
+    interpolation_order: int = 1,
+    mode: str = "nearest",
+) -> np.ndarray:
+    """Rotate a 3D volume around an in-volume voxel center."""
+    vol = np.asarray(volume, dtype=np.float32)
+    if vol.ndim != 3:
+        raise ValueError(f"Expected 3D volume, got shape={vol.shape}")
+    center = np.asarray(center_vox, dtype=np.float64).reshape(-1)
+    rot = np.asarray(rotation_matrix, dtype=np.float64)
+    if center.size != 3 or rot.shape != (3, 3):
+        raise ValueError(
+            f"Invalid center/rotation shape: center={tuple(center.shape)} rotation={tuple(rot.shape)}"
+        )
+    rot_inv = np.linalg.inv(rot)
+    offset = center - rot_inv @ center
+    return ndimage.affine_transform(
+        vol,
+        rot_inv,
+        offset=offset,
+        order=int(interpolation_order),
+        mode=mode,
+    ).astype(np.float32, copy=False)
+
+
+def rotated_relative_points_to_voxel(
+    relative_points_pt: np.ndarray,
+    prism_center_vox: np.ndarray,
+    spacing_mm: np.ndarray,
+    *,
+    shape_vox: tuple[int, int, int] | np.ndarray | None = None,
+) -> np.ndarray:
+    """Convert rotated relative point coordinates (mm) back to voxel indices."""
+    rel = np.asarray(relative_points_pt, dtype=np.float32)
+    if rel.ndim != 2 or rel.shape[1] != 3:
+        raise ValueError(f"Expected relative_points_pt shape (N, 3), got {rel.shape}")
+    center_vox = np.asarray(prism_center_vox, dtype=np.float32).reshape(-1)
+    spacing = np.asarray(spacing_mm, dtype=np.float32).reshape(-1)
+    if center_vox.size != 3 or spacing.size != 3:
+        raise ValueError(
+            f"Invalid center/spacing shape: center={tuple(center_vox.shape)} spacing={tuple(spacing.shape)}"
+        )
+    center_pt = center_vox * spacing
+    points_pt = center_pt[np.newaxis, :] + rel
+    points_vox = np.rint(points_pt / spacing).astype(np.int64)
+    if shape_vox is not None:
+        upper = np.asarray(shape_vox, dtype=np.int64).reshape(-1)
+        if upper.size != 3:
+            raise ValueError(f"Invalid shape_vox shape: {tuple(upper.shape)}")
+        points_vox = np.clip(points_vox, 0, upper - 1)
+    return points_vox
+
+
 @dataclass
 class NiftiScan:
     data: np.ndarray

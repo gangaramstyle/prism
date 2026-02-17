@@ -10,14 +10,25 @@ with app.setup:
     import time
     from pathlib import Path
 
+    import altair as alt
     import marimo as mo
     import numpy as np
     import polars as pl
-    from scipy import ndimage
 
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-    from prism_ssl.data import infer_scan_geometry, load_catalog, load_nifti_scan, sample_scan_candidates
+    from prism_ssl.data import (
+        build_dataset_item,
+        collate_prism_batch,
+        compute_pair_targets,
+        infer_scan_geometry,
+        load_catalog,
+        load_nifti_scan,
+        rotate_volume_about_center,
+        rotated_relative_points_to_voxel,
+        sample_scan_candidates,
+        tensorize_sample_view,
+    )
 
     def window_to_rgb(slice_2d: np.ndarray, wc: float, ww: float) -> np.ndarray:
         ww_safe = max(float(ww), 1e-6)
@@ -95,41 +106,6 @@ with app.setup:
         grid = np.concatenate(row_tiles, axis=0)
         return ((grid + 1.0) * 0.5 * 255.0).clip(0, 255).astype(np.uint8)
 
-    def rotate_volume_about_center(volume: np.ndarray, center_vox: np.ndarray, rotation_matrix: np.ndarray) -> np.ndarray:
-        center = np.asarray(center_vox, dtype=np.float64)
-        r = np.asarray(rotation_matrix, dtype=np.float64)
-        r_inv = np.linalg.inv(r)
-        offset = center - r_inv @ center
-        return ndimage.affine_transform(
-            volume,
-            r_inv,
-            offset=offset,
-            order=1,
-            mode="nearest",
-        ).astype(np.float32, copy=False)
-
-    def rotated_patch_centers_vox(
-        relative_patch_centers_pt_rotated: np.ndarray,
-        prism_center_vox: np.ndarray,
-        spacing_mm: np.ndarray,
-        shape: tuple[int, int, int],
-    ) -> np.ndarray:
-        spacing = np.asarray(spacing_mm, dtype=np.float32)
-        center_vox = np.asarray(prism_center_vox, dtype=np.float32)
-        center_pt = center_vox * spacing
-        centers_pt = center_pt[np.newaxis, :] + np.asarray(relative_patch_centers_pt_rotated, dtype=np.float32)
-        centers_vox = np.rint(centers_pt / spacing).astype(np.int64)
-        upper = np.asarray(shape, dtype=np.int64) - 1
-        return np.clip(centers_vox, 0, upper)
-
-    def tensorize_like_training(view: dict[str, np.ndarray]) -> tuple[np.ndarray, np.ndarray]:
-        patches = np.asarray(view["normalized_patches"], dtype=np.float32)
-        if patches.ndim == 2:
-            patches = patches[np.newaxis, ...]
-        patches = patches[..., np.newaxis]
-        positions = np.atleast_2d(np.asarray(view["relative_patch_centers_pt"], dtype=np.float32))
-        return patches, positions
-
 
 @app.cell
 def _():
@@ -140,12 +116,12 @@ def _():
             """
 # Prism SSL Data Pipeline Sanity Notebook
 
-Goal: verify data correctness with the **same sampling path used in training**, but with manual controls for debugging.
+This notebook now uses the **same core sampling->tensor->label path as training**.
 
-- Step 1. Load scan + catalog metadata + inferred native orientation
-- Step 2. Set prism center/rotation/window for views A/B and inspect native + rotated overlays
-- Step 3. Inspect sampled patches and coordinate labels
-- Step 4. Inspect exact model input tensors (patches + relative positions)
+- Step 1. Load scan + metadata + orientation inference
+- Step 2. Generate A/B views with training sampler and inspect native/rotated overlays
+- Step 3. Inspect sampled patch coordinates and previews
+- Step 4. Inspect exact collated batch fields used by the train loop
 """
         )
     )
@@ -273,6 +249,73 @@ def _(geometry, patch_mm, resolved_nifti_path, scan, selected_row):
 
 
 @app.cell
+def _(scan):
+    hist_sample_points = mo.ui.slider(label="Histogram sample points", start=50000, stop=2000000, step=50000, value=500000)
+    hist_bins = mo.ui.slider(label="Histogram bins", start=32, stop=512, step=16, value=192)
+    clip_low_pct = mo.ui.slider(label="Clip low percentile", start=0.0, stop=10.0, step=0.5, value=0.5)
+    clip_high_pct = mo.ui.slider(label="Clip high percentile", start=90.0, stop=100.0, step=0.5, value=99.5)
+
+    mo.vstack(
+        [
+            mo.md("### Pixel Histogram (for WC/WW selection)"),
+            mo.hstack([hist_sample_points, hist_bins, clip_low_pct, clip_high_pct]),
+        ]
+    )
+    return clip_high_pct, clip_low_pct, hist_bins, hist_sample_points
+
+
+@app.cell
+def _(clip_high_pct, clip_low_pct, hist_bins, hist_sample_points, scan):
+    flat = np.asarray(scan.data, dtype=np.float32).reshape(-1)
+    n = int(hist_sample_points.value)
+    stride = max(int(flat.size // max(n, 1)), 1)
+    sampled = flat[::stride][:n]
+
+    low = float(clip_low_pct.value)
+    high = float(clip_high_pct.value)
+    mo.stop(low >= high, mo.callout("Clip low percentile must be < clip high percentile", kind="warn"))
+
+    p_low = float(np.percentile(sampled, low))
+    p_high = float(np.percentile(sampled, high))
+    clipped = np.clip(sampled, p_low, p_high)
+    hist, edges = np.histogram(clipped, bins=int(hist_bins.value))
+
+    bars = [
+        {"x0": float(edges[i]), "x1": float(edges[i + 1]), "count": int(hist[i])}
+        for i in range(len(hist))
+    ]
+    chart = (
+        alt.Chart(bars)
+        .mark_bar()
+        .encode(
+            x=alt.X("x0:Q", title="Intensity"),
+            x2="x1:Q",
+            y=alt.Y("count:Q", title="Voxel count"),
+        )
+        .properties(height=240)
+    )
+
+    suggested_wc = 0.5 * (p_low + p_high)
+    suggested_ww = max(p_high - p_low, 1.0)
+
+    mo.vstack(
+        [
+            mo.md(
+                f"""
+Sampled voxels: `{int(sampled.size):,}` of `{int(flat.size):,}`
+
+Suggested from selected percentile window:
+- `wc ~ {suggested_wc:.2f}`
+- `ww ~ {suggested_ww:.2f}`
+"""
+            ),
+            chart,
+        ]
+    )
+    return
+
+
+@app.cell
 def _(geometry, scan):
     n_patches = mo.ui.slider(label="n_patches", start=1, stop=2048, step=1, value=256)
     method = mo.ui.dropdown(options=["optimized_fused", "legacy_loop"], value="optimized_fused", label="Sampling method")
@@ -368,6 +411,7 @@ def _(
     sample_seed,
     sampling_radius_mm,
     scan,
+    selected_record,
 ):
     common = {
         "n_patches": int(n_patches.value),
@@ -405,22 +449,23 @@ def _(
             }
             view_b = scan.train_sample(seed=int(sample_seed.value) + 1, **common, **b_kwargs)
 
-    center_delta = np.asarray(view_b["prism_center_pt"] - view_a["prism_center_pt"], dtype=np.float32)
-    pair_labels = {
-        "center_delta_mm": center_delta,
-        "center_distance_mm": float(np.linalg.norm(center_delta)),
-        "rotation_delta_deg": np.asarray(view_b["rotation_degrees"] - view_a["rotation_degrees"], dtype=np.float32),
-        "window_delta": np.asarray(
-            [float(view_b["wc"] - view_a["wc"]), float(view_b["ww"] - view_a["ww"])],
-            dtype=np.float32,
-        ),
-    }
-    return pair_labels, view_a, view_b
+    view_a_t = tensorize_sample_view(view_a)
+    view_b_t = tensorize_sample_view(view_b)
+    pair_targets = compute_pair_targets(view_a_t, view_b_t)
+
+    dataset_item = build_dataset_item(
+        result_a=view_a,
+        result_b=view_b,
+        scan_id=str(selected_record.scan_id),
+        series_id=str(selected_record.series_id),
+    )
+
+    return dataset_item, pair_targets, view_a, view_b, view_a_t, view_b_t
 
 
 @app.cell
-def _(pair_labels, view_a, view_b):
-    summary = pl.DataFrame(
+def _(pair_targets, view_a, view_b):
+    step2_summary = pl.DataFrame(
         [
             {
                 "a_center_vox": tuple(int(v) for v in np.asarray(view_a["prism_center_vox"]).tolist()),
@@ -431,13 +476,13 @@ def _(pair_labels, view_a, view_b):
                 "b_center_mm": tuple(float(v) for v in np.asarray(view_b["prism_center_pt"]).tolist()),
                 "b_rotation_deg": tuple(float(v) for v in np.asarray(view_b["rotation_degrees"]).tolist()),
                 "b_window_wc_ww": (float(view_b["wc"]), float(view_b["ww"])),
-                "label_center_distance_mm": float(pair_labels["center_distance_mm"]),
-                "label_rotation_delta_deg": tuple(float(v) for v in pair_labels["rotation_delta_deg"].tolist()),
-                "label_window_delta": tuple(float(v) for v in pair_labels["window_delta"].tolist()),
+                "label_center_distance_mm": float(pair_targets["center_distance_mm"].item()),
+                "label_rotation_delta_deg": tuple(float(v) for v in pair_targets["rotation_delta_deg"].tolist()),
+                "label_window_delta": tuple(float(v) for v in pair_targets["window_delta"].tolist()),
             }
         ]
     )
-    mo.vstack([mo.md("### Step 2 Output (A/B prism settings and labels)"), summary])
+    mo.vstack([mo.md("### Step 2 Output (A/B prism settings and labels)"), step2_summary])
     return
 
 
@@ -460,9 +505,7 @@ def _(scan, view_a, view_b):
     mo.vstack(
         [
             mo.md("### Step 2 Visual Checks"),
-            mo.md(
-                "Slider grounding: `x` = Left→Right, `y` = Posterior→Anterior, `z` = Inferior→Superior."
-            ),
+            mo.md("Slider grounding: `x` = Left→Right, `y` = Posterior→Anterior, `z` = Inferior→Superior."),
             mo.hstack([a_axial_idx, a_coronal_idx, a_sagittal_idx]),
             mo.hstack([b_axial_idx, b_coronal_idx, b_sagittal_idx]),
             mo.hstack([max_points_overlay]),
@@ -484,17 +527,17 @@ def _(scan, view_a, view_b):
         rotation_matrix=np.asarray(view_b["rotation_matrix_ras"], dtype=np.float32),
     )
 
-    rot_centers_a = rotated_patch_centers_vox(
+    rot_centers_a = rotated_relative_points_to_voxel(
         np.asarray(view_a["relative_patch_centers_pt_rotated"], dtype=np.float32),
         np.asarray(view_a["prism_center_vox"], dtype=np.float32),
         scan.spacing,
-        scan.data.shape,
+        shape_vox=scan.data.shape,
     )
-    rot_centers_b = rotated_patch_centers_vox(
+    rot_centers_b = rotated_relative_points_to_voxel(
         np.asarray(view_b["relative_patch_centers_pt_rotated"], dtype=np.float32),
         np.asarray(view_b["prism_center_vox"], dtype=np.float32),
         scan.spacing,
-        scan.data.shape,
+        shape_vox=scan.data.shape,
     )
     return rot_a, rot_b, rot_centers_a, rot_centers_b
 
@@ -746,52 +789,45 @@ def _(coord_rows, coord_view, patch_mm, preview_cols, preview_patches, scan, vie
 
 
 @app.cell
-def _(view_a, view_b):
-    patches_a, positions_a = tensorize_like_training(view_a)
-    patches_b, positions_b = tensorize_like_training(view_b)
+def _(dataset_item):
+    batch = collate_prism_batch([dataset_item])
 
-    model_summary = pl.DataFrame(
+    step4_summary = pl.DataFrame(
         [
             {
-                "view": "A",
-                "patches_shape": str(tuple(int(v) for v in patches_a.shape)),
-                "patches_dtype": str(patches_a.dtype),
-                "positions_shape": str(tuple(int(v) for v in positions_a.shape)),
-                "positions_dtype": str(positions_a.dtype),
-                "positions_abs_max_mm": float(np.max(np.abs(positions_a))),
-            },
-            {
-                "view": "B",
-                "patches_shape": str(tuple(int(v) for v in patches_b.shape)),
-                "patches_dtype": str(patches_b.dtype),
-                "positions_shape": str(tuple(int(v) for v in positions_b.shape)),
-                "positions_dtype": str(positions_b.dtype),
-                "positions_abs_max_mm": float(np.max(np.abs(positions_b))),
-            },
+                "patches_a_shape": str(tuple(int(v) for v in batch["patches_a"].shape)),
+                "positions_a_shape": str(tuple(int(v) for v in batch["positions_a"].shape)),
+                "patches_b_shape": str(tuple(int(v) for v in batch["patches_b"].shape)),
+                "positions_b_shape": str(tuple(int(v) for v in batch["positions_b"].shape)),
+                "center_distance_mm_shape": str(tuple(int(v) for v in batch["center_distance_mm"].shape)),
+                "rotation_delta_deg_shape": str(tuple(int(v) for v in batch["rotation_delta_deg"].shape)),
+                "window_delta_shape": str(tuple(int(v) for v in batch["window_delta"].shape)),
+                "series_label": int(batch["series_label"][0].item()),
+            }
         ]
     )
 
+    pos_a = np.asarray(batch["positions_a"][0].cpu().numpy(), dtype=np.float32)
+    pos_b = np.asarray(batch["positions_b"][0].cpu().numpy(), dtype=np.float32)
+    n_preview = min(20, int(pos_a.shape[0]))
     pos_preview = pl.DataFrame(
         {
-            "idx": np.arange(min(20, int(positions_a.shape[0])), dtype=np.int64),
-            "A_x_mm": positions_a[:20, 0],
-            "A_y_mm": positions_a[:20, 1],
-            "A_z_mm": positions_a[:20, 2],
-            "B_x_mm": positions_b[:20, 0],
-            "B_y_mm": positions_b[:20, 1],
-            "B_z_mm": positions_b[:20, 2],
+            "idx": np.arange(n_preview, dtype=np.int64),
+            "A_x_mm": pos_a[:n_preview, 0],
+            "A_y_mm": pos_a[:n_preview, 1],
+            "A_z_mm": pos_a[:n_preview, 2],
+            "B_x_mm": pos_b[:n_preview, 0],
+            "B_y_mm": pos_b[:n_preview, 1],
+            "B_z_mm": pos_b[:n_preview, 2],
         }
     )
 
     mo.vstack(
         [
-            mo.md("## Step 4: Model Inputs (exact training tensor contract)"),
-            mo.callout(
-                "Current model path uses linear position projection (`pos_proj`) in the encoder; RoPE is not active in this codebase.",
-                kind="info",
-            ),
-            model_summary,
-            mo.md("First 20 relative position vectors (mm)"),
+            mo.md("## Step 4: Model Inputs (exact training batch contract)"),
+            mo.callout("These tensors are created via shared `build_dataset_item` + `collate_prism_batch`, same path as training.", kind="info"),
+            step4_summary,
+            mo.md("First 20 relative position vectors from collated batch"),
             pos_preview,
         ]
     )

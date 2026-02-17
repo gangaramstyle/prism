@@ -3,7 +3,12 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from prism_ssl.data.preflight import NiftiScan, infer_scan_geometry
+from prism_ssl.data.preflight import (
+    NiftiScan,
+    infer_scan_geometry,
+    rotate_volume_about_center,
+    rotated_relative_points_to_voxel,
+)
 
 
 def _make_scan(seed: int = 123) -> NiftiScan:
@@ -135,3 +140,26 @@ def test_train_sample_exposes_rotated_relative_coordinates() -> None:
         rtol=0.0,
         atol=1e-5,
     )
+
+
+def test_rotate_volume_about_center_identity_is_stable() -> None:
+    rng = np.random.default_rng(123)
+    volume = rng.normal(size=(12, 10, 8)).astype(np.float32)
+    out = rotate_volume_about_center(
+        volume,
+        center_vox=np.asarray([6.0, 5.0, 4.0], dtype=np.float32),
+        rotation_matrix=np.eye(3, dtype=np.float32),
+    )
+    np.testing.assert_allclose(out, volume, rtol=0.0, atol=1e-5)
+
+
+def test_rotated_relative_points_to_voxel_rounds_and_clips() -> None:
+    rel = np.asarray([[1.0, 2.0, 4.0], [-2.0, -3.0, -4.0]], dtype=np.float32)
+    points = rotated_relative_points_to_voxel(
+        rel,
+        prism_center_vox=np.asarray([10.0, 10.0, 10.0], dtype=np.float32),
+        spacing_mm=np.asarray([1.0, 1.0, 2.0], dtype=np.float32),
+        shape_vox=(12, 20, 12),
+    )
+    expected = np.asarray([[11, 12, 11], [8, 7, 8]], dtype=np.int64)
+    np.testing.assert_array_equal(points, expected)
