@@ -19,6 +19,22 @@
 3. On cluster, set `CATALOG_PATH` first if needed:
    `export CATALOG_PATH=~/nvreason/data/pmbb_catalog.csv`
 
+### Betty runbook (recommended)
+Run notebooks on a compute allocation (not login nodes).
+
+1. Submit data-pipeline sanity notebook:
+   `cd ~/prism-ssl/templates && CATALOG_PATH=~/nvreason/data/pmbb_catalog.csv sbatch scripts/job_marimo_sanity_data.sh`
+2. Submit batch/label sanity notebook:
+   `cd ~/prism-ssl/templates && CATALOG_PATH=~/nvreason/data/pmbb_catalog.csv sbatch scripts/job_marimo_sanity_batch.sh`
+3. Get node for a job:
+   `cd ~/prism-ssl/templates && squeue -j <jobid> -o "%.18i %.8T %N"`
+4. Tunnel from local machine (replace `<node>`):
+   - data notebook (port 2718): `ssh -L 2718:<node>:2718 gangaram@login.betty.parcc.upenn.edu`
+   - batch notebook (port 2719): `ssh -L 2719:<node>:2719 gangaram@login.betty.parcc.upenn.edu`
+5. Open in browser:
+   - data notebook: `http://localhost:2718`
+   - batch notebook: `http://localhost:2719`
+
 ## Required runtime policies
 - W&B online logging.
 - `/tmp/$USER` for heavy transient files.
