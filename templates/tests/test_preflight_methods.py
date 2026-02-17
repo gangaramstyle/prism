@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from prism_ssl.data.preflight import NiftiScan
+from prism_ssl.data.preflight import NiftiScan, infer_scan_geometry
 
 
 def _make_scan(seed: int = 123) -> NiftiScan:
@@ -80,3 +80,58 @@ def test_train_sample_manual_overrides_are_respected() -> None:
     assert result["wc"] == 50.0
     assert result["ww"] == 250.0
     assert 0.0 < result["sampling_radius_mm"] <= 12.0
+
+
+def test_infer_scan_geometry_prefers_spacing_for_thin_axis() -> None:
+    geom = infer_scan_geometry(shape_vox=(512, 512, 233), spacing_mm=(0.810546875, 0.810546875, 2.0))
+    assert geom.thin_axis == 2
+    assert geom.acquisition_plane == "axial"
+    assert geom.baseline_rotation_degrees == (0.0, 0.0, 0.0)
+    assert geom.inference_reason == "largest_spacing_mm"
+
+
+def test_patch_shape_uses_geometry_thin_axis() -> None:
+    data = np.zeros((64, 64, 29), dtype=np.float32)
+    scan = NiftiScan(
+        data=data,
+        affine=np.eye(4, dtype=np.float32),
+        spacing=np.asarray([0.810546875, 0.810546875, 2.0], dtype=np.float32),
+        modality="CT",
+        base_patch_mm=64.0,
+        robust_median=0.0,
+        robust_std=1.0,
+        robust_low=-1.0,
+        robust_high=1.0,
+    )
+    assert tuple(int(v) for v in scan.patch_shape_vox.tolist()) == (79, 79, 2)
+
+
+def test_train_sample_exposes_rotated_relative_coordinates() -> None:
+    scan = _make_scan(seed=7)
+    center = np.asarray([20, 30, 10], dtype=np.int64)
+    patch_centers = np.asarray(
+        [
+            [20, 30, 10],
+            [25, 31, 9],
+            [18, 28, 11],
+        ],
+        dtype=np.int64,
+    )
+    result = scan.train_sample(
+        3,
+        seed=11,
+        method="optimized_fused",
+        rotation_degrees=(15.0, -10.0, 5.0),
+        subset_center_vox=center,
+        patch_centers_vox=patch_centers,
+    )
+
+    rel = np.asarray(result["relative_patch_centers_pt"], dtype=np.float32)
+    rot = np.asarray(result["rotation_matrix_ras"], dtype=np.float32)
+    expected = (rot @ rel.T).T
+    np.testing.assert_allclose(
+        np.asarray(result["relative_patch_centers_pt_rotated"], dtype=np.float32),
+        expected,
+        rtol=0.0,
+        atol=1e-5,
+    )

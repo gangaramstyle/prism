@@ -30,6 +30,71 @@ class SmallScanError(RuntimeError):
     pass
 
 
+@dataclass(frozen=True)
+class ScanGeometry:
+    """Spacing/shape-derived orientation metadata for a canonical RAS volume."""
+
+    thin_axis: int
+    thin_axis_name: str
+    acquisition_plane: str
+    baseline_rotation_degrees: tuple[float, float, float]
+    shape_vox: tuple[int, int, int]
+    spacing_mm: tuple[float, float, float]
+    extent_mm: tuple[float, float, float]
+    inference_reason: str
+
+
+_AXIS_NAMES = ("x", "y", "z")
+_PLANE_BY_THIN_AXIS = {0: "sagittal", 1: "coronal", 2: "axial"}
+_BASELINE_ROTATION_BY_PLANE = {
+    "axial": (0.0, 0.0, 0.0),
+    "coronal": (90.0, 0.0, 0.0),
+    "sagittal": (0.0, -90.0, 0.0),
+}
+
+
+def infer_scan_geometry(
+    shape_vox: tuple[int, int, int] | np.ndarray,
+    spacing_mm: tuple[float, float, float] | np.ndarray,
+) -> ScanGeometry:
+    """Infer the native acquisition plane and thin axis from shape/spacing."""
+    shape = np.asarray(shape_vox, dtype=np.float32).reshape(-1)
+    spacing = np.asarray(spacing_mm, dtype=np.float32).reshape(-1)
+    if shape.size != 3 or spacing.size != 3:
+        raise ValueError(f"Expected 3D shape/spacing, got shape={tuple(shape.shape)} spacing={tuple(spacing.shape)}")
+    if np.any(shape <= 0) or np.any(spacing <= 0):
+        raise ValueError(f"Shape and spacing must be positive, got shape={shape} spacing={spacing}")
+
+    extent = shape * spacing
+    spacing_sorted = np.sort(spacing)
+    spacing_gap = float(spacing_sorted[-1] / max(spacing_sorted[-2], 1e-6))
+
+    if spacing_gap >= 1.2:
+        thin_axis = int(np.argmax(spacing))
+        reason = "largest_spacing_mm"
+    else:
+        shape_sorted = np.sort(shape)
+        voxel_gap = float(shape_sorted[1] / max(shape_sorted[0], 1e-6))
+        if voxel_gap >= 1.2:
+            thin_axis = int(np.argmin(shape))
+            reason = "fewest_voxels"
+        else:
+            thin_axis = int(np.argmin(extent))
+            reason = "smallest_extent_mm"
+
+    plane = _PLANE_BY_THIN_AXIS[thin_axis]
+    return ScanGeometry(
+        thin_axis=thin_axis,
+        thin_axis_name=_AXIS_NAMES[thin_axis],
+        acquisition_plane=plane,
+        baseline_rotation_degrees=_BASELINE_ROTATION_BY_PLANE[plane],
+        shape_vox=tuple(int(v) for v in shape.tolist()),
+        spacing_mm=tuple(float(v) for v in spacing.tolist()),
+        extent_mm=tuple(float(v) for v in extent.tolist()),
+        inference_reason=reason,
+    )
+
+
 def _canonical_method_name(method: str) -> str:
     name = str(method)
     aliases = {
@@ -108,21 +173,13 @@ class NiftiScan:
     target_patch_size: int = 16
 
     @property
+    def geometry(self) -> ScanGeometry:
+        return infer_scan_geometry(self.data.shape, self.spacing)
+
+    @property
     def patch_mm(self) -> np.ndarray:
         mm = np.array([self.base_patch_mm, self.base_patch_mm, self.base_patch_mm], dtype=np.float32)
-        dims_mm = np.asarray(self.data.shape, dtype=np.float32) * self.spacing
-        if float(dims_mm.max() / max(dims_mm.min(), 1e-6)) < 1.5:
-            thin_axis = int(np.argmin(dims_mm))
-        else:
-            diffs = np.array(
-                [
-                    abs(dims_mm[0] - (dims_mm[1] + dims_mm[2]) / 2.0),
-                    abs(dims_mm[1] - (dims_mm[0] + dims_mm[2]) / 2.0),
-                    abs(dims_mm[2] - (dims_mm[0] + dims_mm[1]) / 2.0),
-                ],
-                dtype=np.float32,
-            )
-            thin_axis = int(np.argmax(diffs))
+        thin_axis = self.geometry.thin_axis
         mm[thin_axis] = self.base_patch_mm / 16.0
         return mm
 
@@ -334,6 +391,11 @@ class NiftiScan:
                 raise ValueError("rotation_degrees must be a tuple of length 3")
             rotation_tuple = tuple(float(v) for v in rotation_degrees)
         rotation_matrix = _euler_xyz_to_matrix(rotation_tuple)
+        relative_patch_centers_pt_rotated = (rotation_matrix @ relative_patch_centers_pt.T).T.astype(
+            np.float32,
+            copy=False,
+        )
+        geometry = self.geometry
 
         return {
             "method": method_name,
@@ -342,10 +404,16 @@ class NiftiScan:
             "patch_centers_pt": patch_centers_pt,
             "patch_centers_vox": centers_arr.astype(np.int64, copy=False),
             "relative_patch_centers_pt": relative_patch_centers_pt,
+            "relative_patch_centers_pt_rotated": relative_patch_centers_pt_rotated,
             "prism_center_pt": prism_center_pt,
             "prism_center_vox": prism_center.astype(np.int64, copy=False),
             "rotation_degrees": np.asarray(rotation_tuple, dtype=np.float32),
             "rotation_matrix_ras": rotation_matrix,
+            "native_thin_axis": int(geometry.thin_axis),
+            "native_thin_axis_name": str(geometry.thin_axis_name),
+            "native_acquisition_plane": str(geometry.acquisition_plane),
+            "native_baseline_rotation_degrees": np.asarray(geometry.baseline_rotation_degrees, dtype=np.float32),
+            "native_inference_reason": str(geometry.inference_reason),
             "wc": float(wc),
             "ww": float(ww),
             "w_min": float(w_min),

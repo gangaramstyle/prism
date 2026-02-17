@@ -5,8 +5,10 @@ from prism_ssl.data.collate import collate_prism_batch
 from prism_ssl.data.preflight import (
     NiftiLoadError,
     NiftiResolutionError,
+    ScanGeometry,
     SmallScanError,
     compute_robust_stats,
+    infer_scan_geometry,
     load_nifti_scan,
     resolve_nifti_path,
 )
@@ -19,8 +21,10 @@ __all__ = [
     "collate_prism_batch",
     "NiftiLoadError",
     "NiftiResolutionError",
+    "ScanGeometry",
     "SmallScanError",
     "compute_robust_stats",
+    "infer_scan_geometry",
     "load_nifti_scan",
     "resolve_nifti_path",
     "BrokenScanRateExceeded",
