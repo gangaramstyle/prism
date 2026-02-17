@@ -10,6 +10,7 @@ dependencies = [
   "scipy>=1.13",
   "polars>=1.0",
   "nibabel>=5.0",
+  "pillow>=10.0",
   "wandb>=0.18",
   "marimo>=0.11",
   "altair>=5.0",

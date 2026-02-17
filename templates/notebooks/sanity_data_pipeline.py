@@ -19,7 +19,7 @@ def _():
 
     from prism_ssl.data import load_catalog, load_nifti_scan, sample_scan_candidates
 
-    def _window_to_rgb(slice_2d: np.ndarray, wc: float, ww: float) -> np.ndarray:
+    def window_to_rgb(slice_2d: np.ndarray, wc: float, ww: float) -> np.ndarray:
         ww_safe = max(float(ww), 1e-6)
         w_min = float(wc) - 0.5 * ww_safe
         w_max = float(wc) + 0.5 * ww_safe
@@ -27,7 +27,7 @@ def _():
         gray = ((clipped - w_min) / max(w_max - w_min, 1e-6) * 255.0).astype(np.uint8)
         return np.stack([gray, gray, gray], axis=-1)
 
-    def _draw_cross(img: np.ndarray, row: int, col: int, color: tuple[int, int, int], radius: int = 3) -> None:
+    def draw_cross(img: np.ndarray, row: int, col: int, color: tuple[int, int, int], radius: int = 3) -> None:
         h, w = img.shape[:2]
         if row < 0 or row >= h or col < 0 or col >= w:
             return
@@ -38,7 +38,7 @@ def _():
         img[r0:r1, col] = np.array(color, dtype=np.uint8)
         img[row, c0:c1] = np.array(color, dtype=np.uint8)
 
-    def _overlay_slice(
+    def overlay_slice(
         volume: np.ndarray,
         axis: int,
         slice_idx: int,
@@ -52,17 +52,17 @@ def _():
         patches = np.asarray(patch_centers_vox, dtype=np.int64)
 
         if axis == 2:
-            base = _window_to_rgb(volume[:, :, slice_idx], wc, ww)
+            base = window_to_rgb(volume[:, :, slice_idx], wc, ww)
             center_rc = (int(center[0]), int(center[1]))
             mask = patches[:, 2] == int(slice_idx)
             patch_rc = [(int(p[0]), int(p[1])) for p in patches[mask][:max_points]]
         elif axis == 1:
-            base = _window_to_rgb(volume[:, slice_idx, :], wc, ww)
+            base = window_to_rgb(volume[:, slice_idx, :], wc, ww)
             center_rc = (int(center[0]), int(center[2]))
             mask = patches[:, 1] == int(slice_idx)
             patch_rc = [(int(p[0]), int(p[2])) for p in patches[mask][:max_points]]
         else:
-            base = _window_to_rgb(volume[slice_idx, :, :], wc, ww)
+            base = window_to_rgb(volume[slice_idx, :, :], wc, ww)
             center_rc = (int(center[1]), int(center[2]))
             mask = patches[:, 0] == int(slice_idx)
             patch_rc = [(int(p[1]), int(p[2])) for p in patches[mask][:max_points]]
@@ -71,10 +71,10 @@ def _():
         for row, col in patch_rc:
             if 0 <= row < out.shape[0] and 0 <= col < out.shape[1]:
                 out[row, col] = np.array([255, 220, 0], dtype=np.uint8)
-        _draw_cross(out, center_rc[0], center_rc[1], color=(255, 64, 64), radius=4)
+        draw_cross(out, center_rc[0], center_rc[1], color=(255, 64, 64), radius=4)
         return out, int(np.count_nonzero(mask))
 
-    def _patch_grid(patches: np.ndarray, max_patches: int = 36, cols: int = 6) -> np.ndarray:
+    def patch_grid(patches: np.ndarray, max_patches: int = 36, cols: int = 6) -> np.ndarray:
         arr = np.asarray(patches, dtype=np.float32)
         if arr.ndim == 4 and arr.shape[-1] == 1:
             arr = arr[..., 0]
@@ -94,7 +94,7 @@ def _():
         grid = ((grid + 1.0) * 0.5 * 255.0).clip(0, 255).astype(np.uint8)
         return grid
 
-    return Path, _overlay_slice, _patch_grid, load_catalog, load_nifti_scan, mo, np, os, pl, sample_scan_candidates, time
+    return Path, draw_cross, load_catalog, load_nifti_scan, mo, np, os, overlay_slice, patch_grid, pl, sample_scan_candidates, time, window_to_rgb
 
 
 @app.cell
@@ -404,7 +404,7 @@ def _(
 
 @app.cell
 def _(
-    _overlay_slice,
+    overlay_slice,
     a_axial_idx,
     a_coronal_idx,
     a_sagittal_idx,
@@ -417,7 +417,7 @@ def _(
     view_a,
     view_b,
 ):
-    a_axial, a_axial_n = _overlay_slice(
+    a_axial, a_axial_n = overlay_slice(
         scan.data,
         axis=2,
         slice_idx=int(a_axial_idx.value),
@@ -427,7 +427,7 @@ def _(
         ww=float(view_a["ww"]),
         max_points=int(max_points_overlay.value),
     )
-    a_coronal, a_coronal_n = _overlay_slice(
+    a_coronal, a_coronal_n = overlay_slice(
         scan.data,
         axis=1,
         slice_idx=int(a_coronal_idx.value),
@@ -437,7 +437,7 @@ def _(
         ww=float(view_a["ww"]),
         max_points=int(max_points_overlay.value),
     )
-    a_sagittal, a_sagittal_n = _overlay_slice(
+    a_sagittal, a_sagittal_n = overlay_slice(
         scan.data,
         axis=0,
         slice_idx=int(a_sagittal_idx.value),
@@ -448,7 +448,7 @@ def _(
         max_points=int(max_points_overlay.value),
     )
 
-    b_axial, b_axial_n = _overlay_slice(
+    b_axial, b_axial_n = overlay_slice(
         scan.data,
         axis=2,
         slice_idx=int(b_axial_idx.value),
@@ -458,7 +458,7 @@ def _(
         ww=float(view_b["ww"]),
         max_points=int(max_points_overlay.value),
     )
-    b_coronal, b_coronal_n = _overlay_slice(
+    b_coronal, b_coronal_n = overlay_slice(
         scan.data,
         axis=1,
         slice_idx=int(b_coronal_idx.value),
@@ -468,7 +468,7 @@ def _(
         ww=float(view_b["ww"]),
         max_points=int(max_points_overlay.value),
     )
-    b_sagittal, b_sagittal_n = _overlay_slice(
+    b_sagittal, b_sagittal_n = overlay_slice(
         scan.data,
         axis=0,
         slice_idx=int(b_sagittal_idx.value),
@@ -502,13 +502,13 @@ def _(
 
 
 @app.cell
-def _(_patch_grid, mo, view_a, view_b):
+def _(mo, patch_grid, view_a, view_b):
     n_a = int(view_a["normalized_patches"].shape[0])
     n_b = int(view_b["normalized_patches"].shape[0])
     show_a = min(36, max(1, n_a))
     show_b = min(36, max(1, n_b))
-    grid_a = _patch_grid(view_a["normalized_patches"], max_patches=show_a, cols=min(6, show_a))
-    grid_b = _patch_grid(view_b["normalized_patches"], max_patches=show_b, cols=min(6, show_b))
+    grid_a = patch_grid(view_a["normalized_patches"], max_patches=show_a, cols=min(6, show_a))
+    grid_b = patch_grid(view_b["normalized_patches"], max_patches=show_b, cols=min(6, show_b))
     mo.vstack(
         [
             mo.md("## Normalized Patch Grids (preview, each patch resized to 16x16)"),
