@@ -149,6 +149,20 @@ def test_train_sample_allows_target_patch_size_override() -> None:
     assert tuple(result["normalized_patches"].shape) == (5, 64, 64)
 
 
+def test_train_sample_allows_zero_sampling_radius() -> None:
+    scan = _make_scan(seed=21)
+    result = scan.train_sample(
+        6,
+        seed=8,
+        method="optimized_fused",
+        sampling_radius_mm=0.0,
+    )
+    assert result["sampling_radius_mm"] == 0.0
+    centers = np.asarray(result["patch_centers_vox"], dtype=np.int64)
+    center = np.asarray(result["prism_center_vox"], dtype=np.int64)
+    np.testing.assert_array_equal(centers, np.repeat(center[None, :], repeats=centers.shape[0], axis=0))
+
+
 def test_rotate_volume_about_center_identity_is_stable() -> None:
     rng = np.random.default_rng(123)
     volume = rng.normal(size=(12, 10, 8)).astype(np.float32)

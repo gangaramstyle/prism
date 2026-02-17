@@ -320,6 +320,8 @@ def _(geometry, patch_mm, resolved_nifti_path, scan, selected_row):
     ]
     meta_payload = {k: selected_row.get(k, "") for k in preferred_cols if k in selected_row}
     metadata_table = pl.DataFrame([meta_payload]) if meta_payload else pl.DataFrame([{"series_path": "metadata not found"}])
+    suggested_wc_default = 0.5 * (float(scan.robust_low) + float(scan.robust_high))
+    suggested_ww_default = max(float(scan.robust_high) - float(scan.robust_low), 1.0)
 
     mo.vstack(
         [
@@ -336,13 +338,14 @@ def _(geometry, patch_mm, resolved_nifti_path, scan, selected_row):
 - `thin_axis`: `{geometry.thin_axis_name}` (index `{geometry.thin_axis}`)
 - `baseline_rotation_hint_deg`: `{geometry.baseline_rotation_degrees}`
 - `orientation_inference`: `{geometry.inference_reason}`
+- `suggested_default_wc_ww`: `({suggested_wc_default:.2f}, {suggested_ww_default:.2f})` from robust percentile window
 """
             ),
             mo.md("#### Selected Series Metadata"),
             metadata_table,
         ]
     )
-    return
+    return suggested_wc_default, suggested_ww_default
 
 
 @app.cell
@@ -413,20 +416,20 @@ Suggested from selected percentile window:
 
 
 @app.cell
-def _(geometry, scan):
-    n_patches = mo.ui.slider(label="n_patches", start=1, stop=2048, step=1, value=256)
-    patch_output_px = mo.ui.slider(label="Patch output size (px)", start=16, stop=192, step=8, value=16)
+def _(geometry, scan, suggested_wc_default, suggested_ww_default):
+    n_patches = mo.ui.slider(label="n_patches", start=1, stop=2048, step=1, value=1)
+    patch_output_px = mo.ui.slider(label="Patch output size (px)", start=16, stop=192, step=8, value=64)
     method = mo.ui.dropdown(options=["optimized_fused", "legacy_loop"], value="optimized_fused", label="Sampling method")
     sample_mode = mo.ui.dropdown(options=["pipeline-random", "manual-debug"], value="manual-debug", label="Sampling mode")
     sample_seed = mo.ui.number(label="Sample seed", value=1234, step=1)
     lock_b_to_a = mo.ui.checkbox(label="Manual mode: make View B identical to View A", value=False)
 
     default_center = [int(v) // 2 for v in scan.data.shape]
-    default_wc = float(scan.robust_median)
-    default_ww = float(max(2.0 * scan.robust_std, 1.0))
+    default_wc = float(suggested_wc_default)
+    default_ww = float(suggested_ww_default)
     rot_base = tuple(float(v) for v in geometry.baseline_rotation_degrees)
 
-    sampling_radius_mm = mo.ui.slider(label="Manual sampling radius (mm)", start=1.0, stop=80.0, step=1.0, value=25.0)
+    sampling_radius_mm = mo.ui.slider(label="Manual sampling radius (mm)", start=0.0, stop=80.0, step=0.5, value=0.0)
 
     a_center_x = mo.ui.number(label="A center X", value=default_center[0], start=0, stop=int(scan.data.shape[0] - 1), step=1)
     a_center_y = mo.ui.number(label="A center Y", value=default_center[1], start=0, stop=int(scan.data.shape[1] - 1), step=1)

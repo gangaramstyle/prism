@@ -414,7 +414,7 @@ class NiftiScan:
         max_radius_mm = float(max_radius_vox * float(np.min(self.spacing)))
         target_radius = float(rng.uniform(20.0, 30.0)) if sampling_radius_mm is None else float(sampling_radius_mm)
         sampling_radius_mm = min(target_radius, max_radius_mm * 0.9)
-        sampling_radius_mm = max(sampling_radius_mm, 1.0)
+        sampling_radius_mm = max(sampling_radius_mm, 0.0)
         if subset_center_vox is None:
             prism_center = self._sample_center(rng, sampling_radius_mm)
         else:
