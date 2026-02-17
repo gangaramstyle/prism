@@ -251,6 +251,10 @@ class NiftiScan:
         method: str = "optimized_fused",
         wc: float | None = None,
         ww: float | None = None,
+        sampling_radius_mm: float | None = None,
+        rotation_degrees: tuple[float, float, float] | None = None,
+        subset_center_vox: np.ndarray | None = None,
+        patch_centers_vox: np.ndarray | None = None,
     ) -> dict[str, Any]:
         method_name = _canonical_method_name(method)
         rng = np.random.default_rng(seed)
@@ -264,20 +268,40 @@ class NiftiScan:
                 f"scan too small for patch extraction: shape={tuple(shape.tolist())} patch={tuple(self.patch_shape_vox.tolist())}"
             )
         max_radius_mm = float(max_radius_vox * float(np.min(self.spacing)))
-        target_radius = float(rng.uniform(20.0, 30.0))
+        target_radius = float(rng.uniform(20.0, 30.0)) if sampling_radius_mm is None else float(sampling_radius_mm)
         sampling_radius_mm = min(target_radius, max_radius_mm * 0.9)
         sampling_radius_mm = max(sampling_radius_mm, 1.0)
-        prism_center = self._sample_center(rng, sampling_radius_mm)
+        if subset_center_vox is None:
+            prism_center = self._sample_center(rng, sampling_radius_mm)
+        else:
+            prism_center = np.asarray(subset_center_vox, dtype=np.int64)
+            if prism_center.shape != (3,):
+                raise ValueError(f"subset_center_vox must have shape (3,), got {prism_center.shape}")
+            if np.any(prism_center < 0) or np.any(prism_center >= np.asarray(self.data.shape, dtype=np.int64)):
+                raise ValueError(
+                    f"subset_center_vox out of bounds: center={tuple(int(x) for x in prism_center.tolist())} "
+                    f"shape={tuple(int(x) for x in self.data.shape)}"
+                )
 
-        centers = []
-        for _ in range(int(n_patches)):
-            delta_mm = rng.uniform(-sampling_radius_mm, sampling_radius_mm, size=3)
-            if float(np.linalg.norm(delta_mm)) > sampling_radius_mm:
-                delta_mm = delta_mm * (sampling_radius_mm / max(np.linalg.norm(delta_mm), 1e-6))
-            center = prism_center + np.rint(delta_mm / self.spacing).astype(np.int64)
-            center = np.clip(center, 0, np.asarray(self.data.shape, dtype=np.int64) - 1)
-            centers.append(center)
-        centers_arr = np.asarray(centers, dtype=np.int64)
+        if patch_centers_vox is None:
+            centers = []
+            for _ in range(int(n_patches)):
+                delta_mm = rng.uniform(-sampling_radius_mm, sampling_radius_mm, size=3)
+                if float(np.linalg.norm(delta_mm)) > sampling_radius_mm:
+                    delta_mm = delta_mm * (sampling_radius_mm / max(np.linalg.norm(delta_mm), 1e-6))
+                center = prism_center + np.rint(delta_mm / self.spacing).astype(np.int64)
+                center = np.clip(center, 0, np.asarray(self.data.shape, dtype=np.int64) - 1)
+                centers.append(center)
+            centers_arr = np.asarray(centers, dtype=np.int64)
+        else:
+            centers_arr = np.asarray(patch_centers_vox, dtype=np.int64)
+            if centers_arr.ndim != 2 or centers_arr.shape[1] != 3:
+                raise ValueError(f"patch_centers_vox must have shape (N, 3), got {centers_arr.shape}")
+            if int(centers_arr.shape[0]) != int(n_patches):
+                raise ValueError(
+                    f"patch_centers_vox has {centers_arr.shape[0]} centers but n_patches={int(n_patches)}"
+                )
+            centers_arr = np.clip(centers_arr, 0, np.asarray(self.data.shape, dtype=np.int64) - 1)
 
         if method_name == "optimized_fused":
             raw_patches = self._extract_patches_optimized_fused(centers_arr)
@@ -298,21 +322,29 @@ class NiftiScan:
         patch_centers_pt = (centers_arr.astype(np.float32) * self.spacing.astype(np.float32)).astype(np.float32)
         relative_patch_centers_pt = patch_centers_pt - prism_center_pt
 
-        rotation_degrees = (
+        sampled_rotation_degrees = (
             float(rng.integers(-20, 21)),
             float(rng.integers(-20, 21)),
             float(rng.integers(-20, 21)),
         )
-        rotation_matrix = _euler_xyz_to_matrix(rotation_degrees)
+        if rotation_degrees is None:
+            rotation_tuple = sampled_rotation_degrees
+        else:
+            if len(rotation_degrees) != 3:
+                raise ValueError("rotation_degrees must be a tuple of length 3")
+            rotation_tuple = tuple(float(v) for v in rotation_degrees)
+        rotation_matrix = _euler_xyz_to_matrix(rotation_tuple)
 
         return {
             "method": method_name,
             "raw_patches": raw_patches,
             "normalized_patches": normalized.astype(np.float32, copy=False),
             "patch_centers_pt": patch_centers_pt,
+            "patch_centers_vox": centers_arr.astype(np.int64, copy=False),
             "relative_patch_centers_pt": relative_patch_centers_pt,
             "prism_center_pt": prism_center_pt,
-            "rotation_degrees": np.asarray(rotation_degrees, dtype=np.float32),
+            "prism_center_vox": prism_center.astype(np.int64, copy=False),
+            "rotation_degrees": np.asarray(rotation_tuple, dtype=np.float32),
             "rotation_matrix_ras": rotation_matrix,
             "wc": float(wc),
             "ww": float(ww),

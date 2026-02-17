@@ -48,3 +48,35 @@ def test_unknown_train_sample_method_raises() -> None:
     scan = _make_scan()
     with pytest.raises(ValueError):
         scan.train_sample(8, seed=1, method="unknown_method")
+
+
+def test_train_sample_manual_overrides_are_respected() -> None:
+    scan = _make_scan()
+    center = np.asarray([20, 30, 10], dtype=np.int64)
+    patch_centers = np.asarray(
+        [
+            [20, 30, 10],
+            [21, 31, 10],
+            [19, 29, 9],
+            [22, 27, 11],
+        ],
+        dtype=np.int64,
+    )
+    result = scan.train_sample(
+        4,
+        seed=99,
+        method="optimized_fused",
+        wc=50.0,
+        ww=250.0,
+        sampling_radius_mm=12.0,
+        rotation_degrees=(10.0, -5.0, 3.0),
+        subset_center_vox=center,
+        patch_centers_vox=patch_centers,
+    )
+
+    np.testing.assert_array_equal(result["prism_center_vox"], center)
+    np.testing.assert_array_equal(result["patch_centers_vox"], patch_centers)
+    np.testing.assert_allclose(result["rotation_degrees"], np.asarray([10.0, -5.0, 3.0], dtype=np.float32))
+    assert result["wc"] == 50.0
+    assert result["ww"] == 250.0
+    assert 0.0 < result["sampling_radius_mm"] <= 12.0

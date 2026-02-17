@@ -11,6 +11,14 @@
 1. Run `bash scripts/setup_betty_uv.sh` once after clone/pull.
 2. Job scripts run a CUDA preflight (`torch.cuda.is_available()`) before training.
 
+## Marimo sanity notebooks
+1. Data pipeline sanity:
+   `uv run marimo edit notebooks/sanity_data_pipeline.py`
+2. Batch/label sanity:
+   `uv run marimo edit notebooks/sanity_batch_labels.py`
+3. On cluster, set `CATALOG_PATH` first if needed:
+   `export CATALOG_PATH=~/nvreason/data/pmbb_catalog.csv`
+
 ## Required runtime policies
 - W&B online logging.
 - `/tmp/$USER` for heavy transient files.
