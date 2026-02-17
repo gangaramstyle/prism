@@ -165,6 +165,44 @@ with app.setup:
         resized = np.asarray(Image.fromarray(arr).resize((int(width), int(dst_h)), resample=Image.BILINEAR))
         return resized, int(width)
 
+    def slice_mask(mask_volume: np.ndarray, axis: int, slice_idx: int) -> np.ndarray:
+        mask = np.asarray(mask_volume, dtype=bool)
+        if axis == 2:
+            return mask[:, :, slice_idx]
+        if axis == 1:
+            return mask[:, slice_idx, :]
+        if axis == 0:
+            return mask[slice_idx, :, :]
+        raise ValueError(f"Invalid axis={axis}")
+
+    def apply_valid_mask_policy(
+        image: np.ndarray,
+        valid_mask_2d: np.ndarray,
+        *,
+        policy: str,
+        pad_px: int,
+    ) -> np.ndarray:
+        arr = np.asarray(image, dtype=np.uint8).copy()
+        mask2d = np.asarray(valid_mask_2d, dtype=bool)
+        if mask2d.shape[:2] != arr.shape[:2]:
+            raise ValueError(f"Mask/image shape mismatch: mask={mask2d.shape} image={arr.shape}")
+
+        if policy in {"mask-invalid", "crop-to-valid"}:
+            arr[~mask2d] = np.array([0, 0, 0], dtype=np.uint8)
+        if policy != "crop-to-valid":
+            return arr
+
+        ys, xs = np.where(mask2d)
+        if ys.size == 0 or xs.size == 0:
+            return arr
+        h, w = arr.shape[:2]
+        pad = max(int(pad_px), 0)
+        y0 = max(int(ys.min()) - pad, 0)
+        y1 = min(int(ys.max()) + pad + 1, h)
+        x0 = max(int(xs.min()) - pad, 0)
+        x1 = min(int(xs.max()) + pad + 1, w)
+        return arr[y0:y1, x0:x1]
+
 
 @app.cell
 def _():
@@ -393,24 +431,25 @@ def _(geometry, scan):
     a_center_x = mo.ui.number(label="A center X", value=default_center[0], start=0, stop=int(scan.data.shape[0] - 1), step=1)
     a_center_y = mo.ui.number(label="A center Y", value=default_center[1], start=0, stop=int(scan.data.shape[1] - 1), step=1)
     a_center_z = mo.ui.number(label="A center Z", value=default_center[2], start=0, stop=int(scan.data.shape[2] - 1), step=1)
-    a_rot_x = mo.ui.slider(label="A rot X (deg)", start=-45, stop=45, step=1, value=int(rot_base[0]))
-    a_rot_y = mo.ui.slider(label="A rot Y (deg)", start=-45, stop=45, step=1, value=int(rot_base[1]))
-    a_rot_z = mo.ui.slider(label="A rot Z (deg)", start=-45, stop=45, step=1, value=int(rot_base[2]))
+    a_rot_x = mo.ui.slider(label="A rot X delta (deg)", start=-45, stop=45, step=1, value=0)
+    a_rot_y = mo.ui.slider(label="A rot Y delta (deg)", start=-45, stop=45, step=1, value=0)
+    a_rot_z = mo.ui.slider(label="A rot Z delta (deg)", start=-45, stop=45, step=1, value=0)
     a_wc = mo.ui.number(label="A WC", value=default_wc, step=1.0)
     a_ww = mo.ui.number(label="A WW", value=default_ww, start=1.0, step=1.0)
 
     b_center_x = mo.ui.number(label="B center X", value=default_center[0], start=0, stop=int(scan.data.shape[0] - 1), step=1)
     b_center_y = mo.ui.number(label="B center Y", value=default_center[1], start=0, stop=int(scan.data.shape[1] - 1), step=1)
     b_center_z = mo.ui.number(label="B center Z", value=default_center[2], start=0, stop=int(scan.data.shape[2] - 1), step=1)
-    b_rot_x = mo.ui.slider(label="B rot X (deg)", start=-45, stop=45, step=1, value=int(rot_base[0]))
-    b_rot_y = mo.ui.slider(label="B rot Y (deg)", start=-45, stop=45, step=1, value=int(rot_base[1]))
-    b_rot_z = mo.ui.slider(label="B rot Z (deg)", start=-45, stop=45, step=1, value=int(rot_base[2]))
+    b_rot_x = mo.ui.slider(label="B rot X delta (deg)", start=-45, stop=45, step=1, value=0)
+    b_rot_y = mo.ui.slider(label="B rot Y delta (deg)", start=-45, stop=45, step=1, value=0)
+    b_rot_z = mo.ui.slider(label="B rot Z delta (deg)", start=-45, stop=45, step=1, value=0)
     b_wc = mo.ui.number(label="B WC", value=default_wc, step=1.0)
     b_ww = mo.ui.number(label="B WW", value=default_ww, start=1.0, step=1.0)
 
     mo.vstack(
         [
             mo.md("## Step 2: Select Prism Center / Rotation / Window"),
+            mo.md(f"Native baseline rotation (deg): `{rot_base}`; sliders are delta from baseline."),
             mo.hstack([n_patches, patch_output_px, method, sample_mode, sample_seed, lock_b_to_a]),
             mo.hstack([sampling_radius_mm]),
             mo.md("### View A manual controls"),
@@ -465,6 +504,7 @@ def _(
     b_rot_z,
     b_wc,
     b_ww,
+    geometry,
     lock_b_to_a,
     method,
     n_patches,
@@ -480,6 +520,17 @@ def _(
         "target_patch_size": int(patch_output_px.value),
         "method": str(method.value),
     }
+    _rot_base = tuple(float(v) for v in geometry.baseline_rotation_degrees)
+    a_rotation_abs = (
+        float(_rot_base[0] + float(a_rot_x.value)),
+        float(_rot_base[1] + float(a_rot_y.value)),
+        float(_rot_base[2] + float(a_rot_z.value)),
+    )
+    b_rotation_abs = (
+        float(_rot_base[0] + float(b_rot_x.value)),
+        float(_rot_base[1] + float(b_rot_y.value)),
+        float(_rot_base[2] + float(b_rot_z.value)),
+    )
 
     if str(sample_mode.value) == "pipeline-random":
         view_a = scan.train_sample(seed=int(sample_seed.value) * 2, **common)
@@ -487,7 +538,7 @@ def _(
     else:
         a_kwargs = {
             "sampling_radius_mm": float(sampling_radius_mm.value),
-            "rotation_degrees": (float(a_rot_x.value), float(a_rot_y.value), float(a_rot_z.value)),
+            "rotation_degrees": a_rotation_abs,
             "subset_center_vox": np.asarray(
                 [int(a_center_x.value), int(a_center_y.value), int(a_center_z.value)],
                 dtype=np.int64,
@@ -502,7 +553,7 @@ def _(
         else:
             b_kwargs = {
                 "sampling_radius_mm": float(sampling_radius_mm.value),
-                "rotation_degrees": (float(b_rot_x.value), float(b_rot_y.value), float(b_rot_z.value)),
+                "rotation_degrees": b_rotation_abs,
                 "subset_center_vox": np.asarray(
                     [int(b_center_x.value), int(b_center_y.value), int(b_center_z.value)],
                     dtype=np.int64,
@@ -571,6 +622,12 @@ def _(scan, view_a, view_b):
         value="spacing-aware",
         label="Display aspect",
     )
+    rotated_invalid_policy = mo.ui.dropdown(
+        options=["crop-to-valid", "mask-invalid", "raw"],
+        value="crop-to-valid",
+        label="Rotated invalid voxels",
+    )
+    rotated_crop_pad_px = mo.ui.slider(label="Rotated crop padding (px)", start=0, stop=48, step=2, value=8)
     display_target_width = mo.ui.slider(label="Target display width (px)", start=180, stop=480, step=10, value=300)
     display_max_height = mo.ui.slider(label="Max display height (px)", start=140, stop=360, step=10, value=220)
 
@@ -580,7 +637,16 @@ def _(scan, view_a, view_b):
             mo.md("Slider grounding: `x` = Left→Right, `y` = Posterior→Anterior, `z` = Inferior→Superior."),
             mo.hstack([a_axial_idx, a_coronal_idx, a_sagittal_idx]),
             mo.hstack([b_axial_idx, b_coronal_idx, b_sagittal_idx]),
-            mo.hstack([max_points_overlay, display_aspect_mode, display_target_width, display_max_height]),
+            mo.hstack(
+                [
+                    max_points_overlay,
+                    display_aspect_mode,
+                    rotated_invalid_policy,
+                    rotated_crop_pad_px,
+                    display_target_width,
+                    display_max_height,
+                ]
+            ),
         ]
     )
     return (
@@ -594,6 +660,8 @@ def _(scan, view_a, view_b):
         display_max_height,
         display_target_width,
         max_points_overlay,
+        rotated_crop_pad_px,
+        rotated_invalid_policy,
     )
 
 
@@ -603,11 +671,34 @@ def _(scan, view_a, view_b):
         scan.data,
         center_vox=np.asarray(view_a["prism_center_vox"], dtype=np.float32),
         rotation_matrix=np.asarray(view_a["rotation_matrix_ras"], dtype=np.float32),
+        mode="constant",
     )
     rot_b = rotate_volume_about_center(
         scan.data,
         center_vox=np.asarray(view_b["prism_center_vox"], dtype=np.float32),
         rotation_matrix=np.asarray(view_b["rotation_matrix_ras"], dtype=np.float32),
+        mode="constant",
+    )
+    ones = np.ones_like(scan.data, dtype=np.float32)
+    rot_valid_mask_a = (
+        rotate_volume_about_center(
+            ones,
+            center_vox=np.asarray(view_a["prism_center_vox"], dtype=np.float32),
+            rotation_matrix=np.asarray(view_a["rotation_matrix_ras"], dtype=np.float32),
+            interpolation_order=0,
+            mode="constant",
+        )
+        > 0.5
+    )
+    rot_valid_mask_b = (
+        rotate_volume_about_center(
+            ones,
+            center_vox=np.asarray(view_b["prism_center_vox"], dtype=np.float32),
+            rotation_matrix=np.asarray(view_b["rotation_matrix_ras"], dtype=np.float32),
+            interpolation_order=0,
+            mode="constant",
+        )
+        > 0.5
     )
 
     rot_centers_a = rotated_relative_points_to_voxel(
@@ -622,7 +713,7 @@ def _(scan, view_a, view_b):
         scan.spacing,
         shape_vox=scan.data.shape,
     )
-    return rot_a, rot_b, rot_centers_a, rot_centers_b
+    return rot_a, rot_b, rot_centers_a, rot_centers_b, rot_valid_mask_a, rot_valid_mask_b
 
 
 @app.cell
@@ -630,6 +721,7 @@ def _(
     a_axial_idx,
     a_coronal_idx,
     a_sagittal_idx,
+    apply_valid_mask_policy,
     b_axial_idx,
     b_coronal_idx,
     b_sagittal_idx,
@@ -642,7 +734,12 @@ def _(
     rot_b,
     rot_centers_a,
     rot_centers_b,
+    rot_valid_mask_a,
+    rot_valid_mask_b,
+    rotated_crop_pad_px,
+    rotated_invalid_policy,
     scan,
+    slice_mask,
     view_a,
     view_b,
 ):
@@ -770,6 +867,45 @@ def _(
         max_points=int(max_points_overlay.value),
     )
     aspect_mode = str(display_aspect_mode.value)
+    invalid_policy = str(rotated_invalid_policy.value)
+    crop_pad = int(rotated_crop_pad_px.value)
+
+    a_rot_axial = apply_valid_mask_policy(
+        a_rot_axial,
+        slice_mask(rot_valid_mask_a, axis=2, slice_idx=int(a_axial_idx.value)),
+        policy=invalid_policy,
+        pad_px=crop_pad,
+    )
+    a_rot_coronal = apply_valid_mask_policy(
+        a_rot_coronal,
+        slice_mask(rot_valid_mask_a, axis=1, slice_idx=int(a_coronal_idx.value)),
+        policy=invalid_policy,
+        pad_px=crop_pad,
+    )
+    a_rot_sagittal = apply_valid_mask_policy(
+        a_rot_sagittal,
+        slice_mask(rot_valid_mask_a, axis=0, slice_idx=int(a_sagittal_idx.value)),
+        policy=invalid_policy,
+        pad_px=crop_pad,
+    )
+    b_rot_axial = apply_valid_mask_policy(
+        b_rot_axial,
+        slice_mask(rot_valid_mask_b, axis=2, slice_idx=int(b_axial_idx.value)),
+        policy=invalid_policy,
+        pad_px=crop_pad,
+    )
+    b_rot_coronal = apply_valid_mask_policy(
+        b_rot_coronal,
+        slice_mask(rot_valid_mask_b, axis=1, slice_idx=int(b_coronal_idx.value)),
+        policy=invalid_policy,
+        pad_px=crop_pad,
+    )
+    b_rot_sagittal = apply_valid_mask_policy(
+        b_rot_sagittal,
+        slice_mask(rot_valid_mask_b, axis=0, slice_idx=int(b_sagittal_idx.value)),
+        policy=invalid_policy,
+        pad_px=crop_pad,
+    )
 
     def _display_ready(image: np.ndarray, axis: int) -> tuple[np.ndarray, int]:
         return fit_image_for_display(
