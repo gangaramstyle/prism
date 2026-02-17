@@ -434,25 +434,27 @@ def _(geometry, scan, suggested_wc_default, suggested_ww_default):
     a_center_x = mo.ui.number(label="A center X", value=default_center[0], start=0, stop=int(scan.data.shape[0] - 1), step=1)
     a_center_y = mo.ui.number(label="A center Y", value=default_center[1], start=0, stop=int(scan.data.shape[1] - 1), step=1)
     a_center_z = mo.ui.number(label="A center Z", value=default_center[2], start=0, stop=int(scan.data.shape[2] - 1), step=1)
-    a_rot_x = mo.ui.slider(label="A rot X delta (deg)", start=-45, stop=45, step=1, value=0)
-    a_rot_y = mo.ui.slider(label="A rot Y delta (deg)", start=-45, stop=45, step=1, value=0)
-    a_rot_z = mo.ui.slider(label="A rot Z delta (deg)", start=-45, stop=45, step=1, value=0)
+    a_rot_x = mo.ui.slider(label="A rot X (deg)", start=-180, stop=180, step=1, value=int(round(rot_base[0])))
+    a_rot_y = mo.ui.slider(label="A rot Y (deg)", start=-180, stop=180, step=1, value=int(round(rot_base[1])))
+    a_rot_z = mo.ui.slider(label="A rot Z (deg)", start=-180, stop=180, step=1, value=int(round(rot_base[2])))
     a_wc = mo.ui.number(label="A WC", value=default_wc, step=1.0)
     a_ww = mo.ui.number(label="A WW", value=default_ww, start=1.0, step=1.0)
 
     b_center_x = mo.ui.number(label="B center X", value=default_center[0], start=0, stop=int(scan.data.shape[0] - 1), step=1)
     b_center_y = mo.ui.number(label="B center Y", value=default_center[1], start=0, stop=int(scan.data.shape[1] - 1), step=1)
     b_center_z = mo.ui.number(label="B center Z", value=default_center[2], start=0, stop=int(scan.data.shape[2] - 1), step=1)
-    b_rot_x = mo.ui.slider(label="B rot X delta (deg)", start=-45, stop=45, step=1, value=0)
-    b_rot_y = mo.ui.slider(label="B rot Y delta (deg)", start=-45, stop=45, step=1, value=0)
-    b_rot_z = mo.ui.slider(label="B rot Z delta (deg)", start=-45, stop=45, step=1, value=0)
+    b_rot_x = mo.ui.slider(label="B rot X (deg)", start=-180, stop=180, step=1, value=int(round(rot_base[0])))
+    b_rot_y = mo.ui.slider(label="B rot Y (deg)", start=-180, stop=180, step=1, value=int(round(rot_base[1])))
+    b_rot_z = mo.ui.slider(label="B rot Z (deg)", start=-180, stop=180, step=1, value=int(round(rot_base[2])))
     b_wc = mo.ui.number(label="B WC", value=default_wc, step=1.0)
     b_ww = mo.ui.number(label="B WW", value=default_ww, start=1.0, step=1.0)
 
     mo.vstack(
         [
             mo.md("## Step 2: Select Prism Center / Rotation / Window"),
-            mo.md(f"Native baseline rotation (deg): `{rot_base}`; sliders are delta from baseline."),
+            mo.md(
+                f"Native orientation hint (deg): `{rot_base}`. Rotation sliders are absolute and default to this hint."
+            ),
             mo.hstack([n_patches, patch_output_px, method, sample_mode, sample_seed, lock_b_to_a]),
             mo.hstack([sampling_radius_mm]),
             mo.md("### View A manual controls"),
@@ -507,7 +509,6 @@ def _(
     b_rot_z,
     b_wc,
     b_ww,
-    geometry,
     lock_b_to_a,
     method,
     n_patches,
@@ -523,16 +524,15 @@ def _(
         "target_patch_size": int(patch_output_px.value),
         "method": str(method.value),
     }
-    _rot_base = tuple(float(v) for v in geometry.baseline_rotation_degrees)
     a_rotation_abs = (
-        float(_rot_base[0] + float(a_rot_x.value)),
-        float(_rot_base[1] + float(a_rot_y.value)),
-        float(_rot_base[2] + float(a_rot_z.value)),
+        float(a_rot_x.value),
+        float(a_rot_y.value),
+        float(a_rot_z.value),
     )
     b_rotation_abs = (
-        float(_rot_base[0] + float(b_rot_x.value)),
-        float(_rot_base[1] + float(b_rot_y.value)),
-        float(_rot_base[2] + float(b_rot_z.value)),
+        float(b_rot_x.value),
+        float(b_rot_y.value),
+        float(b_rot_z.value),
     )
 
     if str(sample_mode.value) == "pipeline-random":
