@@ -39,4 +39,4 @@ echo "Open in browser:"
 echo "  http://localhost:${MARIMO_PORT}"
 echo "============================================"
 
-uv run marimo edit "$NOTEBOOK_PATH" --mcp --no-token --port "$MARIMO_PORT" --host 0.0.0.0
+uv run marimo edit "$NOTEBOOK_PATH" --headless --no-token --port "$MARIMO_PORT" --host 0.0.0.0
