@@ -134,10 +134,10 @@ def test_train_sample_applies_native_hint_plus_rotation_augmentation() -> None:
     )  # +90 around X
     aug = np.asarray(result["rotation_augmentation_degrees"], dtype=np.float32)
     ax, ay, az = [float(v) for v in aug.tolist()]
-    # Compose as global-RAS augmentation: R_eff = R_aug @ R_hint
+    # Compose as global-RAS augmentation, then apply hint: R_eff = R_hint @ R_aug
     from prism_ssl.data.preflight import _euler_xyz_to_matrix
 
-    expected = _euler_xyz_to_matrix((ax, ay, az)) @ hint
+    expected = hint @ _euler_xyz_to_matrix((ax, ay, az))
     np.testing.assert_allclose(np.asarray(result["rotation_matrix_ras"], dtype=np.float32), expected, atol=1e-5)
 
 

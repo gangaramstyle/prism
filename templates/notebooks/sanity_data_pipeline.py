@@ -107,6 +107,15 @@ with app.setup:
         grid = np.concatenate(row_tiles, axis=0)
         return ((grid + 1.0) * 0.5 * 255.0).clip(0, 255).astype(np.uint8)
 
+    def euler_xyz_to_matrix(degrees_xyz: tuple[float, float, float]) -> np.ndarray:
+        x, y, z = [np.deg2rad(float(v)) for v in degrees_xyz]
+        cx, cy, cz = np.cos(x), np.cos(y), np.cos(z)
+        sx, sy, sz = np.sin(x), np.sin(y), np.sin(z)
+        rx = np.array([[1.0, 0.0, 0.0], [0.0, cx, -sx], [0.0, sx, cx]], dtype=np.float32)
+        ry = np.array([[cy, 0.0, sy], [0.0, 1.0, 0.0], [-sy, 0.0, cy]], dtype=np.float32)
+        rz = np.array([[cz, -sz, 0.0], [sz, cz, 0.0], [0.0, 0.0, 1.0]], dtype=np.float32)
+        return rz @ ry @ rx
+
     def _plane_axes_for_slice(axis: int) -> tuple[int, int]:
         if axis == 2:  # axial -> rows=x, cols=y
             return 0, 1
@@ -460,7 +469,7 @@ def _(geometry, scan, suggested_wc_default, suggested_ww_default):
         [
             mo.md("## Step 2: Select Prism Center / Rotation / Window"),
             mo.md(
-                f"Native orientation hint (deg): `{rot_base}`. Effective rotation uses global-RAS composition: `R_eff = R(rot-aug) @ R(hint)`."
+                f"Native orientation hint (deg): `{rot_base}`. Effective rotation uses global-RAS composition: `R_eff = R(hint) @ R(rot-aug)`."
             ),
             mo.hstack([n_patches, patch_output_px, method, sample_mode, sample_seed, lock_b_to_a, random_aug_max_deg]),
             mo.hstack([sampling_radius_mm]),
@@ -698,7 +707,64 @@ def _(scan, view_a, view_b):
 
 
 @app.cell
-def _(scan, view_a, view_b):
+def _(euler_xyz_to_matrix, scan, view_a, view_b):
+    aug_mat_a = euler_xyz_to_matrix(tuple(float(v) for v in np.asarray(view_a["rotation_augmentation_degrees"]).tolist()))
+    aug_mat_b = euler_xyz_to_matrix(tuple(float(v) for v in np.asarray(view_b["rotation_augmentation_degrees"]).tolist()))
+
+    rot_aug_only_a = rotate_volume_about_center(
+        scan.data,
+        center_vox=np.asarray(view_a["prism_center_vox"], dtype=np.float32),
+        rotation_matrix=aug_mat_a,
+        spacing_mm=scan.spacing,
+        mode="constant",
+    )
+    rot_aug_only_b = rotate_volume_about_center(
+        scan.data,
+        center_vox=np.asarray(view_b["prism_center_vox"], dtype=np.float32),
+        rotation_matrix=aug_mat_b,
+        spacing_mm=scan.spacing,
+        mode="constant",
+    )
+    ones = np.ones_like(scan.data, dtype=np.float32)
+    rot_aug_only_valid_mask_a = (
+        rotate_volume_about_center(
+            ones,
+            center_vox=np.asarray(view_a["prism_center_vox"], dtype=np.float32),
+            rotation_matrix=aug_mat_a,
+            spacing_mm=scan.spacing,
+            interpolation_order=0,
+            mode="constant",
+        )
+        > 0.5
+    )
+    rot_aug_only_valid_mask_b = (
+        rotate_volume_about_center(
+            ones,
+            center_vox=np.asarray(view_b["prism_center_vox"], dtype=np.float32),
+            rotation_matrix=aug_mat_b,
+            spacing_mm=scan.spacing,
+            interpolation_order=0,
+            mode="constant",
+        )
+        > 0.5
+    )
+    rel_a = np.asarray(view_a["relative_patch_centers_pt"], dtype=np.float32)
+    rel_b = np.asarray(view_b["relative_patch_centers_pt"], dtype=np.float32)
+    rel_aug_a = (aug_mat_a @ rel_a.T).T.astype(np.float32, copy=False)
+    rel_aug_b = (aug_mat_b @ rel_b.T).T.astype(np.float32, copy=False)
+    rot_aug_only_centers_a = rotated_relative_points_to_voxel(
+        rel_aug_a,
+        np.asarray(view_a["prism_center_vox"], dtype=np.float32),
+        scan.spacing,
+        shape_vox=scan.data.shape,
+    )
+    rot_aug_only_centers_b = rotated_relative_points_to_voxel(
+        rel_aug_b,
+        np.asarray(view_b["prism_center_vox"], dtype=np.float32),
+        scan.spacing,
+        shape_vox=scan.data.shape,
+    )
+
     rot_a = rotate_volume_about_center(
         scan.data,
         center_vox=np.asarray(view_a["prism_center_vox"], dtype=np.float32),
@@ -713,7 +779,6 @@ def _(scan, view_a, view_b):
         spacing_mm=scan.spacing,
         mode="constant",
     )
-    ones = np.ones_like(scan.data, dtype=np.float32)
     rot_valid_mask_a = (
         rotate_volume_about_center(
             ones,
@@ -749,7 +814,20 @@ def _(scan, view_a, view_b):
         scan.spacing,
         shape_vox=scan.data.shape,
     )
-    return rot_a, rot_b, rot_centers_a, rot_centers_b, rot_valid_mask_a, rot_valid_mask_b
+    return (
+        rot_a,
+        rot_aug_only_a,
+        rot_aug_only_b,
+        rot_b,
+        rot_aug_only_centers_a,
+        rot_aug_only_centers_b,
+        rot_centers_a,
+        rot_centers_b,
+        rot_aug_only_valid_mask_a,
+        rot_aug_only_valid_mask_b,
+        rot_valid_mask_a,
+        rot_valid_mask_b,
+    )
 
 
 @app.cell
@@ -767,9 +845,15 @@ def _(
     fit_image_for_display,
     max_points_overlay,
     rot_a,
+    rot_aug_only_a,
+    rot_aug_only_b,
     rot_b,
+    rot_aug_only_centers_a,
+    rot_aug_only_centers_b,
     rot_centers_a,
     rot_centers_b,
+    rot_aug_only_valid_mask_a,
+    rot_aug_only_valid_mask_b,
     rot_valid_mask_a,
     rot_valid_mask_b,
     rotated_crop_pad_px,
@@ -841,6 +925,68 @@ def _(
         max_points=int(max_points_overlay.value),
     )
 
+    a_aug_axial, _ = overlay_slice(
+        rot_aug_only_a,
+        axis=2,
+        slice_idx=int(a_axial_idx.value),
+        center_vox=view_a["prism_center_vox"],
+        patch_centers_vox=rot_aug_only_centers_a,
+        wc=float(view_a["wc"]),
+        ww=float(view_a["ww"]),
+        max_points=int(max_points_overlay.value),
+    )
+    a_aug_coronal, _ = overlay_slice(
+        rot_aug_only_a,
+        axis=1,
+        slice_idx=int(a_coronal_idx.value),
+        center_vox=view_a["prism_center_vox"],
+        patch_centers_vox=rot_aug_only_centers_a,
+        wc=float(view_a["wc"]),
+        ww=float(view_a["ww"]),
+        max_points=int(max_points_overlay.value),
+    )
+    a_aug_sagittal, _ = overlay_slice(
+        rot_aug_only_a,
+        axis=0,
+        slice_idx=int(a_sagittal_idx.value),
+        center_vox=view_a["prism_center_vox"],
+        patch_centers_vox=rot_aug_only_centers_a,
+        wc=float(view_a["wc"]),
+        ww=float(view_a["ww"]),
+        max_points=int(max_points_overlay.value),
+    )
+
+    b_aug_axial, _ = overlay_slice(
+        rot_aug_only_b,
+        axis=2,
+        slice_idx=int(b_axial_idx.value),
+        center_vox=view_b["prism_center_vox"],
+        patch_centers_vox=rot_aug_only_centers_b,
+        wc=float(view_b["wc"]),
+        ww=float(view_b["ww"]),
+        max_points=int(max_points_overlay.value),
+    )
+    b_aug_coronal, _ = overlay_slice(
+        rot_aug_only_b,
+        axis=1,
+        slice_idx=int(b_coronal_idx.value),
+        center_vox=view_b["prism_center_vox"],
+        patch_centers_vox=rot_aug_only_centers_b,
+        wc=float(view_b["wc"]),
+        ww=float(view_b["ww"]),
+        max_points=int(max_points_overlay.value),
+    )
+    b_aug_sagittal, _ = overlay_slice(
+        rot_aug_only_b,
+        axis=0,
+        slice_idx=int(b_sagittal_idx.value),
+        center_vox=view_b["prism_center_vox"],
+        patch_centers_vox=rot_aug_only_centers_b,
+        wc=float(view_b["wc"]),
+        ww=float(view_b["ww"]),
+        max_points=int(max_points_overlay.value),
+    )
+
     a_rot_axial, _ = overlay_slice(
         rot_a,
         axis=2,
@@ -906,6 +1052,43 @@ def _(
     invalid_policy = str(rotated_invalid_policy.value)
     crop_pad = int(rotated_crop_pad_px.value)
 
+    a_aug_axial = apply_valid_mask_policy(
+        a_aug_axial,
+        slice_mask(rot_aug_only_valid_mask_a, axis=2, slice_idx=int(a_axial_idx.value)),
+        policy=invalid_policy,
+        pad_px=crop_pad,
+    )
+    a_aug_coronal = apply_valid_mask_policy(
+        a_aug_coronal,
+        slice_mask(rot_aug_only_valid_mask_a, axis=1, slice_idx=int(a_coronal_idx.value)),
+        policy=invalid_policy,
+        pad_px=crop_pad,
+    )
+    a_aug_sagittal = apply_valid_mask_policy(
+        a_aug_sagittal,
+        slice_mask(rot_aug_only_valid_mask_a, axis=0, slice_idx=int(a_sagittal_idx.value)),
+        policy=invalid_policy,
+        pad_px=crop_pad,
+    )
+    b_aug_axial = apply_valid_mask_policy(
+        b_aug_axial,
+        slice_mask(rot_aug_only_valid_mask_b, axis=2, slice_idx=int(b_axial_idx.value)),
+        policy=invalid_policy,
+        pad_px=crop_pad,
+    )
+    b_aug_coronal = apply_valid_mask_policy(
+        b_aug_coronal,
+        slice_mask(rot_aug_only_valid_mask_b, axis=1, slice_idx=int(b_coronal_idx.value)),
+        policy=invalid_policy,
+        pad_px=crop_pad,
+    )
+    b_aug_sagittal = apply_valid_mask_policy(
+        b_aug_sagittal,
+        slice_mask(rot_aug_only_valid_mask_b, axis=0, slice_idx=int(b_sagittal_idx.value)),
+        policy=invalid_policy,
+        pad_px=crop_pad,
+    )
+
     a_rot_axial = apply_valid_mask_policy(
         a_rot_axial,
         slice_mask(rot_valid_mask_a, axis=2, slice_idx=int(a_axial_idx.value)),
@@ -961,6 +1144,14 @@ def _(
     b_native_coronal_img, b_native_coronal_w = _display_ready(b_native_coronal, axis=1)
     b_native_sagittal_img, b_native_sagittal_w = _display_ready(b_native_sagittal, axis=0)
 
+    a_aug_axial_img, a_aug_axial_w = _display_ready(a_aug_axial, axis=2)
+    a_aug_coronal_img, a_aug_coronal_w = _display_ready(a_aug_coronal, axis=1)
+    a_aug_sagittal_img, a_aug_sagittal_w = _display_ready(a_aug_sagittal, axis=0)
+
+    b_aug_axial_img, b_aug_axial_w = _display_ready(b_aug_axial, axis=2)
+    b_aug_coronal_img, b_aug_coronal_w = _display_ready(b_aug_coronal, axis=1)
+    b_aug_sagittal_img, b_aug_sagittal_w = _display_ready(b_aug_sagittal, axis=0)
+
     a_rot_axial_img, a_rot_axial_w = _display_ready(a_rot_axial, axis=2)
     a_rot_coronal_img, a_rot_coronal_w = _display_ready(a_rot_coronal, axis=1)
     a_rot_sagittal_img, a_rot_sagittal_w = _display_ready(a_rot_sagittal, axis=0)
@@ -986,7 +1177,22 @@ def _(
                     mo.vstack([mo.md(f"B sagittal x={b_sagittal_idx.value}"), mo.image(src=b_native_sagittal_img, width=b_native_sagittal_w)]),
                 ]
             ),
-            mo.md("#### Rotated-space overlays (same centers/slices, rotated around prism center)"),
+            mo.md("#### Aug-rotation overlays (RAS-only, before applying hint)"),
+            mo.hstack(
+                [
+                    mo.vstack([mo.md(f"A axial z={a_axial_idx.value}"), mo.image(src=a_aug_axial_img, width=a_aug_axial_w)]),
+                    mo.vstack([mo.md(f"A coronal y={a_coronal_idx.value}"), mo.image(src=a_aug_coronal_img, width=a_aug_coronal_w)]),
+                    mo.vstack([mo.md(f"A sagittal x={a_sagittal_idx.value}"), mo.image(src=a_aug_sagittal_img, width=a_aug_sagittal_w)]),
+                ]
+            ),
+            mo.hstack(
+                [
+                    mo.vstack([mo.md(f"B axial z={b_axial_idx.value}"), mo.image(src=b_aug_axial_img, width=b_aug_axial_w)]),
+                    mo.vstack([mo.md(f"B coronal y={b_coronal_idx.value}"), mo.image(src=b_aug_coronal_img, width=b_aug_coronal_w)]),
+                    mo.vstack([mo.md(f"B sagittal x={b_sagittal_idx.value}"), mo.image(src=b_aug_sagittal_img, width=b_aug_sagittal_w)]),
+                ]
+            ),
+            mo.md("#### Rotated-space overlays (after hint + aug composition around prism center)"),
             mo.hstack(
                 [
                     mo.vstack([mo.md(f"A axial z={a_axial_idx.value}"), mo.image(src=a_rot_axial_img, width=a_rot_axial_w)]),

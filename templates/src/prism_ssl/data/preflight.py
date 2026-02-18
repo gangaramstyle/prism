@@ -560,8 +560,8 @@ class NiftiScan:
             aug_matrix = _euler_xyz_to_matrix(rotation_augmentation_tuple)
             if bool(apply_native_orientation_hint):
                 hint_matrix = _euler_xyz_to_matrix(hint_tuple)
-                # Global-RAS augmentation axes: apply augmentation in RAS frame.
-                rotation_matrix = aug_matrix @ hint_matrix
+                # Global-RAS augmentation axes, then reorient with native hint.
+                rotation_matrix = hint_matrix @ aug_matrix
             else:
                 rotation_matrix = aug_matrix
 
