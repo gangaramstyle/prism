@@ -60,10 +60,13 @@ with app.setup:
         ww: float,
         max_points: int = 400,
         patch_colors_rgb: np.ndarray | None = None,
+        reference_patch_centers_vox: np.ndarray | None = None,
+        reference_color_rgb: tuple[int, int, int] = (64, 224, 255),
     ) -> tuple[np.ndarray, int]:
         center = np.asarray(center_vox, dtype=np.int64)
         patches = np.asarray(patch_centers_vox, dtype=np.int64)
         patch_colors = None if patch_colors_rgb is None else np.asarray(patch_colors_rgb, dtype=np.uint8)
+        ref_patches = None if reference_patch_centers_vox is None else np.asarray(reference_patch_centers_vox, dtype=np.int64)
 
         if axis == 2:
             base = window_to_rgb(volume[:, :, slice_idx], wc, ww)
@@ -71,18 +74,36 @@ with app.setup:
             mask = patches[:, 2] == int(slice_idx)
             patch_indices = np.flatnonzero(mask)[:max_points]
             patch_rc = [(int(patches[i, 0]), int(patches[i, 1])) for i in patch_indices]
+            if ref_patches is not None:
+                ref_mask = ref_patches[:, 2] == int(slice_idx)
+                ref_indices = np.flatnonzero(ref_mask)[:max_points]
+                ref_rc = [(int(ref_patches[i, 0]), int(ref_patches[i, 1])) for i in ref_indices]
+            else:
+                ref_rc = []
         elif axis == 1:
             base = window_to_rgb(volume[:, slice_idx, :], wc, ww)
             center_rc = (int(center[0]), int(center[2]))
             mask = patches[:, 1] == int(slice_idx)
             patch_indices = np.flatnonzero(mask)[:max_points]
             patch_rc = [(int(patches[i, 0]), int(patches[i, 2])) for i in patch_indices]
+            if ref_patches is not None:
+                ref_mask = ref_patches[:, 1] == int(slice_idx)
+                ref_indices = np.flatnonzero(ref_mask)[:max_points]
+                ref_rc = [(int(ref_patches[i, 0]), int(ref_patches[i, 2])) for i in ref_indices]
+            else:
+                ref_rc = []
         else:
             base = window_to_rgb(volume[slice_idx, :, :], wc, ww)
             center_rc = (int(center[1]), int(center[2]))
             mask = patches[:, 0] == int(slice_idx)
             patch_indices = np.flatnonzero(mask)[:max_points]
             patch_rc = [(int(patches[i, 1]), int(patches[i, 2])) for i in patch_indices]
+            if ref_patches is not None:
+                ref_mask = ref_patches[:, 0] == int(slice_idx)
+                ref_indices = np.flatnonzero(ref_mask)[:max_points]
+                ref_rc = [(int(ref_patches[i, 1]), int(ref_patches[i, 2])) for i in ref_indices]
+            else:
+                ref_rc = []
 
         out = np.asarray(base, dtype=np.uint8).copy()
         for local_i, (row, col) in enumerate(patch_rc):
@@ -91,6 +112,9 @@ with app.setup:
                     out[row, col] = patch_colors[patch_indices[local_i]]
                 else:
                     out[row, col] = np.array([255, 220, 0], dtype=np.uint8)
+        for row, col in ref_rc:
+            if 0 <= row < out.shape[0] and 0 <= col < out.shape[1]:
+                draw_cross(out, row, col, color=reference_color_rgb, radius=2)
         draw_cross(out, center_rc[0], center_rc[1], color=(255, 64, 64), radius=4)
         return out, int(np.count_nonzero(mask))
 
@@ -434,7 +458,8 @@ Suggested from selected percentile window:
 
 @app.cell
 def _(geometry, scan, suggested_wc_default, suggested_ww_default):
-    n_patches = mo.ui.slider(label="n_patches", start=1, stop=2048, step=1, value=1)
+    patch_square_options = [k * k for k in range(1, 33)]
+    n_patches = mo.ui.dropdown(options=patch_square_options, value=16, label="n_patches (square)")
     patch_output_px = mo.ui.slider(label="Patch output size (px)", start=16, stop=192, step=8, value=64)
     method = mo.ui.dropdown(options=["optimized_fused", "legacy_loop"], value="optimized_fused", label="Sampling method")
     sample_mode = mo.ui.dropdown(options=["pipeline-random", "manual-debug"], value="manual-debug", label="Sampling mode")
@@ -458,7 +483,7 @@ def _(geometry, scan, suggested_wc_default, suggested_ww_default):
     default_ww = float(suggested_ww_default)
     rot_base = tuple(float(v) for v in geometry.baseline_rotation_degrees)
 
-    sampling_radius_mm = mo.ui.slider(label="Manual sampling radius (mm)", start=0.0, stop=80.0, step=0.5, value=0.0)
+    sampling_radius_mm = mo.ui.slider(label="Sampling radius (mm)", start=0.0, stop=80.0, step=0.5, value=50.0)
 
     a_center_x = mo.ui.number(label="A center X", value=default_center[0], start=0, stop=int(scan.data.shape[0] - 1), step=1)
     a_center_y = mo.ui.number(label="A center Y", value=default_center[1], start=0, stop=int(scan.data.shape[1] - 1), step=1)
@@ -584,8 +609,18 @@ def _(
     }
 
     if str(sample_mode.value) == "pipeline-random":
-        view_a = scan.train_sample(seed=int(sample_seed.value) * 2, **common, **shared_rotation_kwargs)
-        view_b = scan.train_sample(seed=int(sample_seed.value) * 2 + 1, **common, **shared_rotation_kwargs)
+        view_a = scan.train_sample(
+            seed=int(sample_seed.value) * 2,
+            sampling_radius_mm=float(sampling_radius_mm.value),
+            **common,
+            **shared_rotation_kwargs,
+        )
+        view_b = scan.train_sample(
+            seed=int(sample_seed.value) * 2 + 1,
+            sampling_radius_mm=float(sampling_radius_mm.value),
+            **common,
+            **shared_rotation_kwargs,
+        )
     else:
         a_kwargs = {
             "sampling_radius_mm": float(sampling_radius_mm.value),
@@ -963,6 +998,7 @@ def _(
         wc=float(view_a["wc"]),
         ww=float(view_a["ww"]),
         max_points=int(max_points_overlay.value),
+        reference_patch_centers_vox=np.asarray(view_a["patch_centers_vox"], dtype=np.int64),
     )
     a_aug_coronal, _ = overlay_slice(
         rot_aug_only_a,
@@ -973,6 +1009,7 @@ def _(
         wc=float(view_a["wc"]),
         ww=float(view_a["ww"]),
         max_points=int(max_points_overlay.value),
+        reference_patch_centers_vox=np.asarray(view_a["patch_centers_vox"], dtype=np.int64),
     )
     a_aug_sagittal, _ = overlay_slice(
         rot_aug_only_a,
@@ -983,6 +1020,7 @@ def _(
         wc=float(view_a["wc"]),
         ww=float(view_a["ww"]),
         max_points=int(max_points_overlay.value),
+        reference_patch_centers_vox=np.asarray(view_a["patch_centers_vox"], dtype=np.int64),
     )
 
     b_aug_axial, _ = overlay_slice(
@@ -994,6 +1032,7 @@ def _(
         wc=float(view_b["wc"]),
         ww=float(view_b["ww"]),
         max_points=int(max_points_overlay.value),
+        reference_patch_centers_vox=np.asarray(view_b["patch_centers_vox"], dtype=np.int64),
     )
     b_aug_coronal, _ = overlay_slice(
         rot_aug_only_b,
@@ -1004,6 +1043,7 @@ def _(
         wc=float(view_b["wc"]),
         ww=float(view_b["ww"]),
         max_points=int(max_points_overlay.value),
+        reference_patch_centers_vox=np.asarray(view_b["patch_centers_vox"], dtype=np.int64),
     )
     b_aug_sagittal, _ = overlay_slice(
         rot_aug_only_b,
@@ -1014,6 +1054,7 @@ def _(
         wc=float(view_b["wc"]),
         ww=float(view_b["ww"]),
         max_points=int(max_points_overlay.value),
+        reference_patch_centers_vox=np.asarray(view_b["patch_centers_vox"], dtype=np.int64),
     )
 
     a_rot_axial, _ = overlay_slice(
@@ -1206,7 +1247,7 @@ def _(
                     mo.vstack([mo.md(f"B sagittal x={b_sagittal_idx.value}"), mo.image(src=b_native_sagittal_img, width=b_native_sagittal_w)]),
                 ]
             ),
-            mo.md("#### Aug-rotation overlays (RAS-only, before applying hint)"),
+            mo.md("#### Aug-rotation overlays (RAS-only, before applying hint; cyan crosses = pre-rotation patch locations)"),
             mo.hstack(
                 [
                     mo.vstack([mo.md(f"A axial z={a_axial_idx.value}"), mo.image(src=a_aug_axial_img, width=a_aug_axial_w)]),
@@ -1248,15 +1289,14 @@ def _(n_patches):
     coord_rows = mo.ui.slider(label="Patch rows in coordinate table", start=1, stop=200, step=1, value=30)
     coord_view = mo.ui.dropdown(options=["A", "B"], value="A", label="Coordinate table view")
     coord_frame = mo.ui.dropdown(options=["ras", "aug", "final"], value="aug", label="Coordinate frame")
-    rgb_scale_mm = mo.ui.slider(label="RGB scale (mm)", start=5.0, stop=120.0, step=1.0, value=40.0)
 
     mo.vstack(
         [
             mo.md("## Step 3: Select/Inspect Patches"),
-            mo.hstack([preview_patches, preview_cols, coord_rows, coord_view, coord_frame, rgb_scale_mm]),
+            mo.hstack([preview_patches, preview_cols, coord_rows, coord_view, coord_frame]),
         ]
     )
-    return coord_frame, coord_rows, coord_view, preview_cols, preview_patches, rgb_scale_mm
+    return coord_frame, coord_rows, coord_view, preview_cols, preview_patches
 
 
 @app.cell
@@ -1269,7 +1309,7 @@ def _(
     patch_mm,
     preview_cols,
     preview_patches,
-    rgb_scale_mm,
+    sampling_radius_mm,
     scan,
     view_a,
     view_b,
@@ -1291,7 +1331,7 @@ def _(
     }
     rel_selected = frame_map[frame]
 
-    scale_mm = max(float(rgb_scale_mm.value), 1e-6)
+    scale_mm = max(float(sampling_radius_mm.value), 1e-6)
     rel_scaled = np.clip(rel_selected / scale_mm, -1.0, 1.0)
     rgb_u8 = np.rint((rel_scaled + 1.0) * 127.5).astype(np.uint8)
     color_hex = [f"#{int(r):02x}{int(g):02x}{int(b):02x}" for r, g, b in rgb_u8.tolist()]
