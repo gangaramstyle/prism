@@ -1372,45 +1372,77 @@ def _(
     debug_points = pl.DataFrame(
         {
             "patch_idx": np.arange(centers_vox.shape[0], dtype=np.int64),
-            "x_mm": rel_selected[:, 0],
-            "y_mm": rel_selected[:, 1],
-            "z_mm": rel_selected[:, 2],
+            "x_sel_mm": rel_selected[:, 0],
+            "y_sel_mm": rel_selected[:, 1],
+            "z_sel_mm": rel_selected[:, 2],
+            "x_orig_mm": rel_ras[:, 0],
+            "y_orig_mm": rel_ras[:, 1],
+            "z_orig_mm": rel_ras[:, 2],
             "color": color_hex,
         }
     )
-    axial_chart = (
+    axial_sel = (
         alt.Chart(debug_points)
         .mark_circle(size=45)
         .encode(
-            x=alt.X("x_mm:Q", title="x (mm)"),
-            y=alt.Y("y_mm:Q", title="y (mm)"),
+            x=alt.X("x_sel_mm:Q", title="x (mm)"),
+            y=alt.Y("y_sel_mm:Q", title="y (mm)"),
             color=alt.Color("color:N", scale=None),
-            tooltip=["patch_idx:Q", "x_mm:Q", "y_mm:Q", "z_mm:Q", "color:N"],
+            tooltip=["patch_idx:Q", "x_sel_mm:Q", "y_sel_mm:Q", "z_sel_mm:Q", "color:N"],
         )
-        .properties(title=f"{frame.upper()} frame: axial XY", width=280, height=240)
     )
-    coronal_chart = (
+    axial_orig = (
+        alt.Chart(debug_points)
+        .mark_point(shape="cross", color="#00e5ff", size=140, strokeWidth=2.0)
+        .encode(
+            x="x_orig_mm:Q",
+            y="y_orig_mm:Q",
+            tooltip=["patch_idx:Q", "x_orig_mm:Q", "y_orig_mm:Q", "z_orig_mm:Q"],
+        )
+    )
+    axial_chart = (axial_sel + axial_orig).properties(title=f"{frame.upper()} frame: axial XY", width=280, height=240)
+
+    coronal_sel = (
         alt.Chart(debug_points)
         .mark_circle(size=45)
         .encode(
-            x=alt.X("x_mm:Q", title="x (mm)"),
-            y=alt.Y("z_mm:Q", title="z (mm)"),
+            x=alt.X("x_sel_mm:Q", title="x (mm)"),
+            y=alt.Y("z_sel_mm:Q", title="z (mm)"),
             color=alt.Color("color:N", scale=None),
-            tooltip=["patch_idx:Q", "x_mm:Q", "y_mm:Q", "z_mm:Q", "color:N"],
+            tooltip=["patch_idx:Q", "x_sel_mm:Q", "y_sel_mm:Q", "z_sel_mm:Q", "color:N"],
         )
-        .properties(title=f"{frame.upper()} frame: coronal XZ", width=280, height=240)
     )
-    sagittal_chart = (
+    coronal_orig = (
+        alt.Chart(debug_points)
+        .mark_point(shape="cross", color="#00e5ff", size=140, strokeWidth=2.0)
+        .encode(
+            x="x_orig_mm:Q",
+            y="z_orig_mm:Q",
+            tooltip=["patch_idx:Q", "x_orig_mm:Q", "y_orig_mm:Q", "z_orig_mm:Q"],
+        )
+    )
+    coronal_chart = (coronal_sel + coronal_orig).properties(title=f"{frame.upper()} frame: coronal XZ", width=280, height=240)
+
+    sagittal_sel = (
         alt.Chart(debug_points)
         .mark_circle(size=45)
         .encode(
-            x=alt.X("y_mm:Q", title="y (mm)"),
-            y=alt.Y("z_mm:Q", title="z (mm)"),
+            x=alt.X("y_sel_mm:Q", title="y (mm)"),
+            y=alt.Y("z_sel_mm:Q", title="z (mm)"),
             color=alt.Color("color:N", scale=None),
-            tooltip=["patch_idx:Q", "x_mm:Q", "y_mm:Q", "z_mm:Q", "color:N"],
+            tooltip=["patch_idx:Q", "x_sel_mm:Q", "y_sel_mm:Q", "z_sel_mm:Q", "color:N"],
         )
-        .properties(title=f"{frame.upper()} frame: sagittal YZ", width=280, height=240)
     )
+    sagittal_orig = (
+        alt.Chart(debug_points)
+        .mark_point(shape="cross", color="#00e5ff", size=140, strokeWidth=2.0)
+        .encode(
+            x="y_orig_mm:Q",
+            y="z_orig_mm:Q",
+            tooltip=["patch_idx:Q", "x_orig_mm:Q", "y_orig_mm:Q", "z_orig_mm:Q"],
+        )
+    )
+    sagittal_chart = (sagittal_sel + sagittal_orig).properties(title=f"{frame.upper()} frame: sagittal YZ", width=280, height=240)
 
     center_vox = np.asarray(selected_view["prism_center_vox"], dtype=np.int64)
     center_color = rgb_u8
@@ -1480,6 +1512,7 @@ def _(
 - `patch_shape_vox` before resize: `{tuple(int(v) for v in scan.patch_shape_vox.tolist())}`
 - final per-patch tensor shape: `{tuple(int(v) for v in np.asarray(view_a["normalized_patches"]).shape[1:3])}`
 - Position debugger frame: `{frame}` (`rgb = normalized [x,y,z]` in selected frame; scale=`{scale_mm:.1f}mm`)
+- Position scatter markers: `circles = selected frame`, `cyan crosses = pre-rotation RAS positions`
 """
             ),
             mo.hstack(
