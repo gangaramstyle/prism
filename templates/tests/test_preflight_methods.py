@@ -123,7 +123,22 @@ def test_train_sample_applies_native_hint_plus_rotation_augmentation() -> None:
         result["rotation_augmentation_degrees"],
         np.asarray([5.0, -3.0, 2.0], dtype=np.float32),
     )
-    np.testing.assert_allclose(result["rotation_degrees"], np.asarray([95.0, -3.0, 2.0], dtype=np.float32))
+    np.testing.assert_allclose(result["rotation_degrees"], np.asarray([5.0, -3.0, 2.0], dtype=np.float32))
+    hint = np.asarray(
+        [
+            [1.0, 0.0, 0.0],
+            [0.0, 0.0, -1.0],
+            [0.0, 1.0, 0.0],
+        ],
+        dtype=np.float32,
+    )  # +90 around X
+    aug = np.asarray(result["rotation_augmentation_degrees"], dtype=np.float32)
+    ax, ay, az = [float(v) for v in aug.tolist()]
+    # Compose as global-RAS augmentation: R_eff = R_aug @ R_hint
+    from prism_ssl.data.preflight import _euler_xyz_to_matrix
+
+    expected = _euler_xyz_to_matrix((ax, ay, az)) @ hint
+    np.testing.assert_allclose(np.asarray(result["rotation_matrix_ras"], dtype=np.float32), expected, atol=1e-5)
 
 
 def test_train_sample_random_rotation_augmentation_is_bounded() -> None:

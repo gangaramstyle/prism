@@ -160,6 +160,28 @@ def _euler_xyz_to_matrix(degrees_xyz: tuple[float, float, float]) -> np.ndarray:
     return rz @ ry @ rx
 
 
+def _matrix_to_euler_xyz_degrees(matrix: np.ndarray) -> tuple[float, float, float]:
+    """Return one XYZ-Euler representation for a rotation matrix.
+
+    This is used for debugging/metadata only and is not used for training targets.
+    """
+    rot = np.asarray(matrix, dtype=np.float64)
+    if rot.shape != (3, 3):
+        raise ValueError(f"Expected rotation matrix shape (3, 3), got {rot.shape}")
+
+    sy = float(np.sqrt(rot[0, 0] * rot[0, 0] + rot[1, 0] * rot[1, 0]))
+    singular = sy < 1e-6
+    if not singular:
+        x = math.atan2(rot[2, 1], rot[2, 2])
+        y = math.atan2(-rot[2, 0], sy)
+        z = math.atan2(rot[1, 0], rot[0, 0])
+    else:
+        x = math.atan2(-rot[1, 2], rot[1, 1])
+        y = math.atan2(-rot[2, 0], sy)
+        z = 0.0
+    return (math.degrees(x), math.degrees(y), math.degrees(z))
+
+
 def rotate_volume_about_center(
     volume: np.ndarray,
     center_vox: np.ndarray,
@@ -515,13 +537,10 @@ class NiftiScan:
         if rotation_degrees is not None:
             if len(rotation_degrees) != 3:
                 raise ValueError("rotation_degrees must be a tuple of length 3")
-            rotation_tuple = tuple(float(v) for v in rotation_degrees)
-            if bool(apply_native_orientation_hint):
-                rotation_augmentation_tuple = tuple(
-                    float(rotation_tuple[i] - hint_tuple[i]) for i in range(3)
-                )
-            else:
-                rotation_augmentation_tuple = rotation_tuple
+            # Absolute override in canonical RAS space.
+            rotation_control_tuple = tuple(float(v) for v in rotation_degrees)
+            rotation_augmentation_tuple = rotation_control_tuple
+            rotation_matrix = _euler_xyz_to_matrix(rotation_control_tuple)
         else:
             if rotation_augmentation_degrees is None:
                 if seed is None:
@@ -537,13 +556,16 @@ class NiftiScan:
                     raise ValueError("rotation_augmentation_degrees must be a tuple of length 3")
                 rotation_augmentation_tuple = tuple(float(v) for v in rotation_augmentation_degrees)
 
+            rotation_control_tuple = rotation_augmentation_tuple
+            aug_matrix = _euler_xyz_to_matrix(rotation_augmentation_tuple)
             if bool(apply_native_orientation_hint):
-                rotation_tuple = tuple(
-                    float(hint_tuple[i] + rotation_augmentation_tuple[i]) for i in range(3)
-                )
+                hint_matrix = _euler_xyz_to_matrix(hint_tuple)
+                # Global-RAS augmentation axes: apply augmentation in RAS frame.
+                rotation_matrix = aug_matrix @ hint_matrix
             else:
-                rotation_tuple = rotation_augmentation_tuple
-        rotation_matrix = _euler_xyz_to_matrix(rotation_tuple)
+                rotation_matrix = aug_matrix
+
+        rotation_effective_tuple = _matrix_to_euler_xyz_degrees(rotation_matrix)
 
         if method_name == "optimized_fused":
             raw_patches = self._extract_patches_optimized_fused(
@@ -589,7 +611,8 @@ class NiftiScan:
             "prism_center_vox": prism_center.astype(np.int64, copy=False),
             "rotation_hint_degrees": np.asarray(hint_tuple, dtype=np.float32),
             "rotation_augmentation_degrees": np.asarray(rotation_augmentation_tuple, dtype=np.float32),
-            "rotation_degrees": np.asarray(rotation_tuple, dtype=np.float32),
+            "rotation_degrees": np.asarray(rotation_control_tuple, dtype=np.float32),
+            "rotation_effective_degrees": np.asarray(rotation_effective_tuple, dtype=np.float32),
             "rotation_matrix_ras": rotation_matrix,
             "native_thin_axis": int(geometry.thin_axis),
             "native_thin_axis_name": str(geometry.thin_axis_name),

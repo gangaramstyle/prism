@@ -460,7 +460,7 @@ def _(geometry, scan, suggested_wc_default, suggested_ww_default):
         [
             mo.md("## Step 2: Select Prism Center / Rotation / Window"),
             mo.md(
-                f"Native orientation hint (deg): `{rot_base}`. Effective rotation is computed in shared path as `hint + rot-aug`."
+                f"Native orientation hint (deg): `{rot_base}`. Effective rotation uses global-RAS composition: `R_eff = R(rot-aug) @ R(hint)`."
             ),
             mo.hstack([n_patches, patch_output_px, method, sample_mode, sample_seed, lock_b_to_a, random_aug_max_deg]),
             mo.hstack([sampling_radius_mm]),
@@ -606,7 +606,10 @@ def _(pair_targets, view_a, view_b):
                 "a_rotation_aug_deg": tuple(
                     float(v) for v in np.asarray(view_a["rotation_augmentation_degrees"]).tolist()
                 ),
-                "a_rotation_deg": tuple(float(v) for v in np.asarray(view_a["rotation_degrees"]).tolist()),
+                "a_rotation_control_deg": tuple(float(v) for v in np.asarray(view_a["rotation_degrees"]).tolist()),
+                "a_rotation_effective_deg": tuple(
+                    float(v) for v in np.asarray(view_a["rotation_effective_degrees"]).tolist()
+                ),
                 "a_window_wc_ww": (float(view_a["wc"]), float(view_a["ww"])),
                 "a_target_patch_size": int(view_a["target_patch_size"]),
                 "b_center_vox": tuple(int(v) for v in np.asarray(view_b["prism_center_vox"]).tolist()),
@@ -615,7 +618,10 @@ def _(pair_targets, view_a, view_b):
                 "b_rotation_aug_deg": tuple(
                     float(v) for v in np.asarray(view_b["rotation_augmentation_degrees"]).tolist()
                 ),
-                "b_rotation_deg": tuple(float(v) for v in np.asarray(view_b["rotation_degrees"]).tolist()),
+                "b_rotation_control_deg": tuple(float(v) for v in np.asarray(view_b["rotation_degrees"]).tolist()),
+                "b_rotation_effective_deg": tuple(
+                    float(v) for v in np.asarray(view_b["rotation_effective_degrees"]).tolist()
+                ),
                 "b_window_wc_ww": (float(view_b["wc"]), float(view_b["ww"])),
                 "b_target_patch_size": int(view_b["target_patch_size"]),
                 "label_center_distance_mm": float(pair_targets["center_distance_mm"].item()),
