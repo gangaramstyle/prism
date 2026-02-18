@@ -45,6 +45,7 @@ class ScanGeometry:
 
 
 _AXIS_NAMES = ("x", "y", "z")
+_RAS_AXIAL_AXIS = 2
 _PLANE_BY_THIN_AXIS = {0: "sagittal", 1: "coronal", 2: "axial"}
 _BASELINE_ROTATION_BY_PLANE = {
     "axial": (0.0, 0.0, 0.0),
@@ -251,8 +252,8 @@ class NiftiScan:
     @property
     def patch_mm(self) -> np.ndarray:
         mm = np.array([self.base_patch_mm, self.base_patch_mm, self.base_patch_mm], dtype=np.float32)
-        thin_axis = self.geometry.thin_axis
-        mm[thin_axis] = self.base_patch_mm / 16.0
+        # Sampling frame is always canonical RAS: axial baseline means z is thin.
+        mm[_RAS_AXIAL_AXIS] = self.base_patch_mm / 16.0
         return mm
 
     @property
@@ -308,9 +309,8 @@ class NiftiScan:
         if arr.ndim == 2:
             return arr
         if arr.ndim == 3:
-            thin_axis = int(np.argmin(arr.shape))
-            center_idx = int(arr.shape[thin_axis] // 2)
-            return np.take(arr, indices=center_idx, axis=thin_axis).astype(np.float32, copy=False)
+            center_idx = int(arr.shape[_RAS_AXIAL_AXIS] // 2)
+            return np.take(arr, indices=center_idx, axis=_RAS_AXIAL_AXIS).astype(np.float32, copy=False)
         raise SmallScanError(f"Unexpected patch rank: {arr.ndim}")
 
     def _resize_patch(self, patch_2d: np.ndarray) -> np.ndarray:
@@ -349,12 +349,7 @@ class NiftiScan:
         if arr.ndim != 4:
             raise SmallScanError(f"Unexpected patch batch rank: {arr.ndim}")
 
-        thin_axis = int(np.argmin(arr.shape[1:]))
-        center_idx = int(arr.shape[thin_axis + 1] // 2)
-        if thin_axis == 0:
-            return arr[:, center_idx, :, :]
-        if thin_axis == 1:
-            return arr[:, :, center_idx, :]
+        center_idx = int(arr.shape[_RAS_AXIAL_AXIS + 1] // 2)
         return arr[:, :, :, center_idx]
 
     def _sampling_offset_vectors_vox(
@@ -450,6 +445,7 @@ class NiftiScan:
         ww: float | None = None,
         sampling_radius_mm: float | None = None,
         rotation_degrees: tuple[float, float, float] | None = None,
+        native_hint_rotation_degrees: tuple[float, float, float] | None = None,
         rotation_augmentation_degrees: tuple[float, float, float] | None = None,
         apply_native_orientation_hint: bool = True,
         rotation_augmentation_max_degrees: float = 10.0,
@@ -506,7 +502,12 @@ class NiftiScan:
             centers_arr = np.clip(centers_arr, 0, np.asarray(self.data.shape, dtype=np.int64) - 1)
 
         geometry = self.geometry
-        hint_tuple = tuple(float(v) for v in geometry.baseline_rotation_degrees)
+        if native_hint_rotation_degrees is None:
+            hint_tuple = tuple(float(v) for v in geometry.baseline_rotation_degrees)
+        else:
+            if len(native_hint_rotation_degrees) != 3:
+                raise ValueError("native_hint_rotation_degrees must be a tuple of length 3")
+            hint_tuple = tuple(float(v) for v in native_hint_rotation_degrees)
 
         if rotation_degrees is not None and rotation_augmentation_degrees is not None:
             raise ValueError("Provide either rotation_degrees or rotation_augmentation_degrees, not both")

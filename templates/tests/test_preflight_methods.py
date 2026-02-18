@@ -31,7 +31,7 @@ def _make_scan(seed: int = 123) -> NiftiScan:
 
 def _make_coronal_scan(seed: int = 456) -> NiftiScan:
     rng = np.random.default_rng(seed)
-    data = rng.normal(size=(64, 16, 64)).astype(np.float32)
+    data = rng.normal(size=(64, 48, 64)).astype(np.float32)
     robust_low = float(np.percentile(data, 0.5))
     robust_high = float(np.percentile(data, 99.5))
     return NiftiScan(
@@ -160,6 +160,23 @@ def test_patch_shape_uses_geometry_thin_axis() -> None:
         robust_high=1.0,
     )
     assert tuple(int(v) for v in scan.patch_shape_vox.tolist()) == (79, 79, 2)
+
+
+def test_patch_shape_uses_ras_axial_axis_even_for_sagittal_native() -> None:
+    data = np.zeros((29, 128, 128), dtype=np.float32)
+    scan = NiftiScan(
+        data=data,
+        affine=np.eye(4, dtype=np.float32),
+        spacing=np.asarray([2.0, 0.8, 0.8], dtype=np.float32),
+        modality="CT",
+        base_patch_mm=64.0,
+        robust_median=0.0,
+        robust_std=1.0,
+        robust_low=-1.0,
+        robust_high=1.0,
+    )
+    # RAS-axial baseline: z stays the thin patch axis regardless of native plane inference.
+    assert tuple(int(v) for v in scan.patch_shape_vox.tolist()) == (32, 80, 5)
 
 
 def test_train_sample_exposes_rotated_relative_coordinates() -> None:
