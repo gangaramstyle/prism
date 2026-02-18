@@ -55,3 +55,11 @@ Use this when you want a cleaner subset for rotation-heavy pretraining.
    `cd ~/prism-ssl/templates && uv run python scripts/summarize_manifest.py --manifest-path results/manifests/pmbb_catalog_near_iso.csv --top-k 30 --output-dir results/manifests/near_iso_summary`
 5. Train using the new manifest:
    `cd ~/prism-ssl/templates && CATALOG_PATH=~/prism-ssl/templates/results/manifests/pmbb_catalog_near_iso.csv MODEL_NAME=vit_l BATCH_SIZE=64 N_PATCHES=1024 WORKERS=16 sbatch --cpus-per-task=30 scripts/job_train_prism_ssl.sh`
+
+### Parallel Build (Recommended for full catalog)
+1. Launch 8 shards (adjust array and `NUM_SHARDS` together):
+   `cd ~/prism-ssl/templates && CATALOG_PATH=~/nvreason/data/pmbb_catalog.csv OUTPUT_DIR=results/manifests/pmbb_catalog_near_iso_shards NUM_SHARDS=8 MAX_SPACING_RATIO=1.2 MAX_SPACING_MM=0 EXCLUDE_TIME_SERIES=1 sbatch --array=0-7 scripts/job_build_near_iso_manifest_array.sh`
+2. Merge shards:
+   `cd ~/prism-ssl/templates && SHARD_DIR=results/manifests/pmbb_catalog_near_iso_shards OUTPUT_PATH=results/manifests/pmbb_catalog_near_iso.csv REQUIRE_NUM_SHARDS=8 sbatch scripts/job_merge_near_iso_manifest_shards.sh`
+3. Summarize merged manifest:
+   `cd ~/prism-ssl/templates && uv run python scripts/summarize_manifest.py --manifest-path results/manifests/pmbb_catalog_near_iso.csv --top-k 30 --output-dir results/manifests/near_iso_summary`

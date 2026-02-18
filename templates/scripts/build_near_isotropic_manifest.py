@@ -16,6 +16,7 @@ from typing import Any
 
 import nibabel as nib
 import numpy as np
+import polars as pl
 
 import sys
 
@@ -62,6 +63,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--max-spacing-mm", default=0.0, type=float)
     p.add_argument("--max-rows", default=0, type=int)
     p.add_argument("--summary-path", default="", type=str)
+    p.add_argument("--num-shards", default=1, type=int, help="Total number of deterministic shards.")
+    p.add_argument("--shard-index", default=0, type=int, help="0-based shard index to process.")
     p.add_argument(
         "--exclude-time-series",
         action=argparse.BooleanOptionalAction,
@@ -77,11 +80,17 @@ def main() -> int:
     max_spacing_ratio = float(args.max_spacing_ratio)
     max_spacing_mm = float(args.max_spacing_mm)
     exclude_time_series = bool(args.exclude_time_series)
+    num_shards = int(args.num_shards)
+    shard_index = int(args.shard_index)
 
     if max_spacing_ratio <= 1.0:
         raise SystemExit(f"--max-spacing-ratio must be > 1.0, got {max_spacing_ratio}")
     if max_spacing_mm < 0.0:
         raise SystemExit(f"--max-spacing-mm must be >= 0.0, got {max_spacing_mm}")
+    if num_shards <= 0:
+        raise SystemExit(f"--num-shards must be > 0, got {num_shards}")
+    if shard_index < 0 or shard_index >= num_shards:
+        raise SystemExit(f"--shard-index must be in [0, {num_shards}), got {shard_index}")
 
     output_path = Path(args.output_path).expanduser().resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -91,6 +100,14 @@ def main() -> int:
     df = filter_nonempty_series_path(filter_modalities(df, modalities))
     if args.max_rows > 0:
         df = df.head(int(args.max_rows))
+    before_shard_filter = len(df)
+    if num_shards > 1:
+        df = (
+            df.with_columns(pl.col("series_path").cast(pl.Utf8).hash(seed=13).alias("_shard_h"))
+            .filter((pl.col("_shard_h") % num_shards) == shard_index)
+            .drop("_shard_h")
+        )
+    shard_filtered = before_shard_filter - len(df)
     before_ts_filter = len(df)
     if exclude_time_series:
         df = filter_likely_non_time_series(df)
@@ -117,6 +134,7 @@ def main() -> int:
         "total_rows_considered": 0,
         "rows_written": 0,
         "missing_or_bad_nifti": 0,
+        "filtered_by_other_shards": int(shard_filtered),
         "filtered_by_time_series_keywords": int(ts_keyword_filtered),
         "filtered_by_time_series_4d": 0,
         "filtered_by_spacing_ratio": 0,
@@ -180,6 +198,8 @@ def main() -> int:
         "max_spacing_mm": max_spacing_mm,
         "exclude_time_series": exclude_time_series,
         "max_rows": int(args.max_rows),
+        "num_shards": num_shards,
+        "shard_index": shard_index,
         "retained_fraction": (
             float(counters["rows_written"]) / float(counters["total_rows_considered"])
             if counters["total_rows_considered"] > 0
