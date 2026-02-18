@@ -378,6 +378,7 @@ class ShardedScanDataset(IterableDataset):
         broken_series_log_path: str,
         scratch_dir: str | None = None,
         pair_views: bool = True,
+        position_frame_for_model: str = "aug",
         apply_native_orientation_hint: bool = True,
         rotation_augmentation_max_degrees: float = 10.0,
     ) -> None:
@@ -396,6 +397,7 @@ class ShardedScanDataset(IterableDataset):
         self.broken_series_log_path = broken_series_log_path
         self.scratch_dir = scratch_dir
         self.pair_views = bool(pair_views)
+        self.position_frame_for_model = str(position_frame_for_model).strip().lower()
         self.apply_native_orientation_hint = bool(apply_native_orientation_hint)
         self.rotation_augmentation_max_degrees = float(rotation_augmentation_max_degrees)
 
@@ -502,6 +504,7 @@ class ShardedScanDataset(IterableDataset):
                     result_b=result_b,
                     scan_id=str(slot["scan_id"]),
                     series_id=str(slot["series_id"]),
+                    position_frame=self.position_frame_for_model,
                     replacement_completed_count_delta=events.completed,
                     replacement_failed_count_delta=events.failed,
                     replacement_wait_time_ms_delta=events.wait_ms,

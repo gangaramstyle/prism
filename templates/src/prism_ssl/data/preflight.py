@@ -530,6 +530,7 @@ class NiftiScan:
             if len(native_hint_rotation_degrees) != 3:
                 raise ValueError("native_hint_rotation_degrees must be a tuple of length 3")
             hint_tuple = tuple(float(v) for v in native_hint_rotation_degrees)
+        hint_matrix = _euler_xyz_to_matrix(hint_tuple)
 
         if rotation_degrees is not None and rotation_augmentation_degrees is not None:
             raise ValueError("Provide either rotation_degrees or rotation_augmentation_degrees, not both")
@@ -540,7 +541,8 @@ class NiftiScan:
             # Absolute override in canonical RAS space.
             rotation_control_tuple = tuple(float(v) for v in rotation_degrees)
             rotation_augmentation_tuple = rotation_control_tuple
-            rotation_matrix = _euler_xyz_to_matrix(rotation_control_tuple)
+            aug_matrix = _euler_xyz_to_matrix(rotation_control_tuple)
+            rotation_matrix = aug_matrix
         else:
             if rotation_augmentation_degrees is None:
                 if seed is None:
@@ -559,7 +561,6 @@ class NiftiScan:
             rotation_control_tuple = rotation_augmentation_tuple
             aug_matrix = _euler_xyz_to_matrix(rotation_augmentation_tuple)
             if bool(apply_native_orientation_hint):
-                hint_matrix = _euler_xyz_to_matrix(hint_tuple)
                 # Global-RAS augmentation axes, then reorient with native hint.
                 rotation_matrix = hint_matrix @ aug_matrix
             else:
@@ -592,8 +593,12 @@ class NiftiScan:
 
         prism_center_pt = (prism_center.astype(np.float32) * self.spacing.astype(np.float32)).astype(np.float32)
         patch_centers_pt = (centers_arr.astype(np.float32) * self.spacing.astype(np.float32)).astype(np.float32)
-        relative_patch_centers_pt = patch_centers_pt - prism_center_pt
-        relative_patch_centers_pt_rotated = (rotation_matrix @ relative_patch_centers_pt.T).T.astype(
+        relative_patch_centers_pt_ras = patch_centers_pt - prism_center_pt
+        relative_patch_centers_pt_aug = (aug_matrix @ relative_patch_centers_pt_ras.T).T.astype(
+            np.float32,
+            copy=False,
+        )
+        relative_patch_centers_pt_final = (rotation_matrix @ relative_patch_centers_pt_ras.T).T.astype(
             np.float32,
             copy=False,
         )
@@ -605,14 +610,19 @@ class NiftiScan:
             "target_patch_size": int(resolved_target_patch_size),
             "patch_centers_pt": patch_centers_pt,
             "patch_centers_vox": centers_arr.astype(np.int64, copy=False),
-            "relative_patch_centers_pt": relative_patch_centers_pt,
-            "relative_patch_centers_pt_rotated": relative_patch_centers_pt_rotated,
+            "relative_patch_centers_pt": relative_patch_centers_pt_ras,
+            "relative_patch_centers_pt_ras": relative_patch_centers_pt_ras,
+            "relative_patch_centers_pt_aug": relative_patch_centers_pt_aug,
+            "relative_patch_centers_pt_final": relative_patch_centers_pt_final,
+            "relative_patch_centers_pt_rotated": relative_patch_centers_pt_final,
             "prism_center_pt": prism_center_pt,
             "prism_center_vox": prism_center.astype(np.int64, copy=False),
             "rotation_hint_degrees": np.asarray(hint_tuple, dtype=np.float32),
             "rotation_augmentation_degrees": np.asarray(rotation_augmentation_tuple, dtype=np.float32),
             "rotation_degrees": np.asarray(rotation_control_tuple, dtype=np.float32),
             "rotation_effective_degrees": np.asarray(rotation_effective_tuple, dtype=np.float32),
+            "rotation_matrix_hint_ras": hint_matrix.astype(np.float32, copy=False),
+            "rotation_matrix_aug_ras": aug_matrix.astype(np.float32, copy=False),
             "rotation_matrix_ras": rotation_matrix,
             "native_thin_axis": int(geometry.thin_axis),
             "native_thin_axis_name": str(geometry.thin_axis_name),

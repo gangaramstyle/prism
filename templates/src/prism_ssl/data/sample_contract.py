@@ -8,14 +8,32 @@ import numpy as np
 import torch
 
 
-def tensorize_sample_view(result: Mapping[str, Any]) -> dict[str, torch.Tensor]:
+def _resolve_position_key(position_frame: str) -> str:
+    frame = str(position_frame).strip().lower()
+    mapping = {
+        "ras": "relative_patch_centers_pt_ras",
+        "aug": "relative_patch_centers_pt_aug",
+        "final": "relative_patch_centers_pt_final",
+    }
+    if frame not in mapping:
+        raise ValueError(f"position_frame must be one of {sorted(mapping.keys())}, got '{position_frame}'")
+    return mapping[frame]
+
+
+def tensorize_sample_view(result: Mapping[str, Any], *, position_frame: str = "aug") -> dict[str, torch.Tensor]:
     """Convert a `train_sample` result to tensor fields used by the training loop."""
     patches_np = np.asarray(result["normalized_patches"], dtype=np.float32)
     if patches_np.ndim == 2:
         patches_np = patches_np[np.newaxis, ...]
     patches = torch.from_numpy(np.ascontiguousarray(patches_np[..., np.newaxis], dtype=np.float32))
 
-    positions_np = np.asarray(result["relative_patch_centers_pt"], dtype=np.float32)
+    key = _resolve_position_key(position_frame)
+    if key in result:
+        positions_source = result[key]
+    else:
+        # Backward compatibility for older sample payloads.
+        positions_source = result["relative_patch_centers_pt"]
+    positions_np = np.asarray(positions_source, dtype=np.float32)
     positions = torch.from_numpy(np.ascontiguousarray(np.atleast_2d(positions_np), dtype=np.float32))
     rotation = torch.from_numpy(np.asarray(result["rotation_matrix_ras"], dtype=np.float32))
     prism_center_pt = torch.from_numpy(np.asarray(result["prism_center_pt"], dtype=np.float32).reshape(3))
@@ -55,6 +73,7 @@ def build_dataset_item(
     result_b: Mapping[str, Any],
     scan_id: str,
     series_id: str,
+    position_frame: str = "aug",
     replacement_completed_count_delta: int = 0,
     replacement_failed_count_delta: int = 0,
     replacement_wait_time_ms_delta: float = 0.0,
@@ -63,8 +82,8 @@ def build_dataset_item(
     replacement_requested: bool = False,
 ) -> dict[str, Any]:
     """Build one dataset sample dict matching the collate contract."""
-    view_a = tensorize_sample_view(result_a)
-    view_b = tensorize_sample_view(result_b)
+    view_a = tensorize_sample_view(result_a, position_frame=position_frame)
+    view_b = tensorize_sample_view(result_b, position_frame=position_frame)
     pair = compute_pair_targets(view_a, view_b)
 
     return {

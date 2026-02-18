@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 import torch
 
 from prism_ssl.data.collate import collate_prism_batch
@@ -68,3 +69,60 @@ def test_compute_pair_targets_matches_item_outputs() -> None:
     assert torch.allclose(pair["center_distance_mm"], item["center_distance_mm"])
     assert torch.allclose(pair["rotation_delta_deg"], item["rotation_delta_deg"])
     assert torch.allclose(pair["window_delta"], item["window_delta"])
+
+
+def test_build_dataset_item_uses_selected_position_frame() -> None:
+    scan = _make_scan(seed=21)
+    center = np.asarray([20, 20, 6], dtype=np.int64)
+    centers = np.asarray([[20, 24, 6], [24, 20, 6], [16, 20, 6], [20, 16, 6]], dtype=np.int64)
+
+    result_a = scan.train_sample(
+        4,
+        seed=101,
+        method="optimized_fused",
+        subset_center_vox=center,
+        patch_centers_vox=centers,
+        rotation_augmentation_degrees=(0.0, 0.0, 45.0),
+        apply_native_orientation_hint=False,
+        wc=0.0,
+        ww=4.0,
+    )
+    result_b = scan.train_sample(
+        4,
+        seed=102,
+        method="optimized_fused",
+        subset_center_vox=center,
+        patch_centers_vox=centers,
+        rotation_augmentation_degrees=(0.0, 0.0, 45.0),
+        apply_native_orientation_hint=False,
+        wc=0.0,
+        ww=4.0,
+    )
+
+    item_ras = build_dataset_item(
+        result_a=result_a,
+        result_b=result_b,
+        scan_id="scan_3",
+        series_id="series_3",
+        position_frame="ras",
+    )
+    item_aug = build_dataset_item(
+        result_a=result_a,
+        result_b=result_b,
+        scan_id="scan_3",
+        series_id="series_3",
+        position_frame="aug",
+    )
+
+    expected_ras = torch.from_numpy(np.asarray(result_a["relative_patch_centers_pt_ras"], dtype=np.float32))
+    expected_aug = torch.from_numpy(np.asarray(result_a["relative_patch_centers_pt_aug"], dtype=np.float32))
+    assert torch.allclose(item_ras["positions_a"], expected_ras)
+    assert torch.allclose(item_aug["positions_a"], expected_aug)
+    assert not torch.allclose(item_ras["positions_a"], item_aug["positions_a"])
+
+
+def test_tensorize_sample_view_rejects_unknown_position_frame() -> None:
+    scan = _make_scan(seed=31)
+    result = scan.train_sample(4, seed=3, method="optimized_fused", wc=0.0, ww=4.0)
+    with pytest.raises(ValueError):
+        tensorize_sample_view(result, position_frame="unknown")

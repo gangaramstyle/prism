@@ -59,30 +59,38 @@ with app.setup:
         wc: float,
         ww: float,
         max_points: int = 400,
+        patch_colors_rgb: np.ndarray | None = None,
     ) -> tuple[np.ndarray, int]:
         center = np.asarray(center_vox, dtype=np.int64)
         patches = np.asarray(patch_centers_vox, dtype=np.int64)
+        patch_colors = None if patch_colors_rgb is None else np.asarray(patch_colors_rgb, dtype=np.uint8)
 
         if axis == 2:
             base = window_to_rgb(volume[:, :, slice_idx], wc, ww)
             center_rc = (int(center[0]), int(center[1]))
             mask = patches[:, 2] == int(slice_idx)
-            patch_rc = [(int(p[0]), int(p[1])) for p in patches[mask][:max_points]]
+            patch_indices = np.flatnonzero(mask)[:max_points]
+            patch_rc = [(int(patches[i, 0]), int(patches[i, 1])) for i in patch_indices]
         elif axis == 1:
             base = window_to_rgb(volume[:, slice_idx, :], wc, ww)
             center_rc = (int(center[0]), int(center[2]))
             mask = patches[:, 1] == int(slice_idx)
-            patch_rc = [(int(p[0]), int(p[2])) for p in patches[mask][:max_points]]
+            patch_indices = np.flatnonzero(mask)[:max_points]
+            patch_rc = [(int(patches[i, 0]), int(patches[i, 2])) for i in patch_indices]
         else:
             base = window_to_rgb(volume[slice_idx, :, :], wc, ww)
             center_rc = (int(center[1]), int(center[2]))
             mask = patches[:, 0] == int(slice_idx)
-            patch_rc = [(int(p[1]), int(p[2])) for p in patches[mask][:max_points]]
+            patch_indices = np.flatnonzero(mask)[:max_points]
+            patch_rc = [(int(patches[i, 1]), int(patches[i, 2])) for i in patch_indices]
 
         out = np.asarray(base, dtype=np.uint8).copy()
-        for row, col in patch_rc:
+        for local_i, (row, col) in enumerate(patch_rc):
             if 0 <= row < out.shape[0] and 0 <= col < out.shape[1]:
-                out[row, col] = np.array([255, 220, 0], dtype=np.uint8)
+                if patch_colors is not None and local_i < patch_indices.shape[0] and patch_indices[local_i] < patch_colors.shape[0]:
+                    out[row, col] = patch_colors[patch_indices[local_i]]
+                else:
+                    out[row, col] = np.array([255, 220, 0], dtype=np.uint8)
         draw_cross(out, center_rc[0], center_rc[1], color=(255, 64, 64), radius=4)
         return out, int(np.count_nonzero(mask))
 
@@ -432,6 +440,11 @@ def _(geometry, scan, suggested_wc_default, suggested_ww_default):
     sample_mode = mo.ui.dropdown(options=["pipeline-random", "manual-debug"], value="manual-debug", label="Sampling mode")
     sample_seed = mo.ui.number(label="Sample seed", value=1234, step=1)
     lock_b_to_a = mo.ui.checkbox(label="Manual mode: make View B identical to View A", value=False)
+    position_frame_for_model = mo.ui.dropdown(
+        options=["ras", "aug", "final"],
+        value="aug",
+        label="Model position frame",
+    )
     random_aug_max_deg = mo.ui.slider(
         label="Pipeline-random max |rotation augmentation| (deg)",
         start=0.0,
@@ -471,7 +484,18 @@ def _(geometry, scan, suggested_wc_default, suggested_ww_default):
             mo.md(
                 f"Native orientation hint (deg): `{rot_base}`. Effective rotation uses global-RAS composition: `R_eff = R(hint) @ R(rot-aug)`."
             ),
-            mo.hstack([n_patches, patch_output_px, method, sample_mode, sample_seed, lock_b_to_a, random_aug_max_deg]),
+            mo.hstack(
+                [
+                    n_patches,
+                    patch_output_px,
+                    method,
+                    sample_mode,
+                    sample_seed,
+                    lock_b_to_a,
+                    position_frame_for_model,
+                    random_aug_max_deg,
+                ]
+            ),
             mo.hstack([sampling_radius_mm]),
             mo.md("### View A manual controls"),
             mo.hstack([a_center_x, a_center_y, a_center_z, a_aug_x, a_aug_y, a_aug_z, a_wc, a_ww]),
@@ -487,6 +511,7 @@ def _(geometry, scan, suggested_wc_default, suggested_ww_default):
         sample_mode,
         sample_seed,
         lock_b_to_a,
+        position_frame_for_model,
         random_aug_max_deg,
         sampling_radius_mm,
         a_center_x,
@@ -530,6 +555,7 @@ def _(
     method,
     n_patches,
     patch_output_px,
+    position_frame_for_model,
     random_aug_max_deg,
     sample_mode,
     sample_seed,
@@ -590,8 +616,9 @@ def _(
             }
             view_b = scan.train_sample(seed=int(sample_seed.value) + 1, **common, **b_kwargs)
 
-    view_a_t = tensorize_sample_view(view_a)
-    view_b_t = tensorize_sample_view(view_b)
+    position_frame = str(position_frame_for_model.value)
+    view_a_t = tensorize_sample_view(view_a, position_frame=position_frame)
+    view_b_t = tensorize_sample_view(view_b, position_frame=position_frame)
     pair_targets = compute_pair_targets(view_a_t, view_b_t)
 
     dataset_item = build_dataset_item(
@@ -599,13 +626,14 @@ def _(
         result_b=view_b,
         scan_id=str(selected_record.scan_id),
         series_id=str(selected_record.series_id),
+        position_frame=position_frame,
     )
 
-    return dataset_item, pair_targets, view_a, view_b, view_a_t, view_b_t
+    return dataset_item, pair_targets, position_frame, view_a, view_b, view_a_t, view_b_t
 
 
 @app.cell
-def _(pair_targets, view_a, view_b):
+def _(pair_targets, position_frame, view_a, view_b):
     step2_summary = pl.DataFrame(
         [
             {
@@ -636,6 +664,7 @@ def _(pair_targets, view_a, view_b):
                 "label_center_distance_mm": float(pair_targets["center_distance_mm"].item()),
                 "label_rotation_delta_deg": tuple(float(v) for v in pair_targets["rotation_delta_deg"].tolist()),
                 "label_window_delta": tuple(float(v) for v in pair_targets["window_delta"].tolist()),
+                "position_frame_for_model": position_frame,
             }
         ]
     )
@@ -748,8 +777,8 @@ def _(euler_xyz_to_matrix, scan, view_a, view_b):
         )
         > 0.5
     )
-    rel_a = np.asarray(view_a["relative_patch_centers_pt"], dtype=np.float32)
-    rel_b = np.asarray(view_b["relative_patch_centers_pt"], dtype=np.float32)
+    rel_a = np.asarray(view_a["relative_patch_centers_pt_ras"], dtype=np.float32)
+    rel_b = np.asarray(view_b["relative_patch_centers_pt_ras"], dtype=np.float32)
     rel_aug_a = (aug_mat_a @ rel_a.T).T.astype(np.float32, copy=False)
     rel_aug_b = (aug_mat_b @ rel_b.T).T.astype(np.float32, copy=False)
     rot_aug_only_centers_a = rotated_relative_points_to_voxel(
@@ -803,13 +832,13 @@ def _(euler_xyz_to_matrix, scan, view_a, view_b):
     )
 
     rot_centers_a = rotated_relative_points_to_voxel(
-        np.asarray(view_a["relative_patch_centers_pt_rotated"], dtype=np.float32),
+        np.asarray(view_a["relative_patch_centers_pt_final"], dtype=np.float32),
         np.asarray(view_a["prism_center_vox"], dtype=np.float32),
         scan.spacing,
         shape_vox=scan.data.shape,
     )
     rot_centers_b = rotated_relative_points_to_voxel(
-        np.asarray(view_b["relative_patch_centers_pt_rotated"], dtype=np.float32),
+        np.asarray(view_b["relative_patch_centers_pt_final"], dtype=np.float32),
         np.asarray(view_b["prism_center_vox"], dtype=np.float32),
         scan.spacing,
         shape_vox=scan.data.shape,
@@ -1218,26 +1247,55 @@ def _(n_patches):
     preview_cols = mo.ui.slider(label="Grid columns", start=1, stop=12, step=1, value=6)
     coord_rows = mo.ui.slider(label="Patch rows in coordinate table", start=1, stop=200, step=1, value=30)
     coord_view = mo.ui.dropdown(options=["A", "B"], value="A", label="Coordinate table view")
+    coord_frame = mo.ui.dropdown(options=["ras", "aug", "final"], value="aug", label="Coordinate frame")
+    rgb_scale_mm = mo.ui.slider(label="RGB scale (mm)", start=5.0, stop=120.0, step=1.0, value=40.0)
 
     mo.vstack(
         [
             mo.md("## Step 3: Select/Inspect Patches"),
-            mo.hstack([preview_patches, preview_cols, coord_rows, coord_view]),
+            mo.hstack([preview_patches, preview_cols, coord_rows, coord_view, coord_frame, rgb_scale_mm]),
         ]
     )
-    return coord_rows, coord_view, preview_cols, preview_patches
+    return coord_frame, coord_rows, coord_view, preview_cols, preview_patches, rgb_scale_mm
 
 
 @app.cell
-def _(coord_rows, coord_view, patch_mm, preview_cols, preview_patches, scan, view_a, view_b):
+def _(
+    coord_frame,
+    coord_rows,
+    coord_view,
+    fit_image_for_display,
+    overlay_slice,
+    patch_mm,
+    preview_cols,
+    preview_patches,
+    rgb_scale_mm,
+    scan,
+    view_a,
+    view_b,
+):
     grid_a = patch_grid(view_a["normalized_patches"], max_patches=int(preview_patches.value), cols=int(preview_cols.value))
     grid_b = patch_grid(view_b["normalized_patches"], max_patches=int(preview_patches.value), cols=int(preview_cols.value))
 
     selected_view = view_a if str(coord_view.value) == "A" else view_b
     centers_vox = np.asarray(selected_view["patch_centers_vox"], dtype=np.int64)
     centers_pt = np.asarray(selected_view["patch_centers_pt"], dtype=np.float32)
-    rel = np.asarray(selected_view["relative_patch_centers_pt"], dtype=np.float32)
-    rel_rot = np.asarray(selected_view["relative_patch_centers_pt_rotated"], dtype=np.float32)
+    rel_ras = np.asarray(selected_view["relative_patch_centers_pt_ras"], dtype=np.float32)
+    rel_aug = np.asarray(selected_view["relative_patch_centers_pt_aug"], dtype=np.float32)
+    rel_final = np.asarray(selected_view["relative_patch_centers_pt_final"], dtype=np.float32)
+    frame = str(coord_frame.value)
+    frame_map = {
+        "ras": rel_ras,
+        "aug": rel_aug,
+        "final": rel_final,
+    }
+    rel_selected = frame_map[frame]
+
+    scale_mm = max(float(rgb_scale_mm.value), 1e-6)
+    rel_scaled = np.clip(rel_selected / scale_mm, -1.0, 1.0)
+    rgb_u8 = np.rint((rel_scaled + 1.0) * 127.5).astype(np.uint8)
+    color_hex = [f"#{int(r):02x}{int(g):02x}{int(b):02x}" for r, g, b in rgb_u8.tolist()]
+
     rows = min(int(coord_rows.value), int(centers_vox.shape[0]))
 
     coords_df = pl.DataFrame(
@@ -1249,13 +1307,129 @@ def _(coord_rows, coord_view, patch_mm, preview_cols, preview_patches, scan, vie
             "x_mm": centers_pt[:rows, 0],
             "y_mm": centers_pt[:rows, 1],
             "z_mm": centers_pt[:rows, 2],
-            "rel_x_mm": rel[:rows, 0],
-            "rel_y_mm": rel[:rows, 1],
-            "rel_z_mm": rel[:rows, 2],
-            "rel_rot_x_mm": rel_rot[:rows, 0],
-            "rel_rot_y_mm": rel_rot[:rows, 1],
-            "rel_rot_z_mm": rel_rot[:rows, 2],
+            "rel_ras_x_mm": rel_ras[:rows, 0],
+            "rel_ras_y_mm": rel_ras[:rows, 1],
+            "rel_ras_z_mm": rel_ras[:rows, 2],
+            "rel_aug_x_mm": rel_aug[:rows, 0],
+            "rel_aug_y_mm": rel_aug[:rows, 1],
+            "rel_aug_z_mm": rel_aug[:rows, 2],
+            "rel_final_x_mm": rel_final[:rows, 0],
+            "rel_final_y_mm": rel_final[:rows, 1],
+            "rel_final_z_mm": rel_final[:rows, 2],
+            "selected_x_mm": rel_selected[:rows, 0],
+            "selected_y_mm": rel_selected[:rows, 1],
+            "selected_z_mm": rel_selected[:rows, 2],
+            "norm_ras_mm": np.linalg.norm(rel_ras[:rows], axis=1),
+            "norm_aug_mm": np.linalg.norm(rel_aug[:rows], axis=1),
+            "norm_final_mm": np.linalg.norm(rel_final[:rows], axis=1),
+            "rgb_hex": color_hex[:rows],
+            "rgb_r": rgb_u8[:rows, 0],
+            "rgb_g": rgb_u8[:rows, 1],
+            "rgb_b": rgb_u8[:rows, 2],
         }
+    )
+
+    debug_points = pl.DataFrame(
+        {
+            "patch_idx": np.arange(centers_vox.shape[0], dtype=np.int64),
+            "x_mm": rel_selected[:, 0],
+            "y_mm": rel_selected[:, 1],
+            "z_mm": rel_selected[:, 2],
+            "color": color_hex,
+        }
+    )
+    axial_chart = (
+        alt.Chart(debug_points)
+        .mark_circle(size=45)
+        .encode(
+            x=alt.X("x_mm:Q", title="x (mm)"),
+            y=alt.Y("y_mm:Q", title="y (mm)"),
+            color=alt.Color("color:N", scale=None),
+            tooltip=["patch_idx:Q", "x_mm:Q", "y_mm:Q", "z_mm:Q", "color:N"],
+        )
+        .properties(title=f"{frame.upper()} frame: axial XY", width=280, height=240)
+    )
+    coronal_chart = (
+        alt.Chart(debug_points)
+        .mark_circle(size=45)
+        .encode(
+            x=alt.X("x_mm:Q", title="x (mm)"),
+            y=alt.Y("z_mm:Q", title="z (mm)"),
+            color=alt.Color("color:N", scale=None),
+            tooltip=["patch_idx:Q", "x_mm:Q", "y_mm:Q", "z_mm:Q", "color:N"],
+        )
+        .properties(title=f"{frame.upper()} frame: coronal XZ", width=280, height=240)
+    )
+    sagittal_chart = (
+        alt.Chart(debug_points)
+        .mark_circle(size=45)
+        .encode(
+            x=alt.X("y_mm:Q", title="y (mm)"),
+            y=alt.Y("z_mm:Q", title="z (mm)"),
+            color=alt.Color("color:N", scale=None),
+            tooltip=["patch_idx:Q", "x_mm:Q", "y_mm:Q", "z_mm:Q", "color:N"],
+        )
+        .properties(title=f"{frame.upper()} frame: sagittal YZ", width=280, height=240)
+    )
+
+    center_vox = np.asarray(selected_view["prism_center_vox"], dtype=np.int64)
+    center_color = rgb_u8
+    overlay_axial, _ = overlay_slice(
+        scan.data,
+        axis=2,
+        slice_idx=int(center_vox[2]),
+        center_vox=center_vox,
+        patch_centers_vox=centers_vox,
+        wc=float(selected_view["wc"]),
+        ww=float(selected_view["ww"]),
+        max_points=1000,
+        patch_colors_rgb=center_color,
+    )
+    overlay_coronal, _ = overlay_slice(
+        scan.data,
+        axis=1,
+        slice_idx=int(center_vox[1]),
+        center_vox=center_vox,
+        patch_centers_vox=centers_vox,
+        wc=float(selected_view["wc"]),
+        ww=float(selected_view["ww"]),
+        max_points=1000,
+        patch_colors_rgb=center_color,
+    )
+    overlay_sagittal, _ = overlay_slice(
+        scan.data,
+        axis=0,
+        slice_idx=int(center_vox[0]),
+        center_vox=center_vox,
+        patch_centers_vox=centers_vox,
+        wc=float(selected_view["wc"]),
+        ww=float(selected_view["ww"]),
+        max_points=1000,
+        patch_colors_rgb=center_color,
+    )
+    overlay_axial_img, overlay_axial_w = fit_image_for_display(
+        overlay_axial,
+        axis=2,
+        spacing_mm=scan.spacing,
+        target_width_px=280,
+        max_height_px=220,
+        aspect_mode="spacing-aware",
+    )
+    overlay_coronal_img, overlay_coronal_w = fit_image_for_display(
+        overlay_coronal,
+        axis=1,
+        spacing_mm=scan.spacing,
+        target_width_px=280,
+        max_height_px=220,
+        aspect_mode="spacing-aware",
+    )
+    overlay_sagittal_img, overlay_sagittal_w = fit_image_for_display(
+        overlay_sagittal,
+        axis=0,
+        spacing_mm=scan.spacing,
+        target_width_px=280,
+        max_height_px=220,
+        aspect_mode="spacing-aware",
     )
 
     mo.vstack(
@@ -1265,6 +1439,7 @@ def _(coord_rows, coord_view, patch_mm, preview_cols, preview_patches, scan, vie
 - `base_patch_mm`: `{float(patch_mm.value):.1f}`
 - `patch_shape_vox` before resize: `{tuple(int(v) for v in scan.patch_shape_vox.tolist())}`
 - final per-patch tensor shape: `{tuple(int(v) for v in np.asarray(view_a["normalized_patches"]).shape[1:3])}`
+- Position debugger frame: `{frame}` (`rgb = normalized [x,y,z]` in selected frame; scale=`{scale_mm:.1f}mm`)
 """
             ),
             mo.hstack(
@@ -1273,7 +1448,16 @@ def _(coord_rows, coord_view, patch_mm, preview_cols, preview_patches, scan, vie
                     mo.vstack([mo.md("View B normalized patches"), mo.image(src=grid_b, width=520)]),
                 ]
             ),
-            mo.md(f"Patch coordinates preview (View {coord_view.value})"),
+            mo.md("Color-coded relative-position debugger"),
+            mo.hstack([axial_chart, coronal_chart, sagittal_chart]),
+            mo.hstack(
+                [
+                    mo.vstack([mo.md(f"Native axial z={int(center_vox[2])}"), mo.image(src=overlay_axial_img, width=overlay_axial_w)]),
+                    mo.vstack([mo.md(f"Native coronal y={int(center_vox[1])}"), mo.image(src=overlay_coronal_img, width=overlay_coronal_w)]),
+                    mo.vstack([mo.md(f"Native sagittal x={int(center_vox[0])}"), mo.image(src=overlay_sagittal_img, width=overlay_sagittal_w)]),
+                ]
+            ),
+            mo.md(f"Patch coordinates preview (View {coord_view.value}, frame={frame})"),
             coords_df,
         ]
     )

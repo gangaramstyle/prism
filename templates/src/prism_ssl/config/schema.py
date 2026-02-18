@@ -46,6 +46,7 @@ class DataConfig:
     warm_pool_size: int = 16
     visits_per_scan: int = 100
     max_prefetch_replacements: int = 2
+    position_frame_for_model: str = "aug"
     apply_native_orientation_hint: bool = True
     rotation_augmentation_max_degrees: float = 10.0
     use_local_scratch: bool = True
