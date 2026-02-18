@@ -1247,7 +1247,7 @@ def _(
                     mo.vstack([mo.md(f"B sagittal x={b_sagittal_idx.value}"), mo.image(src=b_native_sagittal_img, width=b_native_sagittal_w)]),
                 ]
             ),
-            mo.md("#### Aug-rotation overlays (RAS-only, before applying hint; cyan crosses = pre-rotation patch locations)"),
+            mo.md("#### Aug-rotation overlays (RAS-only, before applying hint; red crosses = pre-rotation patch locations)"),
             mo.hstack(
                 [
                     mo.vstack([mo.md(f"A axial z={a_axial_idx.value}"), mo.image(src=a_aug_axial_img, width=a_aug_axial_w)]),
@@ -1393,7 +1393,7 @@ def _(
     )
     axial_orig = (
         alt.Chart(debug_points)
-        .mark_point(shape="cross", color="#00e5ff", size=140, strokeWidth=2.0)
+        .mark_point(shape="cross", color="#ff3b30", size=140, strokeWidth=2.0)
         .encode(
             x="x_orig_mm:Q",
             y="y_orig_mm:Q",
@@ -1414,7 +1414,7 @@ def _(
     )
     coronal_orig = (
         alt.Chart(debug_points)
-        .mark_point(shape="cross", color="#00e5ff", size=140, strokeWidth=2.0)
+        .mark_point(shape="cross", color="#ff3b30", size=140, strokeWidth=2.0)
         .encode(
             x="x_orig_mm:Q",
             y="z_orig_mm:Q",
@@ -1435,7 +1435,7 @@ def _(
     )
     sagittal_orig = (
         alt.Chart(debug_points)
-        .mark_point(shape="cross", color="#00e5ff", size=140, strokeWidth=2.0)
+        .mark_point(shape="cross", color="#ff3b30", size=140, strokeWidth=2.0)
         .encode(
             x="y_orig_mm:Q",
             y="z_orig_mm:Q",
@@ -1512,7 +1512,7 @@ def _(
 - `patch_shape_vox` before resize: `{tuple(int(v) for v in scan.patch_shape_vox.tolist())}`
 - final per-patch tensor shape: `{tuple(int(v) for v in np.asarray(view_a["normalized_patches"]).shape[1:3])}`
 - Position debugger frame: `{frame}` (`rgb = normalized [x,y,z]` in selected frame; scale=`{scale_mm:.1f}mm`)
-- Position scatter markers: `circles = selected frame`, `cyan crosses = pre-rotation RAS positions`
+- Position scatter markers: `circles = selected frame`, `red crosses = pre-rotation RAS positions`
 """
             ),
             mo.hstack(
