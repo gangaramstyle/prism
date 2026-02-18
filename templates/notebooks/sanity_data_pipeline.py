@@ -51,6 +51,20 @@ with app.setup:
         img[r0:r1, col] = np.array(color, dtype=np.uint8)
         img[row, c0:c1] = np.array(color, dtype=np.uint8)
 
+    def draw_dot(img: np.ndarray, row: int, col: int, color: tuple[int, int, int], radius: int = 3) -> None:
+        h, w = img.shape[:2]
+        if row < 0 or row >= h or col < 0 or col >= w:
+            return
+        r0 = max(0, row - radius)
+        r1 = min(h, row + radius + 1)
+        c0 = max(0, col - radius)
+        c1 = min(w, col + radius + 1)
+        rr, cc = np.ogrid[r0:r1, c0:c1]
+        mask = (rr - int(row)) ** 2 + (cc - int(col)) ** 2 <= int(radius) ** 2
+        patch = img[r0:r1, c0:c1]
+        patch[mask] = np.array(color, dtype=np.uint8)
+        img[r0:r1, c0:c1] = patch
+
     def overlay_slice(
         volume: np.ndarray,
         axis: int,
@@ -148,6 +162,74 @@ with app.setup:
         ry = np.array([[cy, 0.0, sy], [0.0, 1.0, 0.0], [-sy, 0.0, cy]], dtype=np.float32)
         rz = np.array([[cz, -sz, 0.0], [sz, cz, 0.0], [0.0, 0.0, 1.0]], dtype=np.float32)
         return rz @ ry @ rx
+
+    def overlay_point_pair_slice(
+        volume: np.ndarray,
+        *,
+        axis: int,
+        slice_idx: int,
+        wc: float,
+        ww: float,
+        original_point_vox: np.ndarray,
+        rotated_point_vox: np.ndarray,
+        original_color: tuple[int, int, int] = (255, 64, 64),
+        rotated_color: tuple[int, int, int] = (48, 209, 88),
+    ) -> np.ndarray:
+        if axis == 2:
+            base = window_to_rgb(volume[:, :, slice_idx], wc, ww)
+            orig_rc = (int(original_point_vox[0]), int(original_point_vox[1]))
+            rot_rc = (int(rotated_point_vox[0]), int(rotated_point_vox[1]))
+        elif axis == 1:
+            base = window_to_rgb(volume[:, slice_idx, :], wc, ww)
+            orig_rc = (int(original_point_vox[0]), int(original_point_vox[2]))
+            rot_rc = (int(rotated_point_vox[0]), int(rotated_point_vox[2]))
+        elif axis == 0:
+            base = window_to_rgb(volume[slice_idx, :, :], wc, ww)
+            orig_rc = (int(original_point_vox[1]), int(original_point_vox[2]))
+            rot_rc = (int(rotated_point_vox[1]), int(rotated_point_vox[2]))
+        else:
+            raise ValueError(f"Invalid axis={axis}")
+
+        out = np.asarray(base, dtype=np.uint8).copy()
+        draw_dot(out, int(orig_rc[0]), int(orig_rc[1]), original_color, radius=3)
+        draw_dot(out, int(rot_rc[0]), int(rot_rc[1]), rotated_color, radius=3)
+        return out
+
+    def sincos_embedding_rows(
+        position_mm: np.ndarray,
+        *,
+        point_label: str,
+        n_frequencies: int,
+        min_wavelength_mm: float,
+        max_wavelength_mm: float,
+    ) -> list[dict[str, float | int | str]]:
+        pos = np.asarray(position_mm, dtype=np.float32).reshape(3)
+        n_freq = max(int(n_frequencies), 1)
+        wl_min = max(float(min_wavelength_mm), 1e-3)
+        wl_max = max(float(max_wavelength_mm), wl_min + 1e-3)
+        wavelengths = np.exp(np.linspace(np.log(wl_min), np.log(wl_max), n_freq, dtype=np.float64)).astype(np.float32)
+        theta = (2.0 * np.pi * pos[:, None]) / wavelengths[None, :]
+
+        rows: list[dict[str, float | int | str]] = []
+        axis_names = ("x", "y", "z")
+        for axis_idx, axis_name in enumerate(axis_names):
+            sin_vals = np.sin(theta[axis_idx])
+            cos_vals = np.cos(theta[axis_idx])
+            for trig, vals in (("sin", sin_vals), ("cos", cos_vals)):
+                trig_offset = 0 if trig == "sin" else n_freq
+                for freq_idx in range(n_freq):
+                    rows.append(
+                        {
+                            "point": point_label,
+                            "axis": axis_name,
+                            "trig": trig,
+                            "frequency_idx": int(freq_idx),
+                            "channel": int(axis_idx * (2 * n_freq) + trig_offset + freq_idx),
+                            "wavelength_mm": float(wavelengths[freq_idx]),
+                            "value": float(vals[freq_idx]),
+                        }
+                    )
+        return rows
 
     def _plane_axes_for_slice(axis: int) -> tuple[int, int]:
         if axis == 2:  # axial -> rows=x, cols=y
@@ -1287,20 +1369,43 @@ def _(
 def _(n_patches):
     preview_patches = mo.ui.slider(label="Patch previews", start=1, stop=max(int(n_patches.value), 1), step=1, value=min(36, int(n_patches.value)))
     preview_cols = mo.ui.slider(label="Grid columns", start=1, stop=12, step=1, value=6)
+    patch_focus_idx = mo.ui.slider(
+        label="Inspect patch idx",
+        start=0,
+        stop=max(int(n_patches.value) - 1, 0),
+        step=1,
+        value=0,
+    )
     coord_rows = mo.ui.slider(label="Patch rows in coordinate table", start=1, stop=200, step=1, value=30)
     coord_view = mo.ui.dropdown(options=["A", "B"], value="A", label="Coordinate table view")
     coord_frame = mo.ui.dropdown(options=["ras", "aug", "final"], value="aug", label="Coordinate frame")
     view_elev = mo.ui.slider(label="3D view elev", start=-90, stop=90, step=1, value=20)
     view_azim = mo.ui.slider(label="3D view azim", start=-180, stop=180, step=1, value=35)
+    sincos_n_freq = mo.ui.slider(label="Sin/cos freqs per axis", start=1, stop=24, step=1, value=8)
+    sincos_min_wl_mm = mo.ui.slider(label="Sin/cos min wavelength (mm)", start=1, stop=128, step=1, value=4)
+    sincos_max_wl_mm = mo.ui.slider(label="Sin/cos max wavelength (mm)", start=16, stop=1024, step=16, value=256)
 
     mo.vstack(
         [
             mo.md("## Step 3: Select/Inspect Patches"),
             mo.hstack([preview_patches, preview_cols, coord_rows, coord_view, coord_frame]),
+            mo.hstack([patch_focus_idx, sincos_n_freq, sincos_min_wl_mm, sincos_max_wl_mm]),
             mo.hstack([view_elev, view_azim]),
         ]
     )
-    return coord_frame, coord_rows, coord_view, preview_cols, preview_patches, view_azim, view_elev
+    return (
+        coord_frame,
+        coord_rows,
+        coord_view,
+        patch_focus_idx,
+        preview_cols,
+        preview_patches,
+        sincos_max_wl_mm,
+        sincos_min_wl_mm,
+        sincos_n_freq,
+        view_azim,
+        view_elev,
+    )
 
 
 @app.cell
@@ -1309,13 +1414,27 @@ def _(
     coord_rows,
     coord_view,
     fit_image_for_display,
+    overlay_point_pair_slice,
     overlay_slice,
+    patch_focus_idx,
     patch_mm,
     plt,
     preview_cols,
     preview_patches,
+    rot_a,
+    rot_aug_only_a,
+    rot_aug_only_b,
+    rot_aug_only_centers_a,
+    rot_aug_only_centers_b,
+    rot_b,
+    rot_centers_a,
+    rot_centers_b,
     sampling_radius_mm,
     scan,
+    sincos_embedding_rows,
+    sincos_max_wl_mm,
+    sincos_min_wl_mm,
+    sincos_n_freq,
     view_azim,
     view_elev,
     view_a,
@@ -1324,12 +1443,30 @@ def _(
     grid_a = patch_grid(view_a["normalized_patches"], max_patches=int(preview_patches.value), cols=int(preview_cols.value))
     grid_b = patch_grid(view_b["normalized_patches"], max_patches=int(preview_patches.value), cols=int(preview_cols.value))
 
-    selected_view = view_a if str(coord_view.value) == "A" else view_b
+    selected_is_a = str(coord_view.value) == "A"
+    selected_view = view_a if selected_is_a else view_b
     centers_vox = np.asarray(selected_view["patch_centers_vox"], dtype=np.int64)
     centers_pt = np.asarray(selected_view["patch_centers_pt"], dtype=np.float32)
     rel_ras = np.asarray(selected_view["relative_patch_centers_pt_ras"], dtype=np.float32)
     rel_aug = np.asarray(selected_view["relative_patch_centers_pt_aug"], dtype=np.float32)
     rel_final = np.asarray(selected_view["relative_patch_centers_pt_final"], dtype=np.float32)
+    aug_volume = rot_aug_only_a if selected_is_a else rot_aug_only_b
+    final_volume = rot_a if selected_is_a else rot_b
+    aug_centers_vox = np.asarray(rot_aug_only_centers_a if selected_is_a else rot_aug_only_centers_b, dtype=np.int64)
+    final_centers_vox = np.asarray(rot_centers_a if selected_is_a else rot_centers_b, dtype=np.int64)
+
+    patch_count = int(centers_vox.shape[0])
+    patch_idx = int(np.clip(int(patch_focus_idx.value), 0, max(patch_count - 1, 0)))
+
+    if patch_count > 0:
+        orig_patch_center_vox = np.asarray(centers_vox[patch_idx], dtype=np.int64)
+        aug_patch_center_vox = np.asarray(aug_centers_vox[patch_idx], dtype=np.int64)
+        final_patch_center_vox = np.asarray(final_centers_vox[patch_idx], dtype=np.int64)
+    else:
+        orig_patch_center_vox = np.zeros(3, dtype=np.int64)
+        aug_patch_center_vox = np.zeros(3, dtype=np.int64)
+        final_patch_center_vox = np.zeros(3, dtype=np.int64)
+
     frame = str(coord_frame.value)
     frame_map = {
         "ras": rel_ras,
@@ -1343,7 +1480,7 @@ def _(
     rgb_u8 = np.rint((rel_scaled + 1.0) * 127.5).astype(np.uint8)
     color_hex = [f"#{int(r):02x}{int(g):02x}{int(b):02x}" for r, g, b in rgb_u8.tolist()]
 
-    rows = min(int(coord_rows.value), int(centers_vox.shape[0]))
+    rows = min(int(coord_rows.value), patch_count)
 
     coords_df = pl.DataFrame(
         {
@@ -1500,6 +1637,111 @@ def _(
     ax3d.set_zlim(-lim, lim)
     ax3d.legend(loc="upper right")
 
+    point_frame_specs = [
+        ("RAS", scan.data, orig_patch_center_vox),
+        ("AUG", aug_volume, aug_patch_center_vox),
+        ("FULL", final_volume, final_patch_center_vox),
+    ]
+    point_plane_specs = [("axial", 2), ("coronal", 1), ("sagittal", 0)]
+    point_grid_rows: list = []
+    for plane_name, axis in point_plane_specs:
+        row_items: list = []
+        for frame_name, frame_volume, rotated_center_vox in point_frame_specs:
+            axis_size = int(frame_volume.shape[axis])
+            slice_idx = int(np.clip(int(rotated_center_vox[axis]), 0, max(axis_size - 1, 0)))
+            point_img = overlay_point_pair_slice(
+                frame_volume,
+                axis=axis,
+                slice_idx=slice_idx,
+                wc=float(selected_view["wc"]),
+                ww=float(selected_view["ww"]),
+                original_point_vox=orig_patch_center_vox,
+                rotated_point_vox=rotated_center_vox,
+            )
+            point_img, point_width = fit_image_for_display(
+                point_img,
+                axis=axis,
+                spacing_mm=scan.spacing,
+                target_width_px=260,
+                max_height_px=200,
+                aspect_mode="spacing-aware",
+            )
+            offslice_orig = int(abs(int(orig_patch_center_vox[axis]) - slice_idx))
+            row_items.append(
+                mo.vstack(
+                    [
+                        mo.md(f"{frame_name} {plane_name} ({'xyz'[axis]}={slice_idx}, red Δ={offslice_orig})"),
+                        mo.image(src=point_img, width=point_width),
+                    ]
+                )
+            )
+        point_grid_rows.append(mo.hstack(row_items))
+    patch_center_grid = mo.vstack(point_grid_rows)
+
+    selected_patch_rel = np.asarray(rel_selected[patch_idx], dtype=np.float32) if patch_count > 0 else np.zeros(3, dtype=np.float32)
+    original_patch_rel = np.asarray(rel_ras[patch_idx], dtype=np.float32) if patch_count > 0 else np.zeros(3, dtype=np.float32)
+    wl_min = float(sincos_min_wl_mm.value)
+    wl_max = max(float(sincos_max_wl_mm.value), wl_min + 1.0)
+    n_freq = int(sincos_n_freq.value)
+    sincos_rows = (
+        sincos_embedding_rows(
+            original_patch_rel,
+            point_label="original_ras",
+            n_frequencies=n_freq,
+            min_wavelength_mm=wl_min,
+            max_wavelength_mm=wl_max,
+        )
+        + sincos_embedding_rows(
+            selected_patch_rel,
+            point_label=f"selected_{frame}",
+            n_frequencies=n_freq,
+            min_wavelength_mm=wl_min,
+            max_wavelength_mm=wl_max,
+        )
+    )
+    sincos_df = pl.DataFrame(sincos_rows)
+    sincos_chart = (
+        alt.Chart(sincos_df)
+        .mark_line(point=True)
+        .encode(
+            x=alt.X("frequency_idx:Q", title="frequency idx"),
+            y=alt.Y("value:Q", title="sin/cos value", scale=alt.Scale(domain=[-1.05, 1.05])),
+            color=alt.Color(
+                "point:N",
+                scale=alt.Scale(
+                    domain=["original_ras", f"selected_{frame}"],
+                    range=["#ff3b30", "#34c759"],
+                ),
+            ),
+            strokeDash=alt.StrokeDash("trig:N"),
+            tooltip=[
+                "point:N",
+                "axis:N",
+                "trig:N",
+                "frequency_idx:Q",
+                "wavelength_mm:Q",
+                "value:Q",
+                "channel:Q",
+            ],
+        )
+        .properties(width=220, height=170)
+        .facet(column=alt.Column("axis:N", title=f"Patch {patch_idx} sin/cos embedding"))
+    )
+    sincos_preview = sincos_df.sort(["point", "axis", "trig", "frequency_idx"]).head(24)
+    patch_center_mm_df = pl.DataFrame(
+        [
+            {
+                "patch_idx": patch_idx,
+                "frame": frame,
+                "orig_center_vox": tuple(int(v) for v in orig_patch_center_vox.tolist()),
+                "aug_center_vox": tuple(int(v) for v in aug_patch_center_vox.tolist()),
+                "full_center_vox": tuple(int(v) for v in final_patch_center_vox.tolist()),
+                "orig_rel_mm": tuple(float(v) for v in original_patch_rel.tolist()),
+                "selected_rel_mm": tuple(float(v) for v in selected_patch_rel.tolist()),
+            }
+        ]
+    )
+
     center_vox = np.asarray(selected_view["prism_center_vox"], dtype=np.int64)
     center_color = rgb_u8
     overlay_axial, _ = overlay_slice(
@@ -1569,6 +1811,7 @@ def _(
 - final per-patch tensor shape: `{tuple(int(v) for v in np.asarray(view_a["normalized_patches"]).shape[1:3])}`
 - Position debugger frame: `{frame}` (`rgb = normalized [x,y,z]` in selected frame; scale=`{scale_mm:.1f}mm`)
 - Position markers: `circles = selected frame`, `red crosses = pre-rotation RAS positions` (same color per patch)
+- Patch inspector colors: `red dot = original RAS patch center`, `green dot = frame-rotated patch center`
 """
             ),
             mo.hstack(
@@ -1580,6 +1823,12 @@ def _(
             mo.md("Color-coded relative-position debugger"),
             mo.hstack([axial_chart, coronal_chart, sagittal_chart]),
             fig,
+            mo.md(f"Single-patch center inspector (View {coord_view.value}, patch_idx={patch_idx})"),
+            patch_center_mm_df,
+            patch_center_grid,
+            mo.md(f"Sin/cos embedding debugger (`freqs={n_freq}`, `wavelength_mm=[{wl_min:.1f}, {wl_max:.1f}]`)"),
+            sincos_chart,
+            sincos_preview,
             mo.hstack(
                 [
                     mo.vstack([mo.md(f"Native axial z={int(center_vox[2])}"), mo.image(src=overlay_axial_img, width=overlay_axial_w)]),
