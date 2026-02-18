@@ -41,3 +41,17 @@ Run notebooks on a compute allocation (not login nodes).
 - Single durable local checkpoint.
 - Home quota guardrails enabled.
 - Broken scan policy: skip broken scans, abort run if broken ratio > 10% after 200 attempts.
+
+## Build Near-Isotropic Manifest
+Use this when you want a cleaner subset for rotation-heavy pretraining.
+
+1. Submit manifest build job:
+   `cd ~/prism-ssl/templates && CATALOG_PATH=~/nvreason/data/pmbb_catalog.csv OUTPUT_PATH=results/manifests/pmbb_catalog_near_iso.csv MAX_SPACING_RATIO=1.2 MAX_SPACING_MM=0 EXCLUDE_TIME_SERIES=1 sbatch scripts/job_build_near_iso_manifest.sh`
+2. Monitor:
+   `cd ~/prism-ssl/templates && squeue -u $USER`
+3. Check output:
+   `cd ~/prism-ssl/templates && ls -lh results/manifests/pmbb_catalog_near_iso.csv results/manifests/pmbb_catalog_near_iso.csv.summary.json`
+4. Explore manifest cohort counts:
+   `cd ~/prism-ssl/templates && uv run python scripts/summarize_manifest.py --manifest-path results/manifests/pmbb_catalog_near_iso.csv --top-k 30 --output-dir results/manifests/near_iso_summary`
+5. Train using the new manifest:
+   `cd ~/prism-ssl/templates && CATALOG_PATH=~/prism-ssl/templates/results/manifests/pmbb_catalog_near_iso.csv MODEL_NAME=vit_l BATCH_SIZE=64 N_PATCHES=1024 WORKERS=16 sbatch --cpus-per-task=30 scripts/job_train_prism_ssl.sh`
