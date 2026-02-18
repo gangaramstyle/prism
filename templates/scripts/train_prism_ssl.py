@@ -25,6 +25,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--warm-pool-size", type=int, default=None)
     p.add_argument("--visits-per-scan", type=int, default=None)
     p.add_argument("--max-prefetch-replacements", type=int, default=None)
+    p.add_argument("--rotation-augmentation-max-degrees", type=float, default=None)
+    p.add_argument(
+        "--no-native-orientation-hint",
+        dest="apply_native_orientation_hint",
+        action="store_false",
+        default=None,
+        help="Disable adding inferred native orientation hint to sampled rotations.",
+    )
 
     p.add_argument("--model-name", type=str, default=None, choices=["patch_mlp", "vit_l"])
     p.add_argument("--model-d-model", type=int, default=None)
@@ -70,6 +78,8 @@ def main() -> int:
         "data.warm_pool_size": args.warm_pool_size,
         "data.visits_per_scan": args.visits_per_scan,
         "data.max_prefetch_replacements": args.max_prefetch_replacements,
+        "data.rotation_augmentation_max_degrees": args.rotation_augmentation_max_degrees,
+        "data.apply_native_orientation_hint": args.apply_native_orientation_hint,
         "model.name": args.model_name,
         "model.d_model": args.model_d_model,
         "model.num_layers": args.model_num_layers,

@@ -450,6 +450,9 @@ class NiftiScan:
         ww: float | None = None,
         sampling_radius_mm: float | None = None,
         rotation_degrees: tuple[float, float, float] | None = None,
+        rotation_augmentation_degrees: tuple[float, float, float] | None = None,
+        apply_native_orientation_hint: bool = True,
+        rotation_augmentation_max_degrees: float = 10.0,
         subset_center_vox: np.ndarray | None = None,
         patch_centers_vox: np.ndarray | None = None,
         target_patch_size: int | None = None,
@@ -502,20 +505,43 @@ class NiftiScan:
                 )
             centers_arr = np.clip(centers_arr, 0, np.asarray(self.data.shape, dtype=np.int64) - 1)
 
-        if rotation_degrees is None:
-            if seed is None:
-                rot_rng = np.random.default_rng()
-            else:
-                rot_rng = np.random.default_rng(int(seed) + 1_000_003)
-            rotation_tuple = (
-                float(rot_rng.integers(-20, 21)),
-                float(rot_rng.integers(-20, 21)),
-                float(rot_rng.integers(-20, 21)),
-            )
-        else:
+        geometry = self.geometry
+        hint_tuple = tuple(float(v) for v in geometry.baseline_rotation_degrees)
+
+        if rotation_degrees is not None and rotation_augmentation_degrees is not None:
+            raise ValueError("Provide either rotation_degrees or rotation_augmentation_degrees, not both")
+
+        if rotation_degrees is not None:
             if len(rotation_degrees) != 3:
                 raise ValueError("rotation_degrees must be a tuple of length 3")
             rotation_tuple = tuple(float(v) for v in rotation_degrees)
+            if bool(apply_native_orientation_hint):
+                rotation_augmentation_tuple = tuple(
+                    float(rotation_tuple[i] - hint_tuple[i]) for i in range(3)
+                )
+            else:
+                rotation_augmentation_tuple = rotation_tuple
+        else:
+            if rotation_augmentation_degrees is None:
+                if seed is None:
+                    rot_rng = np.random.default_rng()
+                else:
+                    rot_rng = np.random.default_rng(int(seed) + 1_000_003)
+                max_abs_aug = max(float(rotation_augmentation_max_degrees), 0.0)
+                rotation_augmentation_tuple = tuple(
+                    float(rot_rng.uniform(-max_abs_aug, max_abs_aug)) for _ in range(3)
+                )
+            else:
+                if len(rotation_augmentation_degrees) != 3:
+                    raise ValueError("rotation_augmentation_degrees must be a tuple of length 3")
+                rotation_augmentation_tuple = tuple(float(v) for v in rotation_augmentation_degrees)
+
+            if bool(apply_native_orientation_hint):
+                rotation_tuple = tuple(
+                    float(hint_tuple[i] + rotation_augmentation_tuple[i]) for i in range(3)
+                )
+            else:
+                rotation_tuple = rotation_augmentation_tuple
         rotation_matrix = _euler_xyz_to_matrix(rotation_tuple)
 
         if method_name == "optimized_fused":
@@ -548,7 +574,6 @@ class NiftiScan:
             np.float32,
             copy=False,
         )
-        geometry = self.geometry
 
         return {
             "method": method_name,
@@ -561,6 +586,8 @@ class NiftiScan:
             "relative_patch_centers_pt_rotated": relative_patch_centers_pt_rotated,
             "prism_center_pt": prism_center_pt,
             "prism_center_vox": prism_center.astype(np.int64, copy=False),
+            "rotation_hint_degrees": np.asarray(hint_tuple, dtype=np.float32),
+            "rotation_augmentation_degrees": np.asarray(rotation_augmentation_tuple, dtype=np.float32),
             "rotation_degrees": np.asarray(rotation_tuple, dtype=np.float32),
             "rotation_matrix_ras": rotation_matrix,
             "native_thin_axis": int(geometry.thin_axis),

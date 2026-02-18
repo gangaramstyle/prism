@@ -29,6 +29,24 @@ def _make_scan(seed: int = 123) -> NiftiScan:
     )
 
 
+def _make_coronal_scan(seed: int = 456) -> NiftiScan:
+    rng = np.random.default_rng(seed)
+    data = rng.normal(size=(64, 16, 64)).astype(np.float32)
+    robust_low = float(np.percentile(data, 0.5))
+    robust_high = float(np.percentile(data, 99.5))
+    return NiftiScan(
+        data=data,
+        affine=np.eye(4, dtype=np.float32),
+        spacing=np.asarray([1.0, 1.0, 1.0], dtype=np.float32),
+        modality="CT",
+        base_patch_mm=16.0,
+        robust_median=float(np.median(data)),
+        robust_std=float(np.std(data)),
+        robust_low=robust_low,
+        robust_high=robust_high,
+    )
+
+
 def test_train_sample_methods_are_active_and_shape_stable() -> None:
     scan = _make_scan()
 
@@ -82,9 +100,42 @@ def test_train_sample_manual_overrides_are_respected() -> None:
     np.testing.assert_array_equal(result["prism_center_vox"], center)
     np.testing.assert_array_equal(result["patch_centers_vox"], patch_centers)
     np.testing.assert_allclose(result["rotation_degrees"], np.asarray([10.0, -5.0, 3.0], dtype=np.float32))
+    np.testing.assert_allclose(
+        result["rotation_augmentation_degrees"],
+        np.asarray([10.0, -5.0, 3.0], dtype=np.float32),
+    )
     assert result["wc"] == 50.0
     assert result["ww"] == 250.0
     assert 0.0 < result["sampling_radius_mm"] <= 12.0
+
+
+def test_train_sample_applies_native_hint_plus_rotation_augmentation() -> None:
+    scan = _make_coronal_scan()
+    result = scan.train_sample(
+        3,
+        seed=17,
+        method="optimized_fused",
+        rotation_augmentation_degrees=(5.0, -3.0, 2.0),
+        apply_native_orientation_hint=True,
+    )
+    np.testing.assert_allclose(result["rotation_hint_degrees"], np.asarray([90.0, 0.0, 0.0], dtype=np.float32))
+    np.testing.assert_allclose(
+        result["rotation_augmentation_degrees"],
+        np.asarray([5.0, -3.0, 2.0], dtype=np.float32),
+    )
+    np.testing.assert_allclose(result["rotation_degrees"], np.asarray([95.0, -3.0, 2.0], dtype=np.float32))
+
+
+def test_train_sample_random_rotation_augmentation_is_bounded() -> None:
+    scan = _make_scan(seed=12)
+    result = scan.train_sample(
+        4,
+        seed=55,
+        method="optimized_fused",
+        rotation_augmentation_max_degrees=7.5,
+    )
+    aug = np.asarray(result["rotation_augmentation_degrees"], dtype=np.float32)
+    assert np.all(np.abs(aug) <= 7.5 + 1e-6)
 
 
 def test_infer_scan_geometry_prefers_spacing_for_thin_axis() -> None:

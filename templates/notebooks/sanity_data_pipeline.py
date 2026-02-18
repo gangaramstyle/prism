@@ -423,6 +423,13 @@ def _(geometry, scan, suggested_wc_default, suggested_ww_default):
     sample_mode = mo.ui.dropdown(options=["pipeline-random", "manual-debug"], value="manual-debug", label="Sampling mode")
     sample_seed = mo.ui.number(label="Sample seed", value=1234, step=1)
     lock_b_to_a = mo.ui.checkbox(label="Manual mode: make View B identical to View A", value=False)
+    random_aug_max_deg = mo.ui.slider(
+        label="Pipeline-random max |rotation augmentation| (deg)",
+        start=0.0,
+        stop=45.0,
+        step=0.5,
+        value=10.0,
+    )
 
     default_center = [int(v) // 2 for v in scan.data.shape]
     default_wc = float(suggested_wc_default)
@@ -434,18 +441,18 @@ def _(geometry, scan, suggested_wc_default, suggested_ww_default):
     a_center_x = mo.ui.number(label="A center X", value=default_center[0], start=0, stop=int(scan.data.shape[0] - 1), step=1)
     a_center_y = mo.ui.number(label="A center Y", value=default_center[1], start=0, stop=int(scan.data.shape[1] - 1), step=1)
     a_center_z = mo.ui.number(label="A center Z", value=default_center[2], start=0, stop=int(scan.data.shape[2] - 1), step=1)
-    a_rot_x = mo.ui.slider(label="A rot X (deg)", start=-180, stop=180, step=1, value=int(round(rot_base[0])))
-    a_rot_y = mo.ui.slider(label="A rot Y (deg)", start=-180, stop=180, step=1, value=int(round(rot_base[1])))
-    a_rot_z = mo.ui.slider(label="A rot Z (deg)", start=-180, stop=180, step=1, value=int(round(rot_base[2])))
+    a_aug_x = mo.ui.slider(label="A rot-aug X (deg)", start=-45, stop=45, step=1, value=0)
+    a_aug_y = mo.ui.slider(label="A rot-aug Y (deg)", start=-45, stop=45, step=1, value=0)
+    a_aug_z = mo.ui.slider(label="A rot-aug Z (deg)", start=-45, stop=45, step=1, value=0)
     a_wc = mo.ui.number(label="A WC", value=default_wc, step=1.0)
     a_ww = mo.ui.number(label="A WW", value=default_ww, start=1.0, step=1.0)
 
     b_center_x = mo.ui.number(label="B center X", value=default_center[0], start=0, stop=int(scan.data.shape[0] - 1), step=1)
     b_center_y = mo.ui.number(label="B center Y", value=default_center[1], start=0, stop=int(scan.data.shape[1] - 1), step=1)
     b_center_z = mo.ui.number(label="B center Z", value=default_center[2], start=0, stop=int(scan.data.shape[2] - 1), step=1)
-    b_rot_x = mo.ui.slider(label="B rot X (deg)", start=-180, stop=180, step=1, value=int(round(rot_base[0])))
-    b_rot_y = mo.ui.slider(label="B rot Y (deg)", start=-180, stop=180, step=1, value=int(round(rot_base[1])))
-    b_rot_z = mo.ui.slider(label="B rot Z (deg)", start=-180, stop=180, step=1, value=int(round(rot_base[2])))
+    b_aug_x = mo.ui.slider(label="B rot-aug X (deg)", start=-45, stop=45, step=1, value=0)
+    b_aug_y = mo.ui.slider(label="B rot-aug Y (deg)", start=-45, stop=45, step=1, value=0)
+    b_aug_z = mo.ui.slider(label="B rot-aug Z (deg)", start=-45, stop=45, step=1, value=0)
     b_wc = mo.ui.number(label="B WC", value=default_wc, step=1.0)
     b_ww = mo.ui.number(label="B WW", value=default_ww, start=1.0, step=1.0)
 
@@ -453,14 +460,14 @@ def _(geometry, scan, suggested_wc_default, suggested_ww_default):
         [
             mo.md("## Step 2: Select Prism Center / Rotation / Window"),
             mo.md(
-                f"Native orientation hint (deg): `{rot_base}`. Rotation sliders are absolute and default to this hint."
+                f"Native orientation hint (deg): `{rot_base}`. Effective rotation is computed in shared path as `hint + rot-aug`."
             ),
-            mo.hstack([n_patches, patch_output_px, method, sample_mode, sample_seed, lock_b_to_a]),
+            mo.hstack([n_patches, patch_output_px, method, sample_mode, sample_seed, lock_b_to_a, random_aug_max_deg]),
             mo.hstack([sampling_radius_mm]),
             mo.md("### View A manual controls"),
-            mo.hstack([a_center_x, a_center_y, a_center_z, a_rot_x, a_rot_y, a_rot_z, a_wc, a_ww]),
+            mo.hstack([a_center_x, a_center_y, a_center_z, a_aug_x, a_aug_y, a_aug_z, a_wc, a_ww]),
             mo.md("### View B manual controls"),
-            mo.hstack([b_center_x, b_center_y, b_center_z, b_rot_x, b_rot_y, b_rot_z, b_wc, b_ww]),
+            mo.hstack([b_center_x, b_center_y, b_center_z, b_aug_x, b_aug_y, b_aug_z, b_wc, b_ww]),
         ]
     )
 
@@ -471,21 +478,22 @@ def _(geometry, scan, suggested_wc_default, suggested_ww_default):
         sample_mode,
         sample_seed,
         lock_b_to_a,
+        random_aug_max_deg,
         sampling_radius_mm,
         a_center_x,
         a_center_y,
         a_center_z,
-        a_rot_x,
-        a_rot_y,
-        a_rot_z,
+        a_aug_x,
+        a_aug_y,
+        a_aug_z,
         a_wc,
         a_ww,
         b_center_x,
         b_center_y,
         b_center_z,
-        b_rot_x,
-        b_rot_y,
-        b_rot_z,
+        b_aug_x,
+        b_aug_y,
+        b_aug_z,
         b_wc,
         b_ww,
     )
@@ -493,26 +501,27 @@ def _(geometry, scan, suggested_wc_default, suggested_ww_default):
 
 @app.cell
 def _(
+    a_aug_x,
+    a_aug_y,
+    a_aug_z,
     a_center_x,
     a_center_y,
     a_center_z,
-    a_rot_x,
-    a_rot_y,
-    a_rot_z,
     a_wc,
     a_ww,
+    b_aug_x,
+    b_aug_y,
+    b_aug_z,
     b_center_x,
     b_center_y,
     b_center_z,
-    b_rot_x,
-    b_rot_y,
-    b_rot_z,
     b_wc,
     b_ww,
     lock_b_to_a,
     method,
     n_patches,
     patch_output_px,
+    random_aug_max_deg,
     sample_mode,
     sample_seed,
     sampling_radius_mm,
@@ -524,24 +533,29 @@ def _(
         "target_patch_size": int(patch_output_px.value),
         "method": str(method.value),
     }
-    a_rotation_abs = (
-        float(a_rot_x.value),
-        float(a_rot_y.value),
-        float(a_rot_z.value),
+    a_rotation_aug = (
+        float(a_aug_x.value),
+        float(a_aug_y.value),
+        float(a_aug_z.value),
     )
-    b_rotation_abs = (
-        float(b_rot_x.value),
-        float(b_rot_y.value),
-        float(b_rot_z.value),
+    b_rotation_aug = (
+        float(b_aug_x.value),
+        float(b_aug_y.value),
+        float(b_aug_z.value),
     )
+    shared_rotation_kwargs = {
+        "apply_native_orientation_hint": True,
+        "rotation_augmentation_max_degrees": float(random_aug_max_deg.value),
+    }
 
     if str(sample_mode.value) == "pipeline-random":
-        view_a = scan.train_sample(seed=int(sample_seed.value) * 2, **common)
-        view_b = scan.train_sample(seed=int(sample_seed.value) * 2 + 1, **common)
+        view_a = scan.train_sample(seed=int(sample_seed.value) * 2, **common, **shared_rotation_kwargs)
+        view_b = scan.train_sample(seed=int(sample_seed.value) * 2 + 1, **common, **shared_rotation_kwargs)
     else:
         a_kwargs = {
             "sampling_radius_mm": float(sampling_radius_mm.value),
-            "rotation_degrees": a_rotation_abs,
+            "rotation_augmentation_degrees": a_rotation_aug,
+            "apply_native_orientation_hint": True,
             "subset_center_vox": np.asarray(
                 [int(a_center_x.value), int(a_center_y.value), int(a_center_z.value)],
                 dtype=np.int64,
@@ -556,7 +570,8 @@ def _(
         else:
             b_kwargs = {
                 "sampling_radius_mm": float(sampling_radius_mm.value),
-                "rotation_degrees": b_rotation_abs,
+                "rotation_augmentation_degrees": b_rotation_aug,
+                "apply_native_orientation_hint": True,
                 "subset_center_vox": np.asarray(
                     [int(b_center_x.value), int(b_center_y.value), int(b_center_z.value)],
                     dtype=np.int64,
@@ -587,11 +602,19 @@ def _(pair_targets, view_a, view_b):
             {
                 "a_center_vox": tuple(int(v) for v in np.asarray(view_a["prism_center_vox"]).tolist()),
                 "a_center_mm": tuple(float(v) for v in np.asarray(view_a["prism_center_pt"]).tolist()),
+                "a_rotation_hint_deg": tuple(float(v) for v in np.asarray(view_a["rotation_hint_degrees"]).tolist()),
+                "a_rotation_aug_deg": tuple(
+                    float(v) for v in np.asarray(view_a["rotation_augmentation_degrees"]).tolist()
+                ),
                 "a_rotation_deg": tuple(float(v) for v in np.asarray(view_a["rotation_degrees"]).tolist()),
                 "a_window_wc_ww": (float(view_a["wc"]), float(view_a["ww"])),
                 "a_target_patch_size": int(view_a["target_patch_size"]),
                 "b_center_vox": tuple(int(v) for v in np.asarray(view_b["prism_center_vox"]).tolist()),
                 "b_center_mm": tuple(float(v) for v in np.asarray(view_b["prism_center_pt"]).tolist()),
+                "b_rotation_hint_deg": tuple(float(v) for v in np.asarray(view_b["rotation_hint_degrees"]).tolist()),
+                "b_rotation_aug_deg": tuple(
+                    float(v) for v in np.asarray(view_b["rotation_augmentation_degrees"]).tolist()
+                ),
                 "b_rotation_deg": tuple(float(v) for v in np.asarray(view_b["rotation_degrees"]).tolist()),
                 "b_window_wc_ww": (float(view_b["wc"]), float(view_b["ww"])),
                 "b_target_patch_size": int(view_b["target_patch_size"]),

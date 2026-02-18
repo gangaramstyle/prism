@@ -161,6 +161,8 @@ def run_training(config: RunConfig) -> dict[str, Any]:
         broken_series_log_path=str(broken_log_path),
         scratch_dir=worker_scratch_dir,
         pair_views=True,
+        apply_native_orientation_hint=config.data.apply_native_orientation_hint,
+        rotation_augmentation_max_degrees=config.data.rotation_augmentation_max_degrees,
     )
 
     loader_kwargs: dict[str, Any] = {

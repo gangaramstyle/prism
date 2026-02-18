@@ -378,6 +378,8 @@ class ShardedScanDataset(IterableDataset):
         broken_series_log_path: str,
         scratch_dir: str | None = None,
         pair_views: bool = True,
+        apply_native_orientation_hint: bool = True,
+        rotation_augmentation_max_degrees: float = 10.0,
     ) -> None:
         self.scan_records = list(scan_records)
         self.n_patches = int(n_patches)
@@ -394,6 +396,8 @@ class ShardedScanDataset(IterableDataset):
         self.broken_series_log_path = broken_series_log_path
         self.scratch_dir = scratch_dir
         self.pair_views = bool(pair_views)
+        self.apply_native_orientation_hint = bool(apply_native_orientation_hint)
+        self.rotation_augmentation_max_degrees = float(rotation_augmentation_max_degrees)
 
     def __iter__(self):
         worker = torch.utils.data.get_worker_info()
@@ -467,11 +471,16 @@ class ShardedScanDataset(IterableDataset):
 
                 try:
                     scan = slot["scan"]
+                    sample_kwargs = {
+                        "method": self.method,
+                        "apply_native_orientation_hint": self.apply_native_orientation_hint,
+                        "rotation_augmentation_max_degrees": self.rotation_augmentation_max_degrees,
+                    }
                     if self.pair_views:
-                        result_a = scan.train_sample(self.n_patches, seed=sample_seed * 2, method=self.method)
-                        result_b = scan.train_sample(self.n_patches, seed=sample_seed * 2 + 1, method=self.method)
+                        result_a = scan.train_sample(self.n_patches, seed=sample_seed * 2, **sample_kwargs)
+                        result_b = scan.train_sample(self.n_patches, seed=sample_seed * 2 + 1, **sample_kwargs)
                     else:
-                        result_a = scan.train_sample(self.n_patches, seed=sample_seed, method=self.method)
+                        result_a = scan.train_sample(self.n_patches, seed=sample_seed, **sample_kwargs)
                         result_b = result_a
                 except SmallScanError as exc:
                     pool.mark_series_broken(slot_idx, exc)
