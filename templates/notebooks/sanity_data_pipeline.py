@@ -6,17 +6,16 @@ app = marimo.App(width="full")
 
 with app.setup:
     import os
-    import base64
-    import io
     import sys
     import time
     from pathlib import Path
 
     import altair as alt
+    import matplotlib.pyplot as plt
     import marimo as mo
     import numpy as np
     import polars as pl
-    from PIL import Image, ImageDraw
+    from PIL import Image
 
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -149,90 +148,6 @@ with app.setup:
         ry = np.array([[cy, 0.0, sy], [0.0, 1.0, 0.0], [-sy, 0.0, cy]], dtype=np.float32)
         rz = np.array([[cz, -sz, 0.0], [sz, cz, 0.0], [0.0, 0.0, 1.0]], dtype=np.float32)
         return rz @ ry @ rx
-
-    def _hex_to_rgb(value: str) -> tuple[int, int, int]:
-        text = value.strip().lstrip("#")
-        if len(text) != 6:
-            return (255, 255, 0)
-        return (int(text[0:2], 16), int(text[2:4], 16), int(text[4:6], 16))
-
-    def render_position_parallax_gif_base64(
-        rel_orig: np.ndarray,
-        rel_selected: np.ndarray,
-        color_hex: list[str],
-        *,
-        width: int = 520,
-        height: int = 360,
-        frames: int = 28,
-    ) -> str:
-        orig = np.asarray(rel_orig, dtype=np.float32)
-        sel = np.asarray(rel_selected, dtype=np.float32)
-        if orig.shape != sel.shape or orig.ndim != 2 or orig.shape[1] != 3 or orig.shape[0] == 0:
-            return ""
-
-        pts = np.concatenate([orig, sel], axis=0)
-        max_abs = float(np.max(np.abs(pts)))
-        scale = max(max_abs, 1e-6)
-        orig_n = orig / scale
-        sel_n = sel / scale
-
-        center_x = width // 2
-        center_y = height // 2
-        proj_scale = int(min(width, height) * 0.34)
-        focal = 2.5
-        pad = 20
-
-        palette = [_hex_to_rgb(c) for c in color_hex]
-        if len(palette) < orig.shape[0]:
-            palette = palette + [(255, 255, 0)] * (orig.shape[0] - len(palette))
-
-        pil_frames: list[Image.Image] = []
-        for i in range(int(max(frames, 2))):
-            phase = 2.0 * np.pi * float(i) / float(max(frames, 2))
-            yaw = 18.0 * np.sin(phase)
-            pitch = 8.0 * np.sin(phase + 0.9)
-            rot = euler_xyz_to_matrix((pitch, 0.0, yaw)).astype(np.float32)
-
-            o = (rot @ orig_n.T).T
-            s = (rot @ sel_n.T).T
-
-            def _project(arr: np.ndarray) -> np.ndarray:
-                z = arr[:, 2]
-                depth = focal / np.clip(focal - z, 0.6, None)
-                x = arr[:, 0] * depth
-                y = arr[:, 1] * depth
-                px = np.clip(np.rint(center_x + x * proj_scale), pad, width - pad).astype(np.int32)
-                py = np.clip(np.rint(center_y - y * proj_scale), pad, height - pad).astype(np.int32)
-                return np.stack([px, py], axis=1)
-
-            o2 = _project(o)
-            s2 = _project(s)
-
-            img = Image.new("RGB", (width, height), color=(15, 18, 26))
-            draw = ImageDraw.Draw(img)
-
-            for j in range(orig.shape[0]):
-                color = tuple(int(v) for v in palette[j])
-                ox, oy = int(o2[j, 0]), int(o2[j, 1])
-                sx, sy = int(s2[j, 0]), int(s2[j, 1])
-                draw.line([(ox - 4, oy), (ox + 4, oy)], fill=color, width=2)
-                draw.line([(ox, oy - 4), (ox, oy + 4)], fill=color, width=2)
-                draw.ellipse([(sx - 3, sy - 3), (sx + 3, sy + 3)], outline=color, fill=color, width=1)
-
-            draw.text((10, 10), "3D parallax: circle=selected, cross=original (same color)", fill=(220, 220, 220))
-            pil_frames.append(img)
-
-        buff = io.BytesIO()
-        pil_frames[0].save(
-            buff,
-            format="GIF",
-            save_all=True,
-            append_images=pil_frames[1:],
-            loop=0,
-            duration=90,
-            disposal=2,
-        )
-        return base64.b64encode(buff.getvalue()).decode("ascii")
 
     def _plane_axes_for_slice(axis: int) -> tuple[int, int]:
         if axis == 2:  # axial -> rows=x, cols=y
@@ -1375,14 +1290,17 @@ def _(n_patches):
     coord_rows = mo.ui.slider(label="Patch rows in coordinate table", start=1, stop=200, step=1, value=30)
     coord_view = mo.ui.dropdown(options=["A", "B"], value="A", label="Coordinate table view")
     coord_frame = mo.ui.dropdown(options=["ras", "aug", "final"], value="aug", label="Coordinate frame")
+    view_elev = mo.ui.slider(label="3D view elev", start=-90, stop=90, step=1, value=20)
+    view_azim = mo.ui.slider(label="3D view azim", start=-180, stop=180, step=1, value=35)
 
     mo.vstack(
         [
             mo.md("## Step 3: Select/Inspect Patches"),
             mo.hstack([preview_patches, preview_cols, coord_rows, coord_view, coord_frame]),
+            mo.hstack([view_elev, view_azim]),
         ]
     )
-    return coord_frame, coord_rows, coord_view, preview_cols, preview_patches
+    return coord_frame, coord_rows, coord_view, preview_cols, preview_patches, view_azim, view_elev
 
 
 @app.cell
@@ -1393,11 +1311,13 @@ def _(
     fit_image_for_display,
     overlay_slice,
     patch_mm,
+    plt,
     preview_cols,
     preview_patches,
-    render_position_parallax_gif_base64,
     sampling_radius_mm,
     scan,
+    view_azim,
+    view_elev,
     view_a,
     view_b,
 ):
@@ -1530,11 +1450,55 @@ def _(
         )
     )
     sagittal_chart = (sagittal_sel + sagittal_orig).properties(title=f"{frame.upper()} frame: sagittal YZ", width=280, height=240)
-    parallax_b64 = render_position_parallax_gif_base64(rel_ras, rel_selected, color_hex)
-    if parallax_b64:
-        parallax_view = mo.md(f"![3D position parallax](data:image/gif;base64,{parallax_b64})")
-    else:
-        parallax_view = mo.md("_3D parallax view unavailable (no points)._")
+
+    fig = plt.figure(figsize=(6.4, 4.8))
+    ax3d = fig.add_subplot(111, projection="3d")
+    colors_float = rgb_u8.astype(np.float32) / 255.0
+    ax3d.scatter(
+        rel_selected[:, 0],
+        rel_selected[:, 1],
+        rel_selected[:, 2],
+        c=colors_float,
+        marker="o",
+        s=20,
+        depthshade=False,
+        label="selected frame",
+    )
+    ax3d.scatter(
+        rel_ras[:, 0],
+        rel_ras[:, 1],
+        rel_ras[:, 2],
+        c=colors_float,
+        marker="x",
+        s=28,
+        linewidths=1.2,
+        depthshade=False,
+        label="original RAS",
+    )
+    n_links = min(int(rel_selected.shape[0]), 200)
+    for i in range(n_links):
+        ax3d.plot(
+            [float(rel_ras[i, 0]), float(rel_selected[i, 0])],
+            [float(rel_ras[i, 1]), float(rel_selected[i, 1])],
+            [float(rel_ras[i, 2]), float(rel_selected[i, 2])],
+            color=(0.7, 0.7, 0.7, 0.25),
+            linewidth=0.7,
+        )
+    ax3d.set_xlabel("x (mm)")
+    ax3d.set_ylabel("y (mm)")
+    ax3d.set_zlabel("z (mm)")
+    ax3d.set_title(f"3D position debugger ({frame.upper()})")
+    ax3d.view_init(elev=float(view_elev.value), azim=float(view_azim.value))
+    max_extent = max(
+        float(np.max(np.abs(rel_selected))) if rel_selected.size else 1.0,
+        float(np.max(np.abs(rel_ras))) if rel_ras.size else 1.0,
+        1.0,
+    )
+    lim = max_extent * 1.15
+    ax3d.set_xlim(-lim, lim)
+    ax3d.set_ylim(-lim, lim)
+    ax3d.set_zlim(-lim, lim)
+    ax3d.legend(loc="upper right")
 
     center_vox = np.asarray(selected_view["prism_center_vox"], dtype=np.int64)
     center_color = rgb_u8
@@ -1604,7 +1568,7 @@ def _(
 - `patch_shape_vox` before resize: `{tuple(int(v) for v in scan.patch_shape_vox.tolist())}`
 - final per-patch tensor shape: `{tuple(int(v) for v in np.asarray(view_a["normalized_patches"]).shape[1:3])}`
 - Position debugger frame: `{frame}` (`rgb = normalized [x,y,z]` in selected frame; scale=`{scale_mm:.1f}mm`)
-- Position scatter markers: `circles = selected frame`, `red crosses = pre-rotation RAS positions`
+- Position markers: `circles = selected frame`, `red crosses = pre-rotation RAS positions` (same color per patch)
 """
             ),
             mo.hstack(
@@ -1615,7 +1579,7 @@ def _(
             ),
             mo.md("Color-coded relative-position debugger"),
             mo.hstack([axial_chart, coronal_chart, sagittal_chart]),
-            parallax_view,
+            fig,
             mo.hstack(
                 [
                     mo.vstack([mo.md(f"Native axial z={int(center_vox[2])}"), mo.image(src=overlay_axial_img, width=overlay_axial_w)]),
