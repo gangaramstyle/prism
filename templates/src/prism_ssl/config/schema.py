@@ -83,7 +83,7 @@ class TrainConfig:
 
 @dataclass
 class ModelConfig:
-    name: str = "patch_mlp"
+    name: str = "vit_l"
     d_model: int = 256
     num_layers: int = 24
     num_heads: int = 16

@@ -5,7 +5,7 @@ from __future__ import annotations
 import glob
 import math
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -182,12 +182,46 @@ def _matrix_to_euler_xyz_degrees(matrix: np.ndarray) -> tuple[float, float, floa
     return (math.degrees(x), math.degrees(y), math.degrees(z))
 
 
+def _affine_linear_translation(affine: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    arr = np.asarray(affine, dtype=np.float32)
+    if arr.shape != (4, 4):
+        raise ValueError(f"Expected affine shape (4, 4), got {arr.shape}")
+    linear = np.asarray(arr[:3, :3], dtype=np.float32)
+    translation = np.asarray(arr[:3, 3], dtype=np.float32)
+    return linear, translation
+
+
+def voxel_points_to_world(points_vox: np.ndarray, affine: np.ndarray) -> np.ndarray:
+    """Convert voxel coordinates (N, 3) to world coordinates (N, 3) with affine."""
+    pts = np.asarray(points_vox, dtype=np.float32)
+    if pts.ndim == 1:
+        pts = pts[np.newaxis, :]
+    if pts.ndim != 2 or pts.shape[1] != 3:
+        raise ValueError(f"Expected points_vox shape (N, 3), got {pts.shape}")
+    linear, translation = _affine_linear_translation(affine)
+    return (pts @ linear.T + translation[np.newaxis, :]).astype(np.float32, copy=False)
+
+
+def world_points_to_voxel(points_world: np.ndarray, affine: np.ndarray) -> np.ndarray:
+    """Convert world coordinates (N, 3) to voxel coordinates (N, 3) with affine."""
+    pts = np.asarray(points_world, dtype=np.float32)
+    if pts.ndim == 1:
+        pts = pts[np.newaxis, :]
+    if pts.ndim != 2 or pts.shape[1] != 3:
+        raise ValueError(f"Expected points_world shape (N, 3), got {pts.shape}")
+    linear, translation = _affine_linear_translation(affine)
+    linear_inv = np.linalg.inv(np.asarray(linear, dtype=np.float64))
+    centered = pts.astype(np.float64) - translation.astype(np.float64)[np.newaxis, :]
+    return (centered @ linear_inv.T).astype(np.float32, copy=False)
+
+
 def rotate_volume_about_center(
     volume: np.ndarray,
     center_vox: np.ndarray,
     rotation_matrix: np.ndarray,
     *,
     spacing_mm: np.ndarray | tuple[float, float, float] | None = None,
+    affine_linear: np.ndarray | None = None,
     interpolation_order: int = 1,
     mode: str = "nearest",
 ) -> np.ndarray:
@@ -206,7 +240,14 @@ def rotate_volume_about_center(
             f"Invalid center/rotation shape: center={tuple(center.shape)} rotation={tuple(rot.shape)}"
         )
     rot_inv = np.linalg.inv(rot)
-    if spacing_mm is None:
+    if affine_linear is not None:
+        linear = np.asarray(affine_linear, dtype=np.float64)
+        if linear.shape != (3, 3):
+            raise ValueError(f"Invalid affine_linear shape: {linear.shape}")
+        linear_inv = np.linalg.inv(linear)
+        # x_in_vox = A^-1 R^-1 A x_out_vox + offset
+        matrix = linear_inv @ rot_inv @ linear
+    elif spacing_mm is None:
         matrix = rot_inv
     else:
         spacing = np.asarray(spacing_mm, dtype=np.float64).reshape(-1)
@@ -229,8 +270,9 @@ def rotate_volume_about_center(
 def rotated_relative_points_to_voxel(
     relative_points_pt: np.ndarray,
     prism_center_vox: np.ndarray,
-    spacing_mm: np.ndarray,
+    spacing_mm: np.ndarray | None = None,
     *,
+    affine: np.ndarray | None = None,
     shape_vox: tuple[int, int, int] | np.ndarray | None = None,
 ) -> np.ndarray:
     """Convert rotated relative point coordinates (mm) back to voxel indices."""
@@ -238,14 +280,22 @@ def rotated_relative_points_to_voxel(
     if rel.ndim != 2 or rel.shape[1] != 3:
         raise ValueError(f"Expected relative_points_pt shape (N, 3), got {rel.shape}")
     center_vox = np.asarray(prism_center_vox, dtype=np.float32).reshape(-1)
-    spacing = np.asarray(spacing_mm, dtype=np.float32).reshape(-1)
-    if center_vox.size != 3 or spacing.size != 3:
-        raise ValueError(
-            f"Invalid center/spacing shape: center={tuple(center_vox.shape)} spacing={tuple(spacing.shape)}"
-        )
-    center_pt = center_vox * spacing
-    points_pt = center_pt[np.newaxis, :] + rel
-    points_vox = np.rint(points_pt / spacing).astype(np.int64)
+    if center_vox.size != 3:
+        raise ValueError(f"Invalid center shape: {tuple(center_vox.shape)}")
+
+    if affine is not None:
+        center_world = voxel_points_to_world(center_vox[np.newaxis, :], np.asarray(affine, dtype=np.float32))[0]
+        points_world = center_world[np.newaxis, :] + rel
+        points_vox = np.rint(world_points_to_voxel(points_world, np.asarray(affine, dtype=np.float32))).astype(np.int64)
+    else:
+        if spacing_mm is None:
+            raise ValueError("Either spacing_mm or affine must be provided")
+        spacing = np.asarray(spacing_mm, dtype=np.float32).reshape(-1)
+        if spacing.size != 3:
+            raise ValueError(f"Invalid spacing shape: {tuple(spacing.shape)}")
+        center_pt = center_vox * spacing
+        points_pt = center_pt[np.newaxis, :] + rel
+        points_vox = np.rint(points_pt / spacing).astype(np.int64)
     if shape_vox is not None:
         upper = np.asarray(shape_vox, dtype=np.int64).reshape(-1)
         if upper.size != 3:
@@ -266,10 +316,41 @@ class NiftiScan:
     robust_low: float
     robust_high: float
     target_patch_size: int = 16
+    affine_linear: np.ndarray = field(init=False, repr=False)
+    affine_translation: np.ndarray = field(init=False, repr=False)
+    affine_linear_inv: np.ndarray = field(init=False, repr=False)
+    voxel_axis_mm: np.ndarray = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self.data = np.asarray(self.data, dtype=np.float32)
+        self.affine = np.asarray(self.affine, dtype=np.float32)
+        self.spacing = np.asarray(self.spacing, dtype=np.float32)
+        if self.data.ndim != 3:
+            raise ValueError(f"NiftiScan data must be 3D, got shape={self.data.shape}")
+        if self.affine.shape != (4, 4):
+            raise ValueError(f"NiftiScan affine must be shape (4,4), got {self.affine.shape}")
+        if self.spacing.shape != (3,) or np.any(self.spacing <= 0):
+            raise ValueError(f"NiftiScan spacing must be positive shape (3,), got {self.spacing}")
+        linear, translation = _affine_linear_translation(self.affine)
+        linear = np.asarray(linear, dtype=np.float32)
+        axis_norm = np.linalg.norm(linear.astype(np.float64), axis=0).astype(np.float32)
+        spacing = np.asarray(self.spacing, dtype=np.float32)
+        # Keep affine orientation/shear directions, but align axis scale to header spacing.
+        # This guards against synthetic/legacy cases where affine is identity but spacing != 1.
+        if np.any(axis_norm <= 1e-6):
+            linear = np.diag(spacing.astype(np.float32))
+        elif not np.allclose(axis_norm, spacing, rtol=1e-3, atol=1e-3):
+            direction = linear / np.clip(axis_norm[np.newaxis, :], 1e-6, None)
+            linear = direction * spacing[np.newaxis, :]
+        self.affine_linear = np.asarray(linear, dtype=np.float32)
+        self.affine_translation = np.asarray(translation, dtype=np.float32)
+        self.affine_linear_inv = np.linalg.inv(self.affine_linear.astype(np.float64)).astype(np.float32, copy=False)
+        axis_mm = np.linalg.norm(self.affine_linear.astype(np.float64), axis=0).astype(np.float32)
+        self.voxel_axis_mm = np.clip(axis_mm, 1e-6, None)
 
     @property
     def geometry(self) -> ScanGeometry:
-        return infer_scan_geometry(self.data.shape, self.spacing)
+        return infer_scan_geometry(self.data.shape, self.voxel_axis_mm)
 
     @property
     def patch_mm(self) -> np.ndarray:
@@ -280,11 +361,11 @@ class NiftiScan:
 
     @property
     def patch_shape_vox(self) -> np.ndarray:
-        return np.maximum(np.ceil(self.patch_mm / self.spacing).astype(np.int64), 1)
+        return np.maximum(np.ceil(self.patch_mm / self.voxel_axis_mm).astype(np.int64), 1)
 
     def _sample_center(self, rng: np.random.Generator, sampling_radius_mm: float) -> np.ndarray:
         shape = np.asarray(self.data.shape, dtype=np.int64)
-        radius_vox = np.ceil(sampling_radius_mm / self.spacing).astype(np.int64)
+        radius_vox = np.ceil(sampling_radius_mm / self.voxel_axis_mm).astype(np.int64)
         half_patch = np.ceil(self.patch_shape_vox / 2.0).astype(np.int64)
         min_idx = half_patch + radius_vox
         max_idx = shape - half_patch - radius_vox - 1
@@ -386,11 +467,11 @@ class NiftiScan:
         if rotation_matrix is None:
             return offset_vectors
 
-        spacing = np.asarray(self.spacing, dtype=np.float32)
         inv_rot = np.asarray(rotation_matrix, dtype=np.float32).T
-        offset_mm = offset_vectors * spacing[np.newaxis, :]
+        offset_mm = (offset_vectors @ self.affine_linear.T).astype(np.float32, copy=False)
         src_offset_mm = (inv_rot @ offset_mm.T).T
-        return (src_offset_mm / np.maximum(spacing[np.newaxis, :], 1e-6)).astype(np.float32, copy=False)
+        src_offset_vox = (src_offset_mm @ self.affine_linear_inv.T).astype(np.float32, copy=False)
+        return src_offset_vox
 
     def _extract_patches_legacy_loop(
         self,
@@ -487,7 +568,7 @@ class NiftiScan:
             raise SmallScanError(
                 f"scan too small for patch extraction: shape={tuple(shape.tolist())} patch={tuple(self.patch_shape_vox.tolist())}"
             )
-        max_radius_mm = float(max_radius_vox * float(np.min(self.spacing)))
+        max_radius_mm = float(max_radius_vox * float(np.min(self.voxel_axis_mm)))
         target_radius = float(rng.uniform(20.0, 30.0)) if sampling_radius_mm is None else float(sampling_radius_mm)
         sampling_radius_mm = min(target_radius, max_radius_mm * 0.9)
         sampling_radius_mm = max(sampling_radius_mm, 0.0)
@@ -509,7 +590,8 @@ class NiftiScan:
                 delta_mm = rng.uniform(-sampling_radius_mm, sampling_radius_mm, size=3)
                 if float(np.linalg.norm(delta_mm)) > sampling_radius_mm:
                     delta_mm = delta_mm * (sampling_radius_mm / max(np.linalg.norm(delta_mm), 1e-6))
-                center = prism_center + np.rint(delta_mm / self.spacing).astype(np.int64)
+                delta_vox = (self.affine_linear_inv @ np.asarray(delta_mm, dtype=np.float32)).astype(np.float32, copy=False)
+                center = prism_center + np.rint(delta_vox).astype(np.int64)
                 center = np.clip(center, 0, np.asarray(self.data.shape, dtype=np.int64) - 1)
                 centers.append(center)
             centers_arr = np.asarray(centers, dtype=np.int64)
@@ -591,8 +673,8 @@ class NiftiScan:
         clipped = np.clip(raw_patches, w_min, w_max)
         normalized = ((clipped - w_min) / max(w_max - w_min, 1e-6)) * 2.0 - 1.0
 
-        prism_center_pt = (prism_center.astype(np.float32) * self.spacing.astype(np.float32)).astype(np.float32)
-        patch_centers_pt = (centers_arr.astype(np.float32) * self.spacing.astype(np.float32)).astype(np.float32)
+        prism_center_pt = voxel_points_to_world(prism_center.astype(np.float32), self.affine)[0]
+        patch_centers_pt = voxel_points_to_world(centers_arr.astype(np.float32), self.affine)
         relative_patch_centers_pt_ras = patch_centers_pt - prism_center_pt
         relative_patch_centers_pt_aug = (aug_matrix @ relative_patch_centers_pt_ras.T).T.astype(
             np.float32,

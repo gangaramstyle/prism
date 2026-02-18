@@ -264,6 +264,7 @@ def run_training(config: RunConfig) -> dict[str, Any]:
             patches_b = batch["patches_b"].to(device, non_blocking=True)
             positions_b = batch["positions_b"].to(device, non_blocking=True)
 
+            batch["center_delta_mm"] = batch["center_delta_mm"].to(device, non_blocking=True)
             batch["center_distance_mm"] = batch["center_distance_mm"].to(device, non_blocking=True)
             batch["rotation_delta_deg"] = batch["rotation_delta_deg"].to(device, non_blocking=True)
             batch["window_delta"] = batch["window_delta"].to(device, non_blocking=True)
@@ -312,7 +313,7 @@ def run_training(config: RunConfig) -> dict[str, Any]:
             positives_mean = float(positives.float().mean().item())
 
             target_std_flags = [
-                diagnostics["target_distance_std"] < 1e-6,
+                diagnostics["target_center_delta_std"] < 1e-6,
                 diagnostics["target_rotation_std"] < 1e-6,
                 diagnostics["target_window_std"] < 1e-6,
             ]
@@ -358,21 +359,21 @@ def run_training(config: RunConfig) -> dict[str, Any]:
 
                 metrics = {
                     "train/loss": float(loss_bundle.total.item()),
-                    "train/loss_distance_mm": float(loss_bundle.distance.item()),
+                    "train/loss_center_delta_mm": float(loss_bundle.distance.item()),
                     "train/loss_rotation_deg": float(loss_bundle.rotation.item()),
                     "train/loss_window": float(loss_bundle.window.item()),
                     "train/loss_supcon": float(loss_bundle.supcon.item()),
                     "train/w_supcon": float(loss_bundle.supcon_weight),
-                    "train/target_distance_mm_mean": diagnostics["target_distance_mean"],
+                    "train/target_center_delta_mm_mean": diagnostics["target_center_delta_mean"],
                     "train/target_rotation_abs_mean": diagnostics["target_rotation_abs_mean"],
                     "train/target_window_abs_mean": diagnostics["target_window_abs_mean"],
-                    "train/target_distance_std": diagnostics["target_distance_std"],
+                    "train/target_center_delta_std": diagnostics["target_center_delta_std"],
                     "train/target_rotation_std": diagnostics["target_rotation_std"],
                     "train/target_window_std": diagnostics["target_window_std"],
-                    "train/pred_distance_std": diagnostics["pred_distance_std"],
+                    "train/pred_center_delta_std": diagnostics["pred_center_delta_std"],
                     "train/pred_rotation_std": diagnostics["pred_rotation_std"],
                     "train/pred_window_std": diagnostics["pred_window_std"],
-                    "train/pred_to_target_std_ratio_distance": diagnostics["pred_to_target_std_ratio_distance"],
+                    "train/pred_to_target_std_ratio_center_delta": diagnostics["pred_to_target_std_ratio_center_delta"],
                     "train/pred_to_target_std_ratio_rotation": diagnostics["pred_to_target_std_ratio_rotation"],
                     "train/pred_to_target_std_ratio_window": diagnostics["pred_to_target_std_ratio_window"],
                     "train/supcon_positives_per_anchor_mean": positives_mean,

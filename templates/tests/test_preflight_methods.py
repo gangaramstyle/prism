@@ -8,6 +8,8 @@ from prism_ssl.data.preflight import (
     infer_scan_geometry,
     rotate_volume_about_center,
     rotated_relative_points_to_voxel,
+    voxel_points_to_world,
+    world_points_to_voxel,
 )
 
 
@@ -65,6 +67,22 @@ def test_train_sample_methods_are_active_and_shape_stable() -> None:
 
     mean_abs_delta = float(np.mean(np.abs(legacy["normalized_patches"] - fused["normalized_patches"])))
     assert mean_abs_delta < 0.5
+
+
+def test_world_voxel_roundtrip_uses_affine_linear_part() -> None:
+    affine = np.asarray(
+        [
+            [0.8, 0.1, 0.0, 10.0],
+            [0.0, 0.9, 0.2, -5.0],
+            [0.1, 0.0, 1.2, 3.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ],
+        dtype=np.float32,
+    )
+    pts_vox = np.asarray([[10.0, 20.0, 30.0], [4.0, 6.0, 2.0], [31.0, 15.0, 8.0]], dtype=np.float32)
+    pts_world = voxel_points_to_world(pts_vox, affine)
+    pts_back = world_points_to_voxel(pts_world, affine)
+    np.testing.assert_allclose(pts_back, pts_vox, atol=1e-5)
 
 
 def test_unknown_train_sample_method_raises() -> None:
@@ -151,6 +169,23 @@ def test_train_sample_random_rotation_augmentation_is_bounded() -> None:
     )
     aug = np.asarray(result["rotation_augmentation_degrees"], dtype=np.float32)
     assert np.all(np.abs(aug) <= 7.5 + 1e-6)
+
+
+def test_rotated_relative_points_to_voxel_accepts_affine_path() -> None:
+    affine = np.asarray(
+        [
+            [0.7, 0.0, 0.0, 2.0],
+            [0.0, 0.9, 0.0, -1.0],
+            [0.0, 0.0, 1.4, 4.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ],
+        dtype=np.float32,
+    )
+    center = np.asarray([10, 20, 5], dtype=np.float32)
+    rel_mm = np.asarray([[0.7, 0.0, 0.0], [0.0, 1.8, 0.0], [0.0, 0.0, -2.8]], dtype=np.float32)
+    out = rotated_relative_points_to_voxel(rel_mm, center, affine=affine)
+    expected = np.asarray([[11, 20, 5], [10, 22, 5], [10, 20, 3]], dtype=np.int64)
+    np.testing.assert_array_equal(out, expected)
 
 
 def test_infer_scan_geometry_prefers_spacing_for_thin_axis() -> None:

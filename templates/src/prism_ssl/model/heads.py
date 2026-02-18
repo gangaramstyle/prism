@@ -8,12 +8,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from prism_ssl.model.backbone import PatchPositionEncoder, TransformerPatchPositionEncoder
+from prism_ssl.model.backbone import TransformerPatchPositionEncoder
 
 
 @dataclass
 class PrismModelOutput:
-    distance_mm: torch.Tensor
+    center_delta_mm: torch.Tensor
     rotation_delta_deg: torch.Tensor
     window_delta: torch.Tensor
     proj_a: torch.Tensor
@@ -24,7 +24,7 @@ class PrismSSLModel(nn.Module):
     def __init__(
         self,
         patch_dim: int = 256,
-        model_name: str = "patch_mlp",
+        model_name: str = "vit_l",
         d_model: int = 256,
         proj_dim: int = 128,
         num_layers: int = 24,
@@ -34,9 +34,7 @@ class PrismSSLModel(nn.Module):
     ):
         super().__init__()
         key = model_name.strip().lower()
-        if key in {"patch_mlp", "mlp"}:
-            self.encoder = PatchPositionEncoder(patch_dim=patch_dim, d_model=d_model, dropout=dropout)
-        elif key in {"vit_l", "vit_large", "vit-large"}:
+        if key in {"vit_l", "vit_large", "vit-large"}:
             self.encoder = TransformerPatchPositionEncoder(
                 patch_dim=patch_dim,
                 d_model=d_model,
@@ -46,9 +44,9 @@ class PrismSSLModel(nn.Module):
                 dropout=dropout,
             )
         else:
-            raise ValueError(f"Unknown model.name='{model_name}'. Supported: patch_mlp, vit_l")
+            raise ValueError(f"Unknown model.name='{model_name}'. Supported: vit_l")
 
-        self.distance_head = nn.Sequential(nn.LayerNorm(d_model * 2), nn.Linear(d_model * 2, 1))
+        self.distance_head = nn.Sequential(nn.LayerNorm(d_model * 2), nn.Linear(d_model * 2, 3))
         self.rotation_head = nn.Sequential(nn.LayerNorm(d_model * 2), nn.Linear(d_model * 2, 3))
         self.window_head = nn.Sequential(nn.LayerNorm(d_model * 2), nn.Linear(d_model * 2, 2))
 
@@ -70,7 +68,7 @@ class PrismSSLModel(nn.Module):
         emb_b = self.encoder(patches_b, positions_b)
         fused = torch.cat([emb_a, emb_b], dim=1)
 
-        distance_mm = self.distance_head(fused).squeeze(-1)
+        center_delta_mm = self.distance_head(fused)
         rotation_delta_deg = self.rotation_head(fused)
         window_delta = self.window_head(fused)
 
@@ -78,7 +76,7 @@ class PrismSSLModel(nn.Module):
         proj_b = F.normalize(self.proj_head(emb_b), dim=1)
 
         return PrismModelOutput(
-            distance_mm=distance_mm,
+            center_delta_mm=center_delta_mm,
             rotation_delta_deg=rotation_delta_deg,
             window_delta=window_delta,
             proj_a=proj_a,

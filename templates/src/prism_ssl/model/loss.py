@@ -55,11 +55,11 @@ def compute_loss_bundle(
     rotation_loss_fn: nn.Module,
     window_loss_fn: nn.Module,
 ) -> tuple[LossBundle, dict[str, float]]:
-    target_distance = batch["center_distance_mm"].float()
+    target_center_delta = batch["center_delta_mm"].float()
     target_rotation = batch["rotation_delta_deg"].float()
     target_window = batch["window_delta"].float()
 
-    pred_distance = outputs.distance_mm
+    pred_center_delta = outputs.center_delta_mm
     pred_rotation = outputs.rotation_delta_deg
     pred_window = outputs.window_delta
 
@@ -67,11 +67,11 @@ def compute_loss_bundle(
     pred_stats: dict[str, float] = {}
 
     if loss_cfg.normalize_targets:
-        pred_distance_n, target_distance_n, d_std = _normalize_pair(pred_distance, target_distance)
+        pred_center_delta_n, target_center_delta_n, d_std = _normalize_pair(pred_center_delta, target_center_delta)
         pred_rotation_n, target_rotation_n, r_std = _normalize_pair(pred_rotation, target_rotation)
         pred_window_n, target_window_n, w_std = _normalize_pair(pred_window, target_window)
 
-        loss_distance = distance_loss_fn(pred_distance_n, target_distance_n)
+        loss_distance = distance_loss_fn(pred_center_delta_n, target_center_delta_n)
         loss_rotation = rotation_loss_fn(pred_rotation_n, target_rotation_n)
         loss_window = window_loss_fn(pred_window_n, target_window_n)
 
@@ -79,7 +79,7 @@ def compute_loss_bundle(
         target_stats["rotation_std"] = float(r_std.item())
         target_stats["window_std"] = float(w_std.item())
     else:
-        loss_distance = distance_loss_fn(pred_distance, target_distance)
+        loss_distance = distance_loss_fn(pred_center_delta, target_center_delta)
         loss_rotation = rotation_loss_fn(pred_rotation, target_rotation)
         loss_window = window_loss_fn(pred_window, target_window)
 
@@ -105,24 +105,25 @@ def compute_loss_bundle(
         + w_supcon * loss_supcon
     )
 
-    pred_stats["distance_std"] = float(torch.std(pred_distance.detach()).item())
+    pred_stats["center_delta_std"] = float(torch.std(pred_center_delta.detach()).item())
     pred_stats["rotation_std"] = float(torch.std(pred_rotation.detach()).item())
     pred_stats["window_std"] = float(torch.std(pred_window.detach()).item())
 
     diagnostics = {
-        "target_distance_mean": float(torch.mean(target_distance).item()),
+        "target_center_delta_mean": float(torch.mean(target_center_delta).item()),
         "target_rotation_abs_mean": float(torch.mean(torch.abs(target_rotation)).item()),
         "target_window_abs_mean": float(torch.mean(torch.abs(target_window)).item()),
-        "target_distance_std": float(torch.std(target_distance).item()),
+        "target_center_delta_std": float(torch.std(target_center_delta).item()),
         "target_rotation_std": float(torch.std(target_rotation).item()),
         "target_window_std": float(torch.std(target_window).item()),
-        "pred_distance_mean": float(torch.mean(pred_distance.detach()).item()),
+        "pred_center_delta_mean": float(torch.mean(pred_center_delta.detach()).item()),
         "pred_rotation_abs_mean": float(torch.mean(torch.abs(pred_rotation.detach())).item()),
         "pred_window_abs_mean": float(torch.mean(torch.abs(pred_window.detach())).item()),
-        "pred_distance_std": pred_stats["distance_std"],
+        "pred_center_delta_std": pred_stats["center_delta_std"],
         "pred_rotation_std": pred_stats["rotation_std"],
         "pred_window_std": pred_stats["window_std"],
-        "pred_to_target_std_ratio_distance": pred_stats["distance_std"] / max(float(torch.std(target_distance).item()), 1e-6),
+        "pred_to_target_std_ratio_center_delta": pred_stats["center_delta_std"]
+        / max(float(torch.std(target_center_delta).item()), 1e-6),
         "pred_to_target_std_ratio_rotation": pred_stats["rotation_std"] / max(float(torch.std(target_rotation).item()), 1e-6),
         "pred_to_target_std_ratio_window": pred_stats["window_std"] / max(float(torch.std(target_window).item()), 1e-6),
         "supcon_weight": float(w_supcon),

@@ -14,35 +14,38 @@ def _inputs(batch: int = 2, patches: int = 16) -> tuple[torch.Tensor, torch.Tens
     return patches_a, positions_a, patches_b, positions_b
 
 
-def test_patch_mlp_backbone_forward_shapes():
-    model = PrismSSLModel(
-        patch_dim=256,
-        model_name="patch_mlp",
-        d_model=64,
-        proj_dim=32,
-        dropout=0.0,
-    )
-    out = model(*_inputs())
-    assert out.distance_mm.shape == (2,)
-    assert out.rotation_delta_deg.shape == (2, 3)
-    assert out.window_delta.shape == (2, 2)
-    assert out.proj_a.shape == (2, 32)
-    assert out.proj_b.shape == (2, 32)
-
-
 def test_vit_l_backbone_forward_shapes():
     model = PrismSSLModel(
         patch_dim=256,
         model_name="vit_l",
         d_model=128,
-        proj_dim=64,
+        proj_dim=32,
         num_layers=2,
         num_heads=8,
         mlp_ratio=2.0,
         dropout=0.0,
     )
     out = model(*_inputs())
-    assert out.distance_mm.shape == (2,)
+    assert out.center_delta_mm.shape == (2, 3)
+    assert out.rotation_delta_deg.shape == (2, 3)
+    assert out.window_delta.shape == (2, 2)
+    assert out.proj_a.shape == (2, 32)
+    assert out.proj_b.shape == (2, 32)
+
+
+def test_vit_l_backbone_second_config_forward_shapes():
+    model = PrismSSLModel(
+        patch_dim=256,
+        model_name="vit_l",
+        d_model=192,
+        proj_dim=64,
+        num_layers=2,
+        num_heads=6,
+        mlp_ratio=2.0,
+        dropout=0.0,
+    )
+    out = model(*_inputs())
+    assert out.center_delta_mm.shape == (2, 3)
     assert out.rotation_delta_deg.shape == (2, 3)
     assert out.window_delta.shape == (2, 2)
     assert out.proj_a.shape == (2, 64)

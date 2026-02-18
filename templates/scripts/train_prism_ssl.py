@@ -35,7 +35,7 @@ def parse_args() -> argparse.Namespace:
         help="Disable adding inferred native orientation hint to sampled rotations.",
     )
 
-    p.add_argument("--model-name", type=str, default=None, choices=["patch_mlp", "vit_l"])
+    p.add_argument("--model-name", type=str, default=None, choices=["vit_l"])
     p.add_argument("--model-d-model", type=int, default=None)
     p.add_argument("--model-num-layers", type=int, default=None)
     p.add_argument("--model-num-heads", type=int, default=None)

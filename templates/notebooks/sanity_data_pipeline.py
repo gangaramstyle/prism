@@ -862,14 +862,14 @@ def _(euler_xyz_to_matrix, scan, view_a, view_b):
         scan.data,
         center_vox=np.asarray(view_a["prism_center_vox"], dtype=np.float32),
         rotation_matrix=aug_mat_a,
-        spacing_mm=scan.spacing,
+        affine_linear=scan.affine_linear,
         mode="constant",
     )
     rot_aug_only_b = rotate_volume_about_center(
         scan.data,
         center_vox=np.asarray(view_b["prism_center_vox"], dtype=np.float32),
         rotation_matrix=aug_mat_b,
-        spacing_mm=scan.spacing,
+        affine_linear=scan.affine_linear,
         mode="constant",
     )
     ones = np.ones_like(scan.data, dtype=np.float32)
@@ -878,7 +878,7 @@ def _(euler_xyz_to_matrix, scan, view_a, view_b):
             ones,
             center_vox=np.asarray(view_a["prism_center_vox"], dtype=np.float32),
             rotation_matrix=aug_mat_a,
-            spacing_mm=scan.spacing,
+            affine_linear=scan.affine_linear,
             interpolation_order=0,
             mode="constant",
         )
@@ -889,7 +889,7 @@ def _(euler_xyz_to_matrix, scan, view_a, view_b):
             ones,
             center_vox=np.asarray(view_b["prism_center_vox"], dtype=np.float32),
             rotation_matrix=aug_mat_b,
-            spacing_mm=scan.spacing,
+            affine_linear=scan.affine_linear,
             interpolation_order=0,
             mode="constant",
         )
@@ -902,13 +902,13 @@ def _(euler_xyz_to_matrix, scan, view_a, view_b):
     rot_aug_only_centers_a = rotated_relative_points_to_voxel(
         rel_aug_a,
         np.asarray(view_a["prism_center_vox"], dtype=np.float32),
-        scan.spacing,
+        affine=scan.affine,
         shape_vox=scan.data.shape,
     )
     rot_aug_only_centers_b = rotated_relative_points_to_voxel(
         rel_aug_b,
         np.asarray(view_b["prism_center_vox"], dtype=np.float32),
-        scan.spacing,
+        affine=scan.affine,
         shape_vox=scan.data.shape,
     )
 
@@ -916,14 +916,14 @@ def _(euler_xyz_to_matrix, scan, view_a, view_b):
         scan.data,
         center_vox=np.asarray(view_a["prism_center_vox"], dtype=np.float32),
         rotation_matrix=np.asarray(view_a["rotation_matrix_ras"], dtype=np.float32),
-        spacing_mm=scan.spacing,
+        affine_linear=scan.affine_linear,
         mode="constant",
     )
     rot_b = rotate_volume_about_center(
         scan.data,
         center_vox=np.asarray(view_b["prism_center_vox"], dtype=np.float32),
         rotation_matrix=np.asarray(view_b["rotation_matrix_ras"], dtype=np.float32),
-        spacing_mm=scan.spacing,
+        affine_linear=scan.affine_linear,
         mode="constant",
     )
     rot_valid_mask_a = (
@@ -931,7 +931,7 @@ def _(euler_xyz_to_matrix, scan, view_a, view_b):
             ones,
             center_vox=np.asarray(view_a["prism_center_vox"], dtype=np.float32),
             rotation_matrix=np.asarray(view_a["rotation_matrix_ras"], dtype=np.float32),
-            spacing_mm=scan.spacing,
+            affine_linear=scan.affine_linear,
             interpolation_order=0,
             mode="constant",
         )
@@ -942,7 +942,7 @@ def _(euler_xyz_to_matrix, scan, view_a, view_b):
             ones,
             center_vox=np.asarray(view_b["prism_center_vox"], dtype=np.float32),
             rotation_matrix=np.asarray(view_b["rotation_matrix_ras"], dtype=np.float32),
-            spacing_mm=scan.spacing,
+            affine_linear=scan.affine_linear,
             interpolation_order=0,
             mode="constant",
         )
@@ -952,13 +952,13 @@ def _(euler_xyz_to_matrix, scan, view_a, view_b):
     rot_centers_a = rotated_relative_points_to_voxel(
         np.asarray(view_a["relative_patch_centers_pt_final"], dtype=np.float32),
         np.asarray(view_a["prism_center_vox"], dtype=np.float32),
-        scan.spacing,
+        affine=scan.affine,
         shape_vox=scan.data.shape,
     )
     rot_centers_b = rotated_relative_points_to_voxel(
         np.asarray(view_b["relative_patch_centers_pt_final"], dtype=np.float32),
         np.asarray(view_b["prism_center_vox"], dtype=np.float32),
-        scan.spacing,
+        affine=scan.affine,
         shape_vox=scan.data.shape,
     )
     return (
