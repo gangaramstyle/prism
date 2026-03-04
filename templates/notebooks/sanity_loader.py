@@ -85,8 +85,17 @@ with app.setup:
         return gray
 
     def normalize_patch_for_display(patch: np.ndarray) -> np.ndarray:
-        """Convert a normalized [-1, 1] patch to uint8 [0, 255]."""
-        return np.clip((patch - (-1.0)) / 2.0 * 255.0, 0, 255).astype(np.uint8)
+        """Convert a normalized [-1, 1] patch to uint8 [0, 255].
+
+        Injects -1/+1 anchor pixels in opposite corners so the display
+        always spans the full intensity range and patches are comparable.
+        """
+        p = patch.copy()
+        p[0, 0] = -1.0
+        p[0, -1] = 1.0
+        p[-1, 0] = 1.0
+        p[-1, -1] = -1.0
+        return np.clip((p + 1.0) / 2.0 * 255.0, 0, 255).astype(np.uint8)
 
     def resize_rgb(rgb: np.ndarray, max_dim: int = 600) -> np.ndarray:
         h, w = rgb.shape[:2]
@@ -424,9 +433,9 @@ def patch_explorer_view(scan, result, scan_geo, patch_idx):
         if _i != _idx:
             draw_dot(_explore_rgb, int(_ov[_ax_r]), int(_ov[_ax_c]), (100, 100, 0), radius=1)
 
-    # Draw selected patch center and bounding box
-    _half_h = _patches.shape[1] // 2
-    _half_w = _patches.shape[2] // 2
+    # Draw selected patch center and bounding box (physical voxel footprint)
+    _half_h = int(scan.patch_shape_vox[_ax_r] // 2)
+    _half_w = int(scan.patch_shape_vox[_ax_c] // 2)
     draw_dot(_explore_rgb, int(_cv[_ax_r]), int(_cv[_ax_c]), (0, 255, 0), radius=3)
     draw_rect(_explore_rgb, int(_cv[_ax_r]), int(_cv[_ax_c]), _half_h, _half_w, (0, 255, 0))
 
