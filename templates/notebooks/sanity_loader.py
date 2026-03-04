@@ -21,7 +21,6 @@ with app.setup:
         load_catalog,
         load_nifti_scan,
         sample_scan_candidates,
-        voxel_points_to_world,
     )
     from prism_ssl.config.schema import ScanRecord
 
@@ -49,11 +48,11 @@ with app.setup:
                         img[r, c] = color
 
     def patch_grid(patches: np.ndarray, max_patches: int = 64, cols: int = 8) -> np.ndarray:
-        n = min(patches.shape[0], max_patches)
-        rows = (n + cols - 1) // cols
+        n_show = min(patches.shape[0], max_patches)
+        rows = (n_show + cols - 1) // cols
         h, w = patches.shape[1], patches.shape[2]
         grid = np.zeros((rows * h, cols * w), dtype=np.float32)
-        for i in range(n):
+        for i in range(n_show):
             r, c = divmod(i, cols)
             grid[r * h:(r + 1) * h, c * w:(c + 1) * w] = patches[i]
         lo, hi = float(grid.min()), float(grid.max())
@@ -64,9 +63,9 @@ with app.setup:
 
 
 @app.cell
-def catalog_load():
+def catalog_controls():
     catalog_path = mo.ui.text(
-        value="../../pmbb_catalog.csv.gz",
+        value="data/pmbb_catalog.csv.gz",
         label="Catalog path",
     )
     modality = mo.ui.dropdown(
@@ -84,12 +83,12 @@ def catalog_load():
 
 @app.cell
 def load_records(catalog_path, modality, n_scans):
-    t0 = time.perf_counter()
-    df = load_catalog(catalog_path.value)
+    _t0 = time.perf_counter()
+    catalog_df = load_catalog(catalog_path.value)
     mods = tuple(m.strip() for m in modality.value.split(","))
-    records = sample_scan_candidates(df, n_scans=n_scans.value, seed=42, modality_filter=mods)
-    dt = time.perf_counter() - t0
-    mo.md(f"Loaded **{len(records)}** scan records from catalog ({len(df)} total rows) in {dt:.2f}s")
+    records = sample_scan_candidates(catalog_df, n_scans=n_scans.value, seed=42, modality_filter=mods)
+    _dt = time.perf_counter() - _t0
+    mo.md(f"Loaded **{len(records)}** scan records from catalog ({len(catalog_df)} total rows) in {_dt:.2f}s")
     return records,
 
 
@@ -106,28 +105,28 @@ def scan_picker(records):
 
 @app.cell
 def load_scan(records, scan_idx, patch_mm):
-    rec = records[scan_idx.value]
-    t0 = time.perf_counter()
-    scan, nifti_path = load_nifti_scan(rec, base_patch_mm=patch_mm.value)
-    load_time_ms = (time.perf_counter() - t0) * 1000.0
+    _t0 = time.perf_counter()
+    _rec = records[scan_idx.value]
+    scan, nifti_path = load_nifti_scan(_rec, base_patch_mm=patch_mm.value)
+    _load_ms = (time.perf_counter() - _t0) * 1000.0
 
-    geo = scan.geometry
-    info = pl.DataFrame({
+    scan_geo = scan.geometry
+    scan_info = pl.DataFrame({
         "field": [
             "path", "modality", "shape_vox", "spacing_mm", "extent_mm",
             "acquisition_plane", "thin_axis", "patch_shape_vox", "load_time_ms",
         ],
         "value": [
             nifti_path, scan.modality,
-            str(geo.shape_vox), str(tuple(f"{v:.2f}" for v in geo.spacing_mm)),
-            str(tuple(f"{v:.1f}" for v in geo.extent_mm)),
-            geo.acquisition_plane, f"{geo.thin_axis} ({geo.thin_axis_name})",
+            str(scan_geo.shape_vox), str(tuple(f"{v:.2f}" for v in scan_geo.spacing_mm)),
+            str(tuple(f"{v:.1f}" for v in scan_geo.extent_mm)),
+            scan_geo.acquisition_plane, f"{scan_geo.thin_axis} ({scan_geo.thin_axis_name})",
             str(tuple(scan.patch_shape_vox.tolist())),
-            f"{load_time_ms:.1f}",
+            f"{_load_ms:.1f}",
         ],
     })
-    mo.vstack([mo.ui.table(info, label="Scan geometry")])
-    return scan, nifti_path
+    mo.vstack([mo.ui.table(scan_info, label="Scan geometry")])
+    return scan, nifti_path, scan_geo
 
 
 @app.cell
@@ -143,9 +142,9 @@ def sample_controls():
 
 @app.cell
 def do_sample(scan, n_patches, sample_seed):
-    t0 = time.perf_counter()
+    _t0 = time.perf_counter()
     result = scan.train_sample(n_patches.value, seed=int(sample_seed.value))
-    sample_time_ms = (time.perf_counter() - t0) * 1000.0
+    sample_time_ms = (time.perf_counter() - _t0) * 1000.0
 
     mo.md(
         f"Extracted **{n_patches.value}** patches in **{sample_time_ms:.2f} ms** "
@@ -158,11 +157,10 @@ def do_sample(scan, n_patches, sample_seed):
 
 
 @app.cell
-def slice_overlay(scan, result):
+def slice_overlay(scan, result, scan_geo):
     mo.md("## 4. Slice Overlay")
 
-    geo = scan.geometry
-    thin = geo.thin_axis
+    thin = scan_geo.thin_axis
     in_plane = [i for i in range(3) if i != thin]
     ax_r, ax_c = in_plane[0], in_plane[1]
 
@@ -173,10 +171,8 @@ def slice_overlay(scan, result):
     wc, ww = result["wc"], result["ww"]
     rgb = window_to_rgb(vol_slice, wc, ww)
 
-    # Draw prism center (red cross)
     draw_cross(rgb, int(prism_vox[ax_r]), int(prism_vox[ax_c]), (255, 0, 0), radius=5)
 
-    # Draw patch centers (yellow dots)
     centers_vox = result["patch_centers_vox"]
     for cv in centers_vox:
         draw_dot(rgb, int(cv[ax_r]), int(cv[ax_c]), (255, 255, 0), radius=2)
@@ -188,7 +184,7 @@ def slice_overlay(scan, result):
         new_h, new_w = int(h * scale), int(w * scale)
         rgb = np.array(Image.fromarray(rgb).resize((new_w, new_h), Image.LANCZOS))
 
-    plane_name = geo.acquisition_plane
+    plane_name = scan_geo.acquisition_plane
     axis_labels = {0: "x(R)", 1: "y(A)", 2: "z(S)"}
     mo.vstack([
         mo.md(f"**{plane_name}** slice at {axis_labels[thin]}={slice_idx} "
@@ -221,22 +217,16 @@ def position_scatter(result):
     mo.md("## 6. Position Scatter (World mm, relative to prism center)")
 
     pos = result["relative_patch_centers_pt"]
-    n = pos.shape[0]
-    norm = np.linalg.norm(pos, axis=1, keepdims=True)
-    max_norm = float(norm.max()) + 1e-6
-    colors = (pos - pos.min(axis=0)) / (pos.ptp(axis=0) + 1e-6)
+    norm = np.linalg.norm(pos, axis=1)
 
-    df = pl.DataFrame({
+    scatter_df = pl.DataFrame({
         "x_mm": pos[:, 0].tolist(),
         "y_mm": pos[:, 1].tolist(),
         "z_mm": pos[:, 2].tolist(),
-        "dist_mm": norm.ravel().tolist(),
-        "r": colors[:, 0].tolist(),
-        "g": colors[:, 1].tolist(),
-        "b": colors[:, 2].tolist(),
+        "dist_mm": norm.tolist(),
     })
 
-    base = alt.Chart(df.to_pandas()).mark_circle(size=30, opacity=0.7)
+    base = alt.Chart(scatter_df.to_pandas()).mark_circle(size=30, opacity=0.7)
 
     xy = base.encode(
         x=alt.X("x_mm:Q", title="X (R) mm"),
@@ -267,10 +257,10 @@ def pair_view(scan, n_patches, sample_seed):
     seed_a = int(sample_seed.value) * 2
     seed_b = int(sample_seed.value) * 2 + 1
 
-    t0 = time.perf_counter()
+    _t0 = time.perf_counter()
     res_a = scan.train_sample(n_patches.value, seed=seed_a)
     res_b = scan.train_sample(n_patches.value, seed=seed_b)
-    dt = (time.perf_counter() - t0) * 1000.0
+    pair_dt_ms = (time.perf_counter() - _t0) * 1000.0
 
     center_a = res_a["prism_center_pt"]
     center_b = res_b["prism_center_pt"]
@@ -284,7 +274,7 @@ def pair_view(scan, n_patches, sample_seed):
             f"({delta_mm[0]:.2f}, {delta_mm[1]:.2f}, {delta_mm[2]:.2f})",
             f"{distance_mm:.2f}",
             f"({window_delta[0]:.1f}, {window_delta[1]:.1f})",
-            f"{dt:.2f}",
+            f"{pair_dt_ms:.2f}",
         ],
     })
 
@@ -302,11 +292,12 @@ def pair_view(scan, n_patches, sample_seed):
 
 
 @app.cell
-def batch_timing(records, scan_idx, patch_mm, n_patches):
-    mo.md("## 8. Extraction Benchmark")
-
+def bench_controls():
     run_bench = mo.ui.button(label="Run benchmark (100 samples from 1 scan)")
-    mo.hstack([run_bench])
+    mo.vstack([
+        mo.md("## 8. Extraction Benchmark"),
+        mo.hstack([run_bench]),
+    ])
     return run_bench,
 
 
@@ -314,21 +305,21 @@ def batch_timing(records, scan_idx, patch_mm, n_patches):
 def run_benchmark(run_bench, records, scan_idx, patch_mm, n_patches):
     run_bench
 
-    rec = records[scan_idx.value]
-    scan, _ = load_nifti_scan(rec, base_patch_mm=patch_mm.value)
+    _rec = records[scan_idx.value]
+    _scan, _ = load_nifti_scan(_rec, base_patch_mm=patch_mm.value)
 
     n_iters = 100
-    times = []
+    times_list = []
     for i in range(n_iters):
-        t0 = time.perf_counter()
-        scan.train_sample(n_patches.value, seed=i)
-        times.append((time.perf_counter() - t0) * 1000.0)
+        _t0 = time.perf_counter()
+        _scan.train_sample(n_patches.value, seed=i)
+        times_list.append((time.perf_counter() - _t0) * 1000.0)
 
-    times_arr = np.array(times)
+    times_arr = np.array(times_list)
     total_patches = n_iters * n_patches.value
     total_time_s = times_arr.sum() / 1000.0
 
-    stats = pl.DataFrame({
+    bench_stats = pl.DataFrame({
         "metric": [
             "samples", "patches_per_sample", "total_patches",
             "mean_ms", "median_ms", "p95_ms", "p99_ms", "min_ms", "max_ms",
@@ -343,14 +334,14 @@ def run_benchmark(run_bench, records, scan_idx, patch_mm, n_patches):
         ],
     })
 
-    hist_df = pl.DataFrame({"time_ms": times})
+    hist_df = pl.DataFrame({"time_ms": times_list})
     hist_chart = alt.Chart(hist_df.to_pandas()).mark_bar().encode(
         x=alt.X("time_ms:Q", bin=alt.Bin(maxbins=30), title="Sample time (ms)"),
         y=alt.Y("count()", title="Count"),
     ).properties(width=400, height=200, title="Sample time distribution")
 
     mo.vstack([
-        mo.ui.table(stats, label="Benchmark results"),
+        mo.ui.table(bench_stats, label="Benchmark results"),
         mo.ui.altair_chart(hist_chart),
     ])
     return
@@ -363,23 +354,23 @@ def coordinate_table(result):
     pos_world = result["patch_centers_pt"]
     pos_rel = result["relative_patch_centers_pt"]
     pos_vox = result["patch_centers_vox"]
-    n = min(pos_world.shape[0], 20)
+    n_show = min(pos_world.shape[0], 20)
 
-    rows = {
-        "idx": list(range(n)),
-        "vox_x": [int(pos_vox[i, 0]) for i in range(n)],
-        "vox_y": [int(pos_vox[i, 1]) for i in range(n)],
-        "vox_z": [int(pos_vox[i, 2]) for i in range(n)],
-        "world_x_mm": [round(float(pos_world[i, 0]), 2) for i in range(n)],
-        "world_y_mm": [round(float(pos_world[i, 1]), 2) for i in range(n)],
-        "world_z_mm": [round(float(pos_world[i, 2]), 2) for i in range(n)],
-        "rel_x_mm": [round(float(pos_rel[i, 0]), 2) for i in range(n)],
-        "rel_y_mm": [round(float(pos_rel[i, 1]), 2) for i in range(n)],
-        "rel_z_mm": [round(float(pos_rel[i, 2]), 2) for i in range(n)],
-        "dist_mm": [round(float(np.linalg.norm(pos_rel[i])), 2) for i in range(n)],
+    coord_rows = {
+        "idx": list(range(n_show)),
+        "vox_x": [int(pos_vox[i, 0]) for i in range(n_show)],
+        "vox_y": [int(pos_vox[i, 1]) for i in range(n_show)],
+        "vox_z": [int(pos_vox[i, 2]) for i in range(n_show)],
+        "world_x_mm": [round(float(pos_world[i, 0]), 2) for i in range(n_show)],
+        "world_y_mm": [round(float(pos_world[i, 1]), 2) for i in range(n_show)],
+        "world_z_mm": [round(float(pos_world[i, 2]), 2) for i in range(n_show)],
+        "rel_x_mm": [round(float(pos_rel[i, 0]), 2) for i in range(n_show)],
+        "rel_y_mm": [round(float(pos_rel[i, 1]), 2) for i in range(n_show)],
+        "rel_z_mm": [round(float(pos_rel[i, 2]), 2) for i in range(n_show)],
+        "dist_mm": [round(float(np.linalg.norm(pos_rel[i])), 2) for i in range(n_show)],
     }
-    df = pl.DataFrame(rows)
-    mo.ui.table(df, label=f"First {n} patches (of {pos_world.shape[0]})")
+    coord_df = pl.DataFrame(coord_rows)
+    mo.ui.table(coord_df, label=f"First {n_show} patches (of {pos_world.shape[0]})")
     return
 
 
