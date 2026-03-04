@@ -24,7 +24,7 @@ with app.setup:
     )
     from prism_ssl.config.schema import ScanRecord
 
-    _AXIS_LABELS = {0: "x(R)", 1: "y(A)", 2: "z(S)"}
+    AXIS_LABELS = {0: "x(R)", 1: "y(A)", 2: "z(S)"}
 
     def window_to_rgb(slice_2d: np.ndarray, wc: float, ww: float) -> np.ndarray:
         ww_safe = max(float(ww), 1e-6)
@@ -156,7 +156,7 @@ def slice_browser(scan, scan_geo):
     _in_plane = [i for i in range(3) if i != _thin]
     _max_slice = scan.data.shape[_thin] - 1
 
-    slice_slider = mo.ui.slider(0, _max_slice, value=_max_slice // 2, label=f"Slice along {_AXIS_LABELS[_thin]}")
+    slice_slider = mo.ui.slider(0, _max_slice, value=_max_slice // 2, label=f"Slice along {AXIS_LABELS[_thin]}")
     browser_wc = mo.ui.slider(
         float(scan.robust_low), float(scan.robust_high),
         value=float(scan.robust_median), step=1.0, label="Window center",
@@ -173,8 +173,8 @@ def slice_browser(scan, scan_geo):
     mo.vstack([
         mo.hstack([slice_slider, browser_wc, browser_ww]),
         mo.md(f"**{scan_geo.acquisition_plane}** plane | "
-               f"slice {slice_slider.value}/{_max_slice} along {_AXIS_LABELS[_thin]} | "
-               f"rows={_AXIS_LABELS[_in_plane[0]]}, cols={_AXIS_LABELS[_in_plane[1]]}"),
+               f"slice {slice_slider.value}/{_max_slice} along {AXIS_LABELS[_thin]} | "
+               f"rows={AXIS_LABELS[_in_plane[0]]}, cols={AXIS_LABELS[_in_plane[1]]}"),
         mo.image(Image.fromarray(_browse_rgb)),
     ])
     return
@@ -247,33 +247,41 @@ def slice_overlay(scan, result, scan_geo):
     _overlay_rgb = resize_rgb(_overlay_rgb, max_dim=600)
 
     mo.vstack([
-        mo.md(f"**{scan_geo.acquisition_plane}** slice at {_AXIS_LABELS[_thin]}={_overlay_idx} "
+        mo.md(f"**{scan_geo.acquisition_plane}** slice at {AXIS_LABELS[_thin]}={_overlay_idx} "
                f"| Red cross = prism center, Yellow dots = patch centers "
-               f"| rows={_AXIS_LABELS[_ax_r]}, cols={_AXIS_LABELS[_ax_c]}"),
+               f"| rows={AXIS_LABELS[_ax_r]}, cols={AXIS_LABELS[_ax_c]}"),
         mo.image(Image.fromarray(_overlay_rgb)),
     ])
     return
 
 
 @app.cell
-def patch_explorer(scan, result, scan_geo):
-    mo.md("## 6. Patch Explorer")
+def patch_explorer_controls(result):
+    _total = result["normalized_patches"].shape[0]
+    patch_idx = mo.ui.slider(0, max(_total - 1, 0), value=0, step=1, label="Patch index")
+    mo.vstack([
+        mo.md("## 6. Patch Explorer"),
+        patch_idx,
+    ])
+    return patch_idx,
 
+
+@app.cell
+def patch_explorer_view(scan, result, scan_geo, patch_idx):
     _patches = result["normalized_patches"]
     _centers_vox = result["patch_centers_vox"]
     _prism_vox = result["prism_center_vox"]
     _pos_rel = result["relative_patch_centers_pt"]
     _pos_world = result["patch_centers_pt"]
     _total = _patches.shape[0]
-
-    patch_idx = mo.ui.slider(0, max(_total - 1, 0), value=0, step=1, label="Patch index")
+    _idx = patch_idx.value
 
     _thin = scan_geo.thin_axis
     _in_plane = [i for i in range(3) if i != _thin]
     _ax_r, _ax_c = _in_plane[0], _in_plane[1]
 
     # Render the selected patch enlarged
-    _p = _patches[patch_idx.value]
+    _p = _patches[_idx]
     _lo, _hi = float(_p.min()), float(_p.max())
     if _hi - _lo < 1e-6:
         _hi = _lo + 1.0
@@ -281,7 +289,7 @@ def patch_explorer(scan, result, scan_geo):
     _patch_big = np.array(Image.fromarray(_patch_gray).resize((128, 128), Image.NEAREST))
 
     # Render slice with this patch highlighted
-    _cv = _centers_vox[patch_idx.value]
+    _cv = _centers_vox[_idx]
     _explore_slice_idx = int(_cv[_thin])
     _vol_slice = np.take(scan.data, indices=_explore_slice_idx, axis=_thin)
     _explore_rgb = window_to_rgb(_vol_slice, result["wc"], result["ww"])
@@ -291,7 +299,7 @@ def patch_explorer(scan, result, scan_geo):
 
     # Draw all other patches as dim dots
     for _i, _ov in enumerate(_centers_vox):
-        if _i != patch_idx.value:
+        if _i != _idx:
             draw_dot(_explore_rgb, int(_ov[_ax_r]), int(_ov[_ax_c]), (100, 100, 0), radius=1)
 
     # Draw selected patch center and bounding box
@@ -302,13 +310,12 @@ def patch_explorer(scan, result, scan_geo):
 
     _explore_rgb = resize_rgb(_explore_rgb, max_dim=500)
 
-    _rel = _pos_rel[patch_idx.value]
-    _world = _pos_world[patch_idx.value]
-    _vox = _centers_vox[patch_idx.value]
+    _rel = _pos_rel[_idx]
+    _world = _pos_world[_idx]
+    _vox = _centers_vox[_idx]
 
     mo.vstack([
-        patch_idx,
-        mo.md(f"**Patch {patch_idx.value}/{_total - 1}** | "
+        mo.md(f"**Patch {_idx}/{_total - 1}** | "
                f"Vox: ({_vox[0]}, {_vox[1]}, {_vox[2]}) | "
                f"World: ({_world[0]:.1f}, {_world[1]:.1f}, {_world[2]:.1f}) mm | "
                f"Rel: ({_rel[0]:.1f}, {_rel[1]:.1f}, {_rel[2]:.1f}) mm | "
@@ -350,14 +357,14 @@ def position_scatter(result):
     _pos = result["relative_patch_centers_pt"]
     _norm = np.linalg.norm(_pos, axis=1)
 
-    _scatter_df = pl.DataFrame({
+    _scatter_data = {
         "x_mm": _pos[:, 0].tolist(),
         "y_mm": _pos[:, 1].tolist(),
         "z_mm": _pos[:, 2].tolist(),
         "dist_mm": _norm.tolist(),
-    })
+    }
 
-    _base = alt.Chart(_scatter_df.to_pandas()).mark_circle(size=30, opacity=0.7)
+    _base = alt.Chart(alt.Data(values=[dict(zip(_scatter_data.keys(), vals)) for vals in zip(*_scatter_data.values())])).mark_circle(size=30, opacity=0.7)
 
     _xy = _base.encode(
         x=alt.X("x_mm:Q", title="X (R) mm"),
@@ -465,8 +472,10 @@ def run_benchmark(run_bench, records, scan_idx, patch_mm, n_patches):
         ],
     })
 
-    _hist_df = pl.DataFrame({"time_ms": _times_list})
-    _hist_chart = alt.Chart(_hist_df.to_pandas()).mark_bar().encode(
+    _bench_data = {
+        "time_ms": _times_list,
+    }
+    _hist_chart = alt.Chart(alt.Data(values=[{"time_ms": t} for t in _times_list])).mark_bar().encode(
         x=alt.X("time_ms:Q", bin=alt.Bin(maxbins=30), title="Sample time (ms)"),
         y=alt.Y("count()", title="Count"),
     ).properties(width=400, height=200, title="Sample time distribution")
