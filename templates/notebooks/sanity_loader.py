@@ -61,6 +61,15 @@ with app.setup:
                     if 0 <= r < h and 0 <= c < w:
                         img[r, c] = color
 
+    def draw_circle(img: np.ndarray, row: int, col: int, radius: int, color: tuple) -> None:
+        h, w = img.shape[:2]
+        for angle in range(360):
+            rad = angle * np.pi / 180.0
+            r = int(round(row + radius * np.sin(rad)))
+            c = int(round(col + radius * np.cos(rad)))
+            if 0 <= r < h and 0 <= c < w:
+                img[r, c] = color
+
     def draw_rect(img: np.ndarray, row: int, col: int, half_h: int, half_w: int, color: tuple) -> None:
         h, w = img.shape[:2]
         r0, r1 = max(0, row - half_h), min(h - 1, row + half_h)
@@ -97,7 +106,7 @@ with app.setup:
         p[-1, -1] = -1.0
         return np.clip((p + 1.0) / 2.0 * 255.0, 0, 255).astype(np.uint8)
 
-    def resize_rgb(rgb: np.ndarray, max_dim: int = 600) -> np.ndarray:
+    def resize_rgb(rgb: np.ndarray, max_dim: int = 512) -> np.ndarray:
         h, w = rgb.shape[:2]
         if max(h, w) > max_dim:
             scale = max_dim / max(h, w)
@@ -193,7 +202,7 @@ def slice_browser(scan, scan_geo):
 
     _vol_slice = np.take(scan.data, indices=slice_slider.value, axis=_thin)
     _browse_rgb = window_to_rgb(_vol_slice, browser_wc.value, browser_ww.value)
-    _browse_rgb = resize_rgb(_browse_rgb, max_dim=500)
+    _browse_rgb = resize_rgb(_browse_rgb)
 
     mo.vstack([
         mo.hstack([slice_slider, browser_wc, browser_ww]),
@@ -267,7 +276,8 @@ def do_sample(scan, n_patches, patch_pixels, sample_seed, sample_wc, sample_ww, 
         f"Extracted **{n_patches.value}** patches in **{sample_time_ms:.2f} ms** "
         f"({n_patches.value / max(sample_time_ms, 0.001) * 1000:.0f} patches/sec)\n\n"
         f"Window: wc={result['wc']:.1f}, ww={result['ww']:.1f} | "
-        f"Sampling radius: {result['sampling_radius_mm']:.1f} mm | "
+        f"Sampling radius: {result['sampling_radius_mm']:.1f} mm "
+        f"(requested {sample_radius.value:.0f} mm) | "
         f"Plane: {result['native_acquisition_plane']}\n\n"
         f"Prism center vox: ({_center_vox[0]}, {_center_vox[1]}, {_center_vox[2]}) | "
         f"world: ({center_x.value:.1f}, {center_y.value:.1f}, {center_z.value:.1f}) mm"
@@ -292,15 +302,22 @@ def slice_overlay(scan, result, scan_geo):
 
     draw_cross(_overlay_rgb, int(_prism_vox[_ax_r]), int(_prism_vox[_ax_c]), (255, 0, 0), radius=5)
 
+    # Draw sampling radius circle (in voxels)
+    _radius_mm = result["sampling_radius_mm"]
+    _radius_vox_r = int(round(_radius_mm / float(scan.voxel_axis_mm[_ax_r])))
+    _radius_vox_c = int(round(_radius_mm / float(scan.voxel_axis_mm[_ax_c])))
+    _avg_radius_vox = (_radius_vox_r + _radius_vox_c) // 2
+    draw_circle(_overlay_rgb, int(_prism_vox[_ax_r]), int(_prism_vox[_ax_c]), _avg_radius_vox, (255, 100, 100))
+
     _centers_vox = result["patch_centers_vox"]
     for _cv in _centers_vox:
         draw_dot(_overlay_rgb, int(_cv[_ax_r]), int(_cv[_ax_c]), (255, 255, 0), radius=2)
 
-    _overlay_rgb = resize_rgb(_overlay_rgb, max_dim=600)
+    _overlay_rgb = resize_rgb(_overlay_rgb)
 
     mo.vstack([
         mo.md(f"**{scan_geo.acquisition_plane}** slice at {AXIS_LABELS[_thin]}={_overlay_idx} "
-               f"| Red cross = prism center, Yellow dots = patch centers "
+               f"| Red cross = prism center, Pink circle = sampling radius ({_radius_mm:.0f} mm), Yellow dots = patch centers "
                f"| rows={AXIS_LABELS[_ax_r]}, cols={AXIS_LABELS[_ax_c]}"),
         mo.image(Image.fromarray(_overlay_rgb)),
     ])
@@ -368,7 +385,7 @@ def patch_probe_view(scan, result, scan_geo, probe_x, probe_y, probe_z, patch_pi
     draw_dot(_probe_rgb, int(_probe_vox[_ax_r]), int(_probe_vox[_ax_c]), (0, 255, 255), radius=3)
     draw_rect(_probe_rgb, int(_probe_vox[_ax_r]), int(_probe_vox[_ax_c]), int(_half_h), int(_half_w), (0, 255, 255))
 
-    _probe_rgb = resize_rgb(_probe_rgb, max_dim=500)
+    _probe_rgb = resize_rgb(_probe_rgb)
 
     _dist = float(np.linalg.norm(_offset_mm))
 
@@ -439,7 +456,7 @@ def patch_explorer_view(scan, result, scan_geo, patch_idx):
     draw_dot(_explore_rgb, int(_cv[_ax_r]), int(_cv[_ax_c]), (0, 255, 0), radius=3)
     draw_rect(_explore_rgb, int(_cv[_ax_r]), int(_cv[_ax_c]), _half_h, _half_w, (0, 255, 0))
 
-    _explore_rgb = resize_rgb(_explore_rgb, max_dim=500)
+    _explore_rgb = resize_rgb(_explore_rgb)
 
     _rel = _pos_rel[_idx]
     _world = _pos_world[_idx]
