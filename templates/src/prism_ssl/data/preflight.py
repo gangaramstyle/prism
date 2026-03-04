@@ -214,22 +214,25 @@ class NiftiScan:
     def patch_shape_vox(self) -> np.ndarray:
         return np.maximum(np.ceil(self.patch_mm / self.voxel_axis_mm).astype(np.int64), 1)
 
-    def _sample_center(self, rng: np.random.Generator, sampling_radius_mm: float) -> np.ndarray:
+    def _sample_center(self, rng: np.random.Generator) -> np.ndarray:
+        """Pick a random voxel inside the volume with just enough margin for one patch."""
         shape = np.asarray(self.data.shape, dtype=np.int64)
         half_patch = np.ceil(self.patch_shape_vox / 2.0).astype(np.int64)
-        thin = self.geometry.thin_axis
-
-        # Only require radius margin on in-plane axes; thin axis just needs patch margin
-        radius_vox = np.ceil(sampling_radius_mm / self.voxel_axis_mm).astype(np.int64)
-        radius_vox[thin] = 0
-
-        min_idx = half_patch + radius_vox
-        max_idx = shape - half_patch - radius_vox - 1
+        min_idx = half_patch
+        max_idx = shape - half_patch - 1
         if np.any(max_idx < min_idx):
             raise SmallScanError(
                 f"scan too small for patch extraction: shape={tuple(shape.tolist())} patch={tuple(self.patch_shape_vox.tolist())}"
             )
         return np.array([rng.integers(low=int(lo), high=int(hi) + 1) for lo, hi in zip(min_idx, max_idx)], dtype=np.int64)
+
+    def _patch_has_overlap(self, center_vox: np.ndarray) -> bool:
+        """Check if a patch centered here overlaps the volume at all."""
+        shape = self.patch_shape_vox
+        starts = center_vox - (shape // 2)
+        ends = starts + shape
+        vol_shape = np.asarray(self.data.shape, dtype=np.int64)
+        return bool(np.all(ends > 0) and np.all(starts < vol_shape))
 
     def _extract_patch(self, center_vox: np.ndarray) -> np.ndarray:
         """Extract a 3D patch and squeeze the thin axis to get a 2D slice."""
@@ -237,10 +240,16 @@ class NiftiScan:
         starts = center_vox - (shape // 2)
         ends = starts + shape
 
+        patch = np.zeros(tuple(int(v) for v in shape.tolist()), dtype=np.float32)
+
         src_starts = np.maximum(starts, 0)
         src_ends = np.minimum(ends, np.asarray(self.data.shape, dtype=np.int64))
 
-        patch = np.zeros(tuple(int(v) for v in shape.tolist()), dtype=np.float32)
+        # If no overlap on any axis, return zeros
+        if np.any(src_ends <= src_starts):
+            thin = self.geometry.thin_axis
+            return np.take(patch, indices=patch.shape[thin] // 2, axis=thin).astype(np.float32, copy=False)
+
         dst_starts = src_starts - starts
         dst_ends = dst_starts + (src_ends - src_starts)
 
@@ -295,44 +304,36 @@ class NiftiScan:
         resolved_target_patch_size = int(self.target_patch_size if target_patch_size is None else target_patch_size)
         rng = np.random.default_rng(seed)
 
-        half_patch = np.ceil(self.patch_shape_vox / 2.0).astype(np.int64)
         shape = np.asarray(self.data.shape, dtype=np.int64)
-        thin = self.geometry.thin_axis
-        in_plane = [i for i in range(3) if i != thin]
 
-        # Max radius is constrained by in-plane axes only (patches are 1 voxel on thin axis)
-        max_radius_mm_by_axis = ((shape - (2 * half_patch) - 1) / 2).astype(np.float64) * self.voxel_axis_mm
-        max_radius_mm = float(np.min(max_radius_mm_by_axis[in_plane]))
-        if max_radius_mm <= 0:
-            raise SmallScanError(
-                f"scan too small for patch extraction: shape={tuple(shape.tolist())} patch={tuple(self.patch_shape_vox.tolist())}"
-            )
-        target_radius = float(rng.uniform(20.0, 30.0)) if sampling_radius_mm is None else float(sampling_radius_mm)
-        sampling_radius_mm = min(target_radius, max_radius_mm * 0.9)
+        # No artificial radius clamping — use the requested radius as-is
+        sampling_radius_mm = float(rng.uniform(20.0, 30.0)) if sampling_radius_mm is None else float(sampling_radius_mm)
         sampling_radius_mm = max(sampling_radius_mm, 0.0)
 
         if subset_center_vox is None:
-            prism_center = self._sample_center(rng, sampling_radius_mm)
+            prism_center = self._sample_center(rng)
         else:
             prism_center = np.asarray(subset_center_vox, dtype=np.int64)
             if prism_center.shape != (3,):
                 raise ValueError(f"subset_center_vox must have shape (3,), got {prism_center.shape}")
-            if np.any(prism_center < 0) or np.any(prism_center >= shape):
-                raise ValueError(
-                    f"subset_center_vox out of bounds: center={tuple(int(x) for x in prism_center.tolist())} "
-                    f"shape={tuple(int(x) for x in self.data.shape)}"
-                )
+            prism_center = np.clip(prism_center, 0, shape - 1)
 
         if patch_centers_vox is None:
             centers = []
-            for _ in range(int(n_patches)):
+            max_attempts = int(n_patches) * 4
+            attempts = 0
+            while len(centers) < int(n_patches) and attempts < max_attempts:
                 delta_mm = rng.uniform(-sampling_radius_mm, sampling_radius_mm, size=3)
                 if float(np.linalg.norm(delta_mm)) > sampling_radius_mm:
                     delta_mm = delta_mm * (sampling_radius_mm / max(np.linalg.norm(delta_mm), 1e-6))
                 delta_vox = (self.affine_linear_inv @ np.asarray(delta_mm, dtype=np.float32)).astype(np.float32, copy=False)
                 center = prism_center + np.rint(delta_vox).astype(np.int64)
-                center = np.clip(center, 0, shape - 1)
-                centers.append(center)
+                attempts += 1
+                if self._patch_has_overlap(center):
+                    centers.append(center)
+            # If we couldn't fill all patches, duplicate last valid or use prism center
+            while len(centers) < int(n_patches):
+                centers.append(centers[-1] if centers else prism_center.copy())
             centers_arr = np.asarray(centers, dtype=np.int64)
         else:
             centers_arr = np.asarray(patch_centers_vox, dtype=np.int64)
@@ -342,7 +343,6 @@ class NiftiScan:
                 raise ValueError(
                     f"patch_centers_vox has {centers_arr.shape[0]} centers but n_patches={int(n_patches)}"
                 )
-            centers_arr = np.clip(centers_arr, 0, shape - 1)
 
         raw_patches = self._extract_patches(centers_arr, target_patch_size=resolved_target_patch_size)
 
