@@ -216,8 +216,13 @@ class NiftiScan:
 
     def _sample_center(self, rng: np.random.Generator, sampling_radius_mm: float) -> np.ndarray:
         shape = np.asarray(self.data.shape, dtype=np.int64)
-        radius_vox = np.ceil(sampling_radius_mm / self.voxel_axis_mm).astype(np.int64)
         half_patch = np.ceil(self.patch_shape_vox / 2.0).astype(np.int64)
+        thin = self.geometry.thin_axis
+
+        # Only require radius margin on in-plane axes; thin axis just needs patch margin
+        radius_vox = np.ceil(sampling_radius_mm / self.voxel_axis_mm).astype(np.int64)
+        radius_vox[thin] = 0
+
         min_idx = half_patch + radius_vox
         max_idx = shape - half_patch - radius_vox - 1
         if np.any(max_idx < min_idx):
@@ -292,13 +297,16 @@ class NiftiScan:
 
         half_patch = np.ceil(self.patch_shape_vox / 2.0).astype(np.int64)
         shape = np.asarray(self.data.shape, dtype=np.int64)
-        max_radius_vox_by_axis = ((shape - (2 * half_patch) - 1) // 2).astype(np.int64)
-        max_radius_vox = int(np.min(max_radius_vox_by_axis))
-        if max_radius_vox <= 0:
+        thin = self.geometry.thin_axis
+        in_plane = [i for i in range(3) if i != thin]
+
+        # Max radius is constrained by in-plane axes only (patches are 1 voxel on thin axis)
+        max_radius_mm_by_axis = ((shape - (2 * half_patch) - 1) / 2).astype(np.float64) * self.voxel_axis_mm
+        max_radius_mm = float(np.min(max_radius_mm_by_axis[in_plane]))
+        if max_radius_mm <= 0:
             raise SmallScanError(
                 f"scan too small for patch extraction: shape={tuple(shape.tolist())} patch={tuple(self.patch_shape_vox.tolist())}"
             )
-        max_radius_mm = float(max_radius_vox * float(np.min(self.voxel_axis_mm)))
         target_radius = float(rng.uniform(20.0, 30.0)) if sampling_radius_mm is None else float(sampling_radius_mm)
         sampling_radius_mm = min(target_radius, max_radius_mm * 0.9)
         sampling_radius_mm = max(sampling_radius_mm, 0.0)
