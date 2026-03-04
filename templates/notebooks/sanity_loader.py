@@ -183,11 +183,8 @@ def load_scan(records, scan_idx, patch_mm):
 
 
 @app.cell
-def slice_browser(scan, scan_geo):
-    mo.md("## 3. Scroll Through Scan")
-
+def slice_browser_controls(scan, scan_geo):
     _thin = scan_geo.thin_axis
-    _in_plane = [i for i in range(3) if i != _thin]
     _max_slice = scan.data.shape[_thin] - 1
 
     slice_slider = mo.ui.slider(0, _max_slice, value=_max_slice // 2, label=f"Slice along {AXIS_LABELS[_thin]}")
@@ -200,16 +197,27 @@ def slice_browser(scan, scan_geo):
         value=float(4.0 * scan.robust_std), step=1.0, label="Window width",
     )
 
+    mo.vstack([
+        mo.md("## 3. Scroll Through Scan"),
+        mo.hstack([slice_slider, browser_wc, browser_ww]),
+    ])
+    return slice_slider, browser_wc, browser_ww
+
+
+@app.cell
+def slice_browser_view(scan, scan_geo, slice_slider, browser_wc, browser_ww):
+    _thin = scan_geo.thin_axis
+    _in_plane = [i for i in range(3) if i != _thin]
+
     _vol_slice = np.take(scan.data, indices=slice_slider.value, axis=_thin)
     _browse_rgb = window_to_rgb(_vol_slice, browser_wc.value, browser_ww.value)
     _browse_rgb = resize_rgb(_browse_rgb)
 
     mo.vstack([
-        mo.hstack([slice_slider, browser_wc, browser_ww]),
         mo.md(f"**{scan_geo.acquisition_plane}** plane | "
-               f"slice {slice_slider.value}/{_max_slice} along {AXIS_LABELS[_thin]} | "
+               f"slice {slice_slider.value}/{scan.data.shape[_thin] - 1} along {AXIS_LABELS[_thin]} | "
                f"rows={AXIS_LABELS[_in_plane[0]]}, cols={AXIS_LABELS[_in_plane[1]]}"),
-        mo.image(Image.fromarray(_browse_rgb)),
+        mo.image(Image.fromarray(_browse_rgb), width=512),
     ])
     return
 
@@ -319,7 +327,7 @@ def slice_overlay(scan, result, scan_geo):
         mo.md(f"**{scan_geo.acquisition_plane}** slice at {AXIS_LABELS[_thin]}={_overlay_idx} "
                f"| Red cross = prism center, Pink circle = sampling radius ({_radius_mm:.0f} mm), Yellow dots = patch centers "
                f"| rows={AXIS_LABELS[_ax_r]}, cols={AXIS_LABELS[_ax_c]}"),
-        mo.image(Image.fromarray(_overlay_rgb)),
+        mo.image(Image.fromarray(_overlay_rgb), width=512),
     ])
     return
 
@@ -401,7 +409,7 @@ def patch_probe_view(scan, result, scan_geo, probe_x, probe_y, probe_z, patch_pi
                 mo.md(f"**Slice {_probe_slice_idx}** — "
                        f"cyan box = probe patch, red cross = prism center, "
                        f"dim dots = sampled patches"),
-                mo.image(Image.fromarray(_probe_rgb)),
+                mo.image(Image.fromarray(_probe_rgb), width=512),
             ]),
         ]),
     ])
@@ -476,7 +484,7 @@ def patch_explorer_view(scan, result, scan_geo, patch_idx):
                 mo.md(f"**Slice {_explore_slice_idx}** — "
                        f"green box = selected patch, red cross = prism center, "
                        f"dim dots = other patches"),
-                mo.image(Image.fromarray(_explore_rgb)),
+                mo.image(Image.fromarray(_explore_rgb), width=512),
             ]),
         ]),
     ])
