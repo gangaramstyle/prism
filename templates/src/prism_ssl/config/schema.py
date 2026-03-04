@@ -40,15 +40,11 @@ class DataConfig:
     modality_filter: tuple[str, ...] = ("CT", "MR")
     n_patches: int = 1024
     patch_mm: float = 16.0
-    method: str = "optimized_fused"
     storage_mode: str = "sharded"
     workers: int = 8
     warm_pool_size: int = 16
     visits_per_scan: int = 100
     max_prefetch_replacements: int = 2
-    position_frame_for_model: str = "aug"
-    apply_native_orientation_hint: bool = True
-    rotation_augmentation_max_degrees: float = 10.0
     use_local_scratch: bool = True
     strict_background_errors: bool = False
     broken_abort_ratio: float = 0.10
@@ -59,7 +55,6 @@ class DataConfig:
 @dataclass
 class LossConfig:
     w_distance: float = 1.0
-    w_rotation: float = 1.0
     w_window: float = 1.0
     w_supcon_target: float = 0.2
     supcon_temperature: float = 0.1

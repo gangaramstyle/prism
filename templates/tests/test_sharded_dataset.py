@@ -46,7 +46,7 @@ def test_sharded_dataset_bootstrap_and_replacement(tmp_path: Path):
         scan_records=records,
         n_patches=8,
         base_patch_mm=16.0,
-        method="optimized_fused",
+
         warm_pool_size=2,
         visits_per_scan=1,
         seed=7,
@@ -79,7 +79,7 @@ def test_broken_ratio_abort(tmp_path: Path):
         scan_records=records,
         n_patches=4,
         base_patch_mm=16.0,
-        method="optimized_fused",
+
         warm_pool_size=2,
         visits_per_scan=1,
         seed=13,
@@ -104,7 +104,7 @@ def test_scratch_staging_is_bounded_and_cleaned(tmp_path: Path):
         scan_records=records,
         n_patches=8,
         base_patch_mm=16.0,
-        method="optimized_fused",
+
         warm_pool_size=2,
         visits_per_scan=1,
         seed=17,

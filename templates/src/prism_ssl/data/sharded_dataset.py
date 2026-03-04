@@ -366,7 +366,6 @@ class ShardedScanDataset(IterableDataset):
         scan_records: list[ScanRecord],
         n_patches: int,
         base_patch_mm: float,
-        method: str,
         warm_pool_size: int,
         visits_per_scan: int,
         seed: int,
@@ -378,14 +377,10 @@ class ShardedScanDataset(IterableDataset):
         broken_series_log_path: str,
         scratch_dir: str | None = None,
         pair_views: bool = True,
-        position_frame_for_model: str = "aug",
-        apply_native_orientation_hint: bool = True,
-        rotation_augmentation_max_degrees: float = 10.0,
     ) -> None:
         self.scan_records = list(scan_records)
         self.n_patches = int(n_patches)
         self.base_patch_mm = float(base_patch_mm)
-        self.method = method
         self.warm_pool_size = int(warm_pool_size)
         self.visits_per_scan = int(visits_per_scan)
         self.seed = int(seed)
@@ -397,9 +392,6 @@ class ShardedScanDataset(IterableDataset):
         self.broken_series_log_path = broken_series_log_path
         self.scratch_dir = scratch_dir
         self.pair_views = bool(pair_views)
-        self.position_frame_for_model = str(position_frame_for_model).strip().lower()
-        self.apply_native_orientation_hint = bool(apply_native_orientation_hint)
-        self.rotation_augmentation_max_degrees = float(rotation_augmentation_max_degrees)
 
     def __iter__(self):
         worker = torch.utils.data.get_worker_info()
@@ -473,16 +465,11 @@ class ShardedScanDataset(IterableDataset):
 
                 try:
                     scan = slot["scan"]
-                    sample_kwargs = {
-                        "method": self.method,
-                        "apply_native_orientation_hint": self.apply_native_orientation_hint,
-                        "rotation_augmentation_max_degrees": self.rotation_augmentation_max_degrees,
-                    }
                     if self.pair_views:
-                        result_a = scan.train_sample(self.n_patches, seed=sample_seed * 2, **sample_kwargs)
-                        result_b = scan.train_sample(self.n_patches, seed=sample_seed * 2 + 1, **sample_kwargs)
+                        result_a = scan.train_sample(self.n_patches, seed=sample_seed * 2)
+                        result_b = scan.train_sample(self.n_patches, seed=sample_seed * 2 + 1)
                     else:
-                        result_a = scan.train_sample(self.n_patches, seed=sample_seed, **sample_kwargs)
+                        result_a = scan.train_sample(self.n_patches, seed=sample_seed)
                         result_b = result_a
                 except SmallScanError as exc:
                     pool.mark_series_broken(slot_idx, exc)
@@ -504,7 +491,6 @@ class ShardedScanDataset(IterableDataset):
                     result_b=result_b,
                     scan_id=str(slot["scan_id"]),
                     series_id=str(slot["series_id"]),
-                    position_frame=self.position_frame_for_model,
                     replacement_completed_count_delta=events.completed,
                     replacement_failed_count_delta=events.failed,
                     replacement_wait_time_ms_delta=events.wait_ms,

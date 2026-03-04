@@ -102,7 +102,6 @@ def test_train_smoke_cpu_120_steps(tmp_path: Path):
         ),
         loss=LossConfig(
             w_distance=1.0,
-            w_rotation=1.0,
             w_window=1.0,
             w_supcon_target=0.2,
             supcon_temperature=0.1,

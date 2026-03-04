@@ -17,7 +17,6 @@ fixed:
     n_patches: 1024
     workers: 8
     visits_per_scan: 100
-    method: optimized_fused
     use_local_scratch: true
 
 ranking:

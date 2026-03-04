@@ -149,7 +149,6 @@ def run_training(config: RunConfig) -> dict[str, Any]:
         scan_records=records,
         n_patches=config.data.n_patches,
         base_patch_mm=config.data.patch_mm,
-        method=config.data.method,
         warm_pool_size=config.data.warm_pool_size,
         visits_per_scan=config.data.visits_per_scan,
         seed=config.train.seed,
@@ -161,9 +160,6 @@ def run_training(config: RunConfig) -> dict[str, Any]:
         broken_series_log_path=str(broken_log_path),
         scratch_dir=worker_scratch_dir,
         pair_views=True,
-        position_frame_for_model=config.data.position_frame_for_model,
-        apply_native_orientation_hint=config.data.apply_native_orientation_hint,
-        rotation_augmentation_max_degrees=config.data.rotation_augmentation_max_degrees,
     )
 
     loader_kwargs: dict[str, Any] = {
@@ -202,7 +198,6 @@ def run_training(config: RunConfig) -> dict[str, Any]:
     )
 
     distance_loss_fn = nn.SmoothL1Loss()
-    rotation_loss_fn = nn.SmoothL1Loss()
     window_loss_fn = nn.SmoothL1Loss()
 
     use_amp = config.train.precision == "bf16" and device.type == "cuda"
@@ -266,7 +261,6 @@ def run_training(config: RunConfig) -> dict[str, Any]:
 
             batch["center_delta_mm"] = batch["center_delta_mm"].to(device, non_blocking=True)
             batch["center_distance_mm"] = batch["center_distance_mm"].to(device, non_blocking=True)
-            batch["rotation_delta_deg"] = batch["rotation_delta_deg"].to(device, non_blocking=True)
             batch["window_delta"] = batch["window_delta"].to(device, non_blocking=True)
             batch["series_label"] = batch["series_label"].to(device, non_blocking=True)
 
@@ -280,7 +274,6 @@ def run_training(config: RunConfig) -> dict[str, Any]:
                     config.loss,
                     step=step,
                     distance_loss_fn=distance_loss_fn,
-                    rotation_loss_fn=rotation_loss_fn,
                     window_loss_fn=window_loss_fn,
                 )
 
@@ -314,7 +307,6 @@ def run_training(config: RunConfig) -> dict[str, Any]:
 
             target_std_flags = [
                 diagnostics["target_center_delta_std"] < 1e-6,
-                diagnostics["target_rotation_std"] < 1e-6,
                 diagnostics["target_window_std"] < 1e-6,
             ]
             if any(target_std_flags):
@@ -331,7 +323,6 @@ def run_training(config: RunConfig) -> dict[str, Any]:
                         step=final_step,
                         total_loss=float(loss_bundle.total.item()),
                         loss_distance=float(loss_bundle.distance.item()),
-                        loss_rotation=float(loss_bundle.rotation.item()),
                         loss_window=float(loss_bundle.window.item()),
                         loss_supcon=float(loss_bundle.supcon.item()),
                         supcon_weight=loss_bundle.supcon_weight,
@@ -360,22 +351,15 @@ def run_training(config: RunConfig) -> dict[str, Any]:
                 metrics = {
                     "train/loss": float(loss_bundle.total.item()),
                     "train/loss_center_delta_mm": float(loss_bundle.distance.item()),
-                    "train/loss_rotation_deg": float(loss_bundle.rotation.item()),
                     "train/loss_window": float(loss_bundle.window.item()),
                     "train/loss_supcon": float(loss_bundle.supcon.item()),
                     "train/w_supcon": float(loss_bundle.supcon_weight),
                     "train/target_center_delta_mm_mean": diagnostics["target_center_delta_mean"],
-                    "train/target_rotation_abs_mean": diagnostics["target_rotation_abs_mean"],
                     "train/target_window_abs_mean": diagnostics["target_window_abs_mean"],
                     "train/target_center_delta_std": diagnostics["target_center_delta_std"],
-                    "train/target_rotation_std": diagnostics["target_rotation_std"],
                     "train/target_window_std": diagnostics["target_window_std"],
                     "train/pred_center_delta_std": diagnostics["pred_center_delta_std"],
-                    "train/pred_rotation_std": diagnostics["pred_rotation_std"],
                     "train/pred_window_std": diagnostics["pred_window_std"],
-                    "train/pred_to_target_std_ratio_center_delta": diagnostics["pred_to_target_std_ratio_center_delta"],
-                    "train/pred_to_target_std_ratio_rotation": diagnostics["pred_to_target_std_ratio_rotation"],
-                    "train/pred_to_target_std_ratio_window": diagnostics["pred_to_target_std_ratio_window"],
                     "train/supcon_positives_per_anchor_mean": positives_mean,
                     "train/step_time_ms": step_time_ms,
                     "train/patches_per_sec_step": patches_this_step / max(step_time_s, 1e-6),

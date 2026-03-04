@@ -10,9 +10,9 @@ from prism_ssl.data.preflight import (
     compute_robust_stats,
     infer_scan_geometry,
     load_nifti_scan,
-    rotate_volume_about_center,
-    rotated_relative_points_to_voxel,
     resolve_nifti_path,
+    voxel_points_to_world,
+    world_points_to_voxel,
 )
 from prism_ssl.data.sample_contract import build_dataset_item, compute_pair_targets, tensorize_sample_view
 from prism_ssl.data.sharded_dataset import BrokenScanRateExceeded, ShardedScanDataset
@@ -29,9 +29,9 @@ __all__ = [
     "compute_robust_stats",
     "infer_scan_geometry",
     "load_nifti_scan",
-    "rotate_volume_about_center",
-    "rotated_relative_points_to_voxel",
     "resolve_nifti_path",
+    "voxel_points_to_world",
+    "world_points_to_voxel",
     "tensorize_sample_view",
     "compute_pair_targets",
     "build_dataset_item",

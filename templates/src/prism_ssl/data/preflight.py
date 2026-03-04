@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import glob
-import math
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -11,7 +10,6 @@ from typing import Any
 
 import nibabel as nib
 import numpy as np
-from scipy import ndimage
 import torch
 import torch.nn.functional as F
 
@@ -37,7 +35,6 @@ class ScanGeometry:
     thin_axis: int
     thin_axis_name: str
     acquisition_plane: str
-    baseline_rotation_degrees: tuple[float, float, float]
     shape_vox: tuple[int, int, int]
     spacing_mm: tuple[float, float, float]
     extent_mm: tuple[float, float, float]
@@ -45,13 +42,7 @@ class ScanGeometry:
 
 
 _AXIS_NAMES = ("x", "y", "z")
-_RAS_AXIAL_AXIS = 2
 _PLANE_BY_THIN_AXIS = {0: "sagittal", 1: "coronal", 2: "axial"}
-_BASELINE_ROTATION_BY_PLANE = {
-    "axial": (0.0, 0.0, 0.0),
-    "coronal": (90.0, 0.0, 0.0),
-    "sagittal": (0.0, -90.0, 0.0),
-}
 
 
 def infer_scan_geometry(
@@ -88,27 +79,11 @@ def infer_scan_geometry(
         thin_axis=thin_axis,
         thin_axis_name=_AXIS_NAMES[thin_axis],
         acquisition_plane=plane,
-        baseline_rotation_degrees=_BASELINE_ROTATION_BY_PLANE[plane],
         shape_vox=tuple(int(v) for v in shape.tolist()),
         spacing_mm=tuple(float(v) for v in spacing.tolist()),
         extent_mm=tuple(float(v) for v in extent.tolist()),
         inference_reason=reason,
     )
-
-
-def _canonical_method_name(method: str) -> str:
-    name = str(method)
-    aliases = {
-        "naive_volume": "legacy_loop",
-        "optimized_local": "legacy_loop",
-        "optimized_patch": "optimized_fused",
-        "fused_vectorized": "optimized_fused",
-    }
-    canonical = aliases.get(name, name)
-    valid = {"legacy_loop", "optimized_fused"}
-    if canonical not in valid:
-        raise ValueError(f"Unknown sampling method '{method}'. Expected one of {sorted(valid)}")
-    return canonical
 
 
 def resolve_nifti_path(series_path: str) -> str:
@@ -149,39 +124,6 @@ def compute_robust_stats(data: np.ndarray) -> tuple[float, float, float, float]:
     return median, std, float(p_low), float(p_high)
 
 
-def _euler_xyz_to_matrix(degrees_xyz: tuple[float, float, float]) -> np.ndarray:
-    x, y, z = [math.radians(v) for v in degrees_xyz]
-    cx, cy, cz = math.cos(x), math.cos(y), math.cos(z)
-    sx, sy, sz = math.sin(x), math.sin(y), math.sin(z)
-
-    rx = np.array([[1.0, 0.0, 0.0], [0.0, cx, -sx], [0.0, sx, cx]], dtype=np.float32)
-    ry = np.array([[cy, 0.0, sy], [0.0, 1.0, 0.0], [-sy, 0.0, cy]], dtype=np.float32)
-    rz = np.array([[cz, -sz, 0.0], [sz, cz, 0.0], [0.0, 0.0, 1.0]], dtype=np.float32)
-    return rz @ ry @ rx
-
-
-def _matrix_to_euler_xyz_degrees(matrix: np.ndarray) -> tuple[float, float, float]:
-    """Return one XYZ-Euler representation for a rotation matrix.
-
-    This is used for debugging/metadata only and is not used for training targets.
-    """
-    rot = np.asarray(matrix, dtype=np.float64)
-    if rot.shape != (3, 3):
-        raise ValueError(f"Expected rotation matrix shape (3, 3), got {rot.shape}")
-
-    sy = float(np.sqrt(rot[0, 0] * rot[0, 0] + rot[1, 0] * rot[1, 0]))
-    singular = sy < 1e-6
-    if not singular:
-        x = math.atan2(rot[2, 1], rot[2, 2])
-        y = math.atan2(-rot[2, 0], sy)
-        z = math.atan2(rot[1, 0], rot[0, 0])
-    else:
-        x = math.atan2(-rot[1, 2], rot[1, 1])
-        y = math.atan2(-rot[2, 0], sy)
-        z = 0.0
-    return (math.degrees(x), math.degrees(y), math.degrees(z))
-
-
 def _affine_linear_translation(affine: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     arr = np.asarray(affine, dtype=np.float32)
     if arr.shape != (4, 4):
@@ -215,95 +157,6 @@ def world_points_to_voxel(points_world: np.ndarray, affine: np.ndarray) -> np.nd
     return (centered @ linear_inv.T).astype(np.float32, copy=False)
 
 
-def rotate_volume_about_center(
-    volume: np.ndarray,
-    center_vox: np.ndarray,
-    rotation_matrix: np.ndarray,
-    *,
-    spacing_mm: np.ndarray | tuple[float, float, float] | None = None,
-    affine_linear: np.ndarray | None = None,
-    interpolation_order: int = 1,
-    mode: str = "nearest",
-) -> np.ndarray:
-    """Rotate a 3D volume around an in-volume voxel center.
-
-    If ``spacing_mm`` is provided, rotation is applied in physical (mm) space
-    and mapped back to voxel space so anisotropic scans are not warped.
-    """
-    vol = np.asarray(volume, dtype=np.float32)
-    if vol.ndim != 3:
-        raise ValueError(f"Expected 3D volume, got shape={vol.shape}")
-    center = np.asarray(center_vox, dtype=np.float64).reshape(-1)
-    rot = np.asarray(rotation_matrix, dtype=np.float64)
-    if center.size != 3 or rot.shape != (3, 3):
-        raise ValueError(
-            f"Invalid center/rotation shape: center={tuple(center.shape)} rotation={tuple(rot.shape)}"
-        )
-    rot_inv = np.linalg.inv(rot)
-    if affine_linear is not None:
-        linear = np.asarray(affine_linear, dtype=np.float64)
-        if linear.shape != (3, 3):
-            raise ValueError(f"Invalid affine_linear shape: {linear.shape}")
-        linear_inv = np.linalg.inv(linear)
-        # x_in_vox = A^-1 R^-1 A x_out_vox + offset
-        matrix = linear_inv @ rot_inv @ linear
-    elif spacing_mm is None:
-        matrix = rot_inv
-    else:
-        spacing = np.asarray(spacing_mm, dtype=np.float64).reshape(-1)
-        if spacing.size != 3 or np.any(spacing <= 0.0):
-            raise ValueError(f"Invalid spacing_mm: {spacing_mm}")
-        scale = np.diag(spacing)
-        inv_scale = np.diag(1.0 / spacing)
-        # x_in_vox = S^-1 R^-1 S x_out_vox + offset
-        matrix = inv_scale @ rot_inv @ scale
-    offset = center - matrix @ center
-    return ndimage.affine_transform(
-        vol,
-        matrix,
-        offset=offset,
-        order=int(interpolation_order),
-        mode=mode,
-    ).astype(np.float32, copy=False)
-
-
-def rotated_relative_points_to_voxel(
-    relative_points_pt: np.ndarray,
-    prism_center_vox: np.ndarray,
-    spacing_mm: np.ndarray | None = None,
-    *,
-    affine: np.ndarray | None = None,
-    shape_vox: tuple[int, int, int] | np.ndarray | None = None,
-) -> np.ndarray:
-    """Convert rotated relative point coordinates (mm) back to voxel indices."""
-    rel = np.asarray(relative_points_pt, dtype=np.float32)
-    if rel.ndim != 2 or rel.shape[1] != 3:
-        raise ValueError(f"Expected relative_points_pt shape (N, 3), got {rel.shape}")
-    center_vox = np.asarray(prism_center_vox, dtype=np.float32).reshape(-1)
-    if center_vox.size != 3:
-        raise ValueError(f"Invalid center shape: {tuple(center_vox.shape)}")
-
-    if affine is not None:
-        center_world = voxel_points_to_world(center_vox[np.newaxis, :], np.asarray(affine, dtype=np.float32))[0]
-        points_world = center_world[np.newaxis, :] + rel
-        points_vox = np.rint(world_points_to_voxel(points_world, np.asarray(affine, dtype=np.float32))).astype(np.int64)
-    else:
-        if spacing_mm is None:
-            raise ValueError("Either spacing_mm or affine must be provided")
-        spacing = np.asarray(spacing_mm, dtype=np.float32).reshape(-1)
-        if spacing.size != 3:
-            raise ValueError(f"Invalid spacing shape: {tuple(spacing.shape)}")
-        center_pt = center_vox * spacing
-        points_pt = center_pt[np.newaxis, :] + rel
-        points_vox = np.rint(points_pt / spacing).astype(np.int64)
-    if shape_vox is not None:
-        upper = np.asarray(shape_vox, dtype=np.int64).reshape(-1)
-        if upper.size != 3:
-            raise ValueError(f"Invalid shape_vox shape: {tuple(upper.shape)}")
-        points_vox = np.clip(points_vox, 0, upper - 1)
-    return points_vox
-
-
 @dataclass
 class NiftiScan:
     data: np.ndarray
@@ -335,8 +188,6 @@ class NiftiScan:
         linear = np.asarray(linear, dtype=np.float32)
         axis_norm = np.linalg.norm(linear.astype(np.float64), axis=0).astype(np.float32)
         spacing = np.asarray(self.spacing, dtype=np.float32)
-        # Keep affine orientation/shear directions, but align axis scale to header spacing.
-        # This guards against synthetic/legacy cases where affine is identity but spacing != 1.
         if np.any(axis_norm <= 1e-6):
             linear = np.diag(spacing.astype(np.float32))
         elif not np.allclose(axis_norm, spacing, rtol=1e-3, atol=1e-3):
@@ -354,9 +205,9 @@ class NiftiScan:
 
     @property
     def patch_mm(self) -> np.ndarray:
-        mm = np.array([self.base_patch_mm, self.base_patch_mm, self.base_patch_mm], dtype=np.float32)
-        # Sampling frame is always canonical RAS: axial baseline means z is thin.
-        mm[_RAS_AXIAL_AXIS] = self.base_patch_mm / 16.0
+        mm = np.full(3, self.base_patch_mm, dtype=np.float32)
+        thin = self.geometry.thin_axis
+        mm[thin] = self.voxel_axis_mm[thin]
         return mm
 
     @property
@@ -376,6 +227,7 @@ class NiftiScan:
         return np.array([rng.integers(low=int(lo), high=int(hi) + 1) for lo, hi in zip(min_idx, max_idx)], dtype=np.int64)
 
     def _extract_patch(self, center_vox: np.ndarray) -> np.ndarray:
+        """Extract a 3D patch and squeeze the thin axis to get a 2D slice."""
         shape = self.patch_shape_vox
         starts = center_vox - (shape // 2)
         ends = starts + shape
@@ -397,33 +249,10 @@ class NiftiScan:
             slice(int(src_starts[2]), int(src_ends[2])),
         ]
 
-        # Standard contract expects (N, 16, 16) style data with singleton depth squeezed.
-        if patch.shape[0] == 1:
-            patch = patch[0]
-        elif patch.shape[1] == 1:
-            patch = patch[:, 0, :]
-        elif patch.shape[2] == 1:
-            patch = patch[:, :, 0]
-        return patch.astype(np.float32, copy=False)
-
-    @staticmethod
-    def _patch_to_2d(patch: np.ndarray) -> np.ndarray:
-        arr = np.asarray(patch, dtype=np.float32)
-        if arr.ndim == 2:
-            return arr
-        if arr.ndim == 3:
-            center_idx = int(arr.shape[_RAS_AXIAL_AXIS] // 2)
-            return np.take(arr, indices=center_idx, axis=_RAS_AXIAL_AXIS).astype(np.float32, copy=False)
-        raise SmallScanError(f"Unexpected patch rank: {arr.ndim}")
-
-    def _resize_patch(self, patch_2d: np.ndarray) -> np.ndarray:
-        return self._resize_patches_batch(patch_2d)[0]
-
-    def _resolve_target_patch_size(self, target_patch_size: int | None = None) -> int:
-        size = int(self.target_patch_size if target_patch_size is None else target_patch_size)
-        if size <= 0:
-            raise ValueError(f"target_patch_size must be > 0, got {size}")
-        return size
+        # Squeeze the thin axis to get a 2D native-plane slice.
+        thin = self.geometry.thin_axis
+        patch_2d = np.take(patch, indices=patch.shape[thin] // 2, axis=thin)
+        return patch_2d.astype(np.float32, copy=False)
 
     def _resize_patches_batch(
         self,
@@ -431,111 +260,19 @@ class NiftiScan:
         *,
         target_patch_size: int | None = None,
     ) -> np.ndarray:
-        out_size = self._resolve_target_patch_size(target_patch_size)
+        out_size = int(self.target_patch_size if target_patch_size is None else target_patch_size)
+        if out_size <= 0:
+            raise ValueError(f"target_patch_size must be > 0, got {out_size}")
         arr = np.asarray(patches_2d, dtype=np.float32)
         if arr.ndim == 2:
             arr = arr[np.newaxis, ...]
         t = torch.from_numpy(np.ascontiguousarray(arr)).unsqueeze(1).float()
-        t = F.interpolate(
-            t,
-            size=(out_size, out_size),
-            mode="bilinear",
-            align_corners=False,
-        )
+        t = F.interpolate(t, size=(out_size, out_size), mode="bilinear", align_corners=False)
         return t.squeeze(1).cpu().numpy().astype(np.float32, copy=False)
 
-    @staticmethod
-    def _patches_to_2d(patches_3d: np.ndarray) -> np.ndarray:
-        arr = np.asarray(patches_3d, dtype=np.float32)
-        if arr.ndim == 3:
-            return NiftiScan._patch_to_2d(arr)
-        if arr.ndim != 4:
-            raise SmallScanError(f"Unexpected patch batch rank: {arr.ndim}")
-
-        center_idx = int(arr.shape[_RAS_AXIAL_AXIS + 1] // 2)
-        return arr[:, :, :, center_idx]
-
-    def _sampling_offset_vectors_vox(
-        self,
-        patch_shape: np.ndarray,
-        *,
-        rotation_matrix: np.ndarray | None = None,
-    ) -> np.ndarray:
-        offsets = [np.arange(int(d), dtype=np.float32) - (float(d) - 1.0) / 2.0 for d in patch_shape]
-        mesh = np.meshgrid(*offsets, indexing="ij")
-        offset_vectors = np.stack([m.reshape(-1) for m in mesh], axis=1).astype(np.float32, copy=False)
-        if rotation_matrix is None:
-            return offset_vectors
-
-        inv_rot = np.asarray(rotation_matrix, dtype=np.float32).T
-        offset_mm = (offset_vectors @ self.affine_linear.T).astype(np.float32, copy=False)
-        src_offset_mm = (inv_rot @ offset_mm.T).T
-        src_offset_vox = (src_offset_mm @ self.affine_linear_inv.T).astype(np.float32, copy=False)
-        return src_offset_vox
-
-    def _extract_patches_legacy_loop(
-        self,
-        centers_vox: np.ndarray,
-        *,
-        target_patch_size: int | None = None,
-        rotation_matrix: np.ndarray | None = None,
-    ) -> np.ndarray:
-        if rotation_matrix is None:
-            return np.stack(
-                [
-                    self._resize_patches_batch(
-                        self._patch_to_2d(self._extract_patch(c)),
-                        target_patch_size=target_patch_size,
-                    )[0]
-                    for c in centers_vox
-                ],
-                axis=0,
-            )
-
-        patch_shape = self.patch_shape_vox.astype(np.int64)
-        offset_vectors = self._sampling_offset_vectors_vox(patch_shape, rotation_matrix=rotation_matrix)
-        centers = np.asarray(centers_vox, dtype=np.float32)
-        patches: list[np.ndarray] = []
-        for center in centers:
-            src_vox = center[np.newaxis, :] + offset_vectors
-            sampled = ndimage.map_coordinates(
-                self.data,
-                [src_vox[:, 0], src_vox[:, 1], src_vox[:, 2]],
-                order=1,
-                mode="constant",
-                cval=0.0,
-            )
-            patch_3d = sampled.reshape(int(patch_shape[0]), int(patch_shape[1]), int(patch_shape[2]))
-            patch_2d = self._patch_to_2d(patch_3d)
-            patches.append(self._resize_patches_batch(patch_2d, target_patch_size=target_patch_size)[0])
-        return np.stack(
-            patches,
-            axis=0,
-        )
-
-    def _extract_patches_optimized_fused(
-        self,
-        centers_vox: np.ndarray,
-        *,
-        target_patch_size: int | None = None,
-        rotation_matrix: np.ndarray | None = None,
-    ) -> np.ndarray:
-        patch_shape = self.patch_shape_vox.astype(np.int64)
-        offset_vectors = self._sampling_offset_vectors_vox(patch_shape, rotation_matrix=rotation_matrix)
-
-        centers = np.asarray(centers_vox, dtype=np.float32)
-        all_src_vox = centers[:, np.newaxis, :] + offset_vectors[np.newaxis, :, :]
-        flat_src_vox = all_src_vox.reshape(-1, 3)
-
-        sampled = ndimage.map_coordinates(
-            self.data,
-            [flat_src_vox[:, 0], flat_src_vox[:, 1], flat_src_vox[:, 2]],
-            order=1,
-            mode="constant",
-            cval=0.0,
-        )
-        patches_3d = sampled.reshape(centers.shape[0], int(patch_shape[0]), int(patch_shape[1]), int(patch_shape[2]))
-        patches_2d = self._patches_to_2d(patches_3d)
+    def _extract_patches(self, centers_vox: np.ndarray, *, target_patch_size: int | None = None) -> np.ndarray:
+        """Extract 2D native-plane patches via direct array slicing."""
+        patches_2d = np.stack([self._extract_patch(c) for c in centers_vox], axis=0)
         return self._resize_patches_batch(patches_2d, target_patch_size=target_patch_size)
 
     def train_sample(
@@ -543,21 +280,14 @@ class NiftiScan:
         n_patches: int,
         *,
         seed: int | None = None,
-        method: str = "optimized_fused",
         wc: float | None = None,
         ww: float | None = None,
         sampling_radius_mm: float | None = None,
-        rotation_degrees: tuple[float, float, float] | None = None,
-        native_hint_rotation_degrees: tuple[float, float, float] | None = None,
-        rotation_augmentation_degrees: tuple[float, float, float] | None = None,
-        apply_native_orientation_hint: bool = True,
-        rotation_augmentation_max_degrees: float = 10.0,
         subset_center_vox: np.ndarray | None = None,
         patch_centers_vox: np.ndarray | None = None,
         target_patch_size: int | None = None,
     ) -> dict[str, Any]:
-        method_name = _canonical_method_name(method)
-        resolved_target_patch_size = self._resolve_target_patch_size(target_patch_size)
+        resolved_target_patch_size = int(self.target_patch_size if target_patch_size is None else target_patch_size)
         rng = np.random.default_rng(seed)
 
         half_patch = np.ceil(self.patch_shape_vox / 2.0).astype(np.int64)
@@ -572,13 +302,14 @@ class NiftiScan:
         target_radius = float(rng.uniform(20.0, 30.0)) if sampling_radius_mm is None else float(sampling_radius_mm)
         sampling_radius_mm = min(target_radius, max_radius_mm * 0.9)
         sampling_radius_mm = max(sampling_radius_mm, 0.0)
+
         if subset_center_vox is None:
             prism_center = self._sample_center(rng, sampling_radius_mm)
         else:
             prism_center = np.asarray(subset_center_vox, dtype=np.int64)
             if prism_center.shape != (3,):
                 raise ValueError(f"subset_center_vox must have shape (3,), got {prism_center.shape}")
-            if np.any(prism_center < 0) or np.any(prism_center >= np.asarray(self.data.shape, dtype=np.int64)):
+            if np.any(prism_center < 0) or np.any(prism_center >= shape):
                 raise ValueError(
                     f"subset_center_vox out of bounds: center={tuple(int(x) for x in prism_center.tolist())} "
                     f"shape={tuple(int(x) for x in self.data.shape)}"
@@ -592,7 +323,7 @@ class NiftiScan:
                     delta_mm = delta_mm * (sampling_radius_mm / max(np.linalg.norm(delta_mm), 1e-6))
                 delta_vox = (self.affine_linear_inv @ np.asarray(delta_mm, dtype=np.float32)).astype(np.float32, copy=False)
                 center = prism_center + np.rint(delta_vox).astype(np.int64)
-                center = np.clip(center, 0, np.asarray(self.data.shape, dtype=np.int64) - 1)
+                center = np.clip(center, 0, shape - 1)
                 centers.append(center)
             centers_arr = np.asarray(centers, dtype=np.int64)
         else:
@@ -603,65 +334,9 @@ class NiftiScan:
                 raise ValueError(
                     f"patch_centers_vox has {centers_arr.shape[0]} centers but n_patches={int(n_patches)}"
                 )
-            centers_arr = np.clip(centers_arr, 0, np.asarray(self.data.shape, dtype=np.int64) - 1)
+            centers_arr = np.clip(centers_arr, 0, shape - 1)
 
-        geometry = self.geometry
-        if native_hint_rotation_degrees is None:
-            hint_tuple = tuple(float(v) for v in geometry.baseline_rotation_degrees)
-        else:
-            if len(native_hint_rotation_degrees) != 3:
-                raise ValueError("native_hint_rotation_degrees must be a tuple of length 3")
-            hint_tuple = tuple(float(v) for v in native_hint_rotation_degrees)
-        hint_matrix = _euler_xyz_to_matrix(hint_tuple)
-
-        if rotation_degrees is not None and rotation_augmentation_degrees is not None:
-            raise ValueError("Provide either rotation_degrees or rotation_augmentation_degrees, not both")
-
-        if rotation_degrees is not None:
-            if len(rotation_degrees) != 3:
-                raise ValueError("rotation_degrees must be a tuple of length 3")
-            # Absolute override in canonical RAS space.
-            rotation_control_tuple = tuple(float(v) for v in rotation_degrees)
-            rotation_augmentation_tuple = rotation_control_tuple
-            aug_matrix = _euler_xyz_to_matrix(rotation_control_tuple)
-            rotation_matrix = aug_matrix
-        else:
-            if rotation_augmentation_degrees is None:
-                if seed is None:
-                    rot_rng = np.random.default_rng()
-                else:
-                    rot_rng = np.random.default_rng(int(seed) + 1_000_003)
-                max_abs_aug = max(float(rotation_augmentation_max_degrees), 0.0)
-                rotation_augmentation_tuple = tuple(
-                    float(rot_rng.uniform(-max_abs_aug, max_abs_aug)) for _ in range(3)
-                )
-            else:
-                if len(rotation_augmentation_degrees) != 3:
-                    raise ValueError("rotation_augmentation_degrees must be a tuple of length 3")
-                rotation_augmentation_tuple = tuple(float(v) for v in rotation_augmentation_degrees)
-
-            rotation_control_tuple = rotation_augmentation_tuple
-            aug_matrix = _euler_xyz_to_matrix(rotation_augmentation_tuple)
-            if bool(apply_native_orientation_hint):
-                # Global-RAS augmentation axes, then reorient with native hint.
-                rotation_matrix = hint_matrix @ aug_matrix
-            else:
-                rotation_matrix = aug_matrix
-
-        rotation_effective_tuple = _matrix_to_euler_xyz_degrees(rotation_matrix)
-
-        if method_name == "optimized_fused":
-            raw_patches = self._extract_patches_optimized_fused(
-                centers_arr,
-                target_patch_size=resolved_target_patch_size,
-                rotation_matrix=rotation_matrix,
-            )
-        else:
-            raw_patches = self._extract_patches_legacy_loop(
-                centers_arr,
-                target_patch_size=resolved_target_patch_size,
-                rotation_matrix=rotation_matrix,
-            )
+        raw_patches = self._extract_patches(centers_arr, target_patch_size=resolved_target_patch_size)
 
         if wc is None or ww is None:
             wc = float(rng.uniform(self.robust_median - self.robust_std, self.robust_median + self.robust_std))
@@ -675,43 +350,21 @@ class NiftiScan:
 
         prism_center_pt = voxel_points_to_world(prism_center.astype(np.float32), self.affine)[0]
         patch_centers_pt = voxel_points_to_world(centers_arr.astype(np.float32), self.affine)
-        relative_patch_centers_pt_ras = patch_centers_pt - prism_center_pt
-        relative_patch_centers_pt_aug = (aug_matrix @ relative_patch_centers_pt_ras.T).T.astype(
-            np.float32,
-            copy=False,
-        )
-        relative_patch_centers_pt_final = (rotation_matrix @ relative_patch_centers_pt_ras.T).T.astype(
-            np.float32,
-            copy=False,
-        )
+        relative_patch_centers_pt = patch_centers_pt - prism_center_pt
 
+        geometry = self.geometry
         return {
-            "method": method_name,
-            "raw_patches": raw_patches,
             "normalized_patches": normalized.astype(np.float32, copy=False),
+            "raw_patches": raw_patches,
             "target_patch_size": int(resolved_target_patch_size),
             "patch_centers_pt": patch_centers_pt,
             "patch_centers_vox": centers_arr.astype(np.int64, copy=False),
-            "relative_patch_centers_pt": relative_patch_centers_pt_ras,
-            "relative_patch_centers_pt_ras": relative_patch_centers_pt_ras,
-            "relative_patch_centers_pt_aug": relative_patch_centers_pt_aug,
-            "relative_patch_centers_pt_final": relative_patch_centers_pt_final,
-            "relative_patch_centers_pt_rotated": relative_patch_centers_pt_final,
+            "relative_patch_centers_pt": relative_patch_centers_pt,
             "prism_center_pt": prism_center_pt,
             "prism_center_vox": prism_center.astype(np.int64, copy=False),
-            "rotation_hint_degrees": np.asarray(hint_tuple, dtype=np.float32),
-            "rotation_augmentation_degrees": np.asarray(rotation_augmentation_tuple, dtype=np.float32),
-            "rotation_degrees": np.asarray(rotation_control_tuple, dtype=np.float32),
-            "rotation_effective_degrees": np.asarray(rotation_effective_tuple, dtype=np.float32),
-            "rotation_matrix_hint_ras": hint_matrix.astype(np.float32, copy=False),
-            "rotation_matrix_aug_ras": aug_matrix.astype(np.float32, copy=False),
-            "rotation_matrix_ras": rotation_matrix,
             "native_thin_axis": int(geometry.thin_axis),
             "native_thin_axis_name": str(geometry.thin_axis_name),
             "native_acquisition_plane": str(geometry.acquisition_plane),
-            "native_baseline_rotation_degrees": np.asarray(geometry.baseline_rotation_degrees, dtype=np.float32),
-            "native_inference_reason": str(geometry.inference_reason),
-            "patch_content_rotated": True,
             "wc": float(wc),
             "ww": float(ww),
             "w_min": float(w_min),

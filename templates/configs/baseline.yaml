@@ -23,15 +23,11 @@ data:
   modality_filter: [CT, MR]
   n_patches: 256
   patch_mm: 16.0
-  method: optimized_fused
   storage_mode: sharded
   workers: 8
   warm_pool_size: 16
   visits_per_scan: 100
   max_prefetch_replacements: 2
-  position_frame_for_model: aug
-  apply_native_orientation_hint: true
-  rotation_augmentation_max_degrees: 10.0
   strict_background_errors: false
   use_local_scratch: true
   broken_abort_ratio: 0.10
@@ -51,7 +47,6 @@ train:
 
 loss:
   w_distance: 1.0
-  w_rotation: 1.0
   w_window: 1.0
   w_supcon_target: 0.2
   supcon_temperature: 0.1
