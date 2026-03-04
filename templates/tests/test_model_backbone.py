@@ -18,7 +18,7 @@ def test_vit_l_backbone_forward_shapes():
     model = PrismSSLModel(
         patch_dim=256,
         model_name="vit_l",
-        d_model=128,
+        d_model=144,
         proj_dim=32,
         num_layers=2,
         num_heads=8,
@@ -27,7 +27,6 @@ def test_vit_l_backbone_forward_shapes():
     )
     out = model(*_inputs())
     assert out.center_delta_mm.shape == (2, 3)
-    # rotation_delta_deg removed
     assert out.window_delta.shape == (2, 2)
     assert out.proj_a.shape == (2, 32)
     assert out.proj_b.shape == (2, 32)
@@ -37,7 +36,7 @@ def test_vit_l_backbone_second_config_forward_shapes():
     model = PrismSSLModel(
         patch_dim=256,
         model_name="vit_l",
-        d_model=192,
+        d_model=144,
         proj_dim=64,
         num_layers=2,
         num_heads=6,
@@ -46,7 +45,6 @@ def test_vit_l_backbone_second_config_forward_shapes():
     )
     out = model(*_inputs())
     assert out.center_delta_mm.shape == (2, 3)
-    # rotation_delta_deg removed
     assert out.window_delta.shape == (2, 2)
     assert out.proj_a.shape == (2, 64)
     assert out.proj_b.shape == (2, 64)

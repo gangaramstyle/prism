@@ -10,7 +10,7 @@ wandb:
 
 model:
   name: vit_l
-  d_model: 1024
+  d_model: 1152
   num_layers: 24
   num_heads: 16
   mlp_ratio: 4.0

@@ -79,7 +79,7 @@ class TrainConfig:
 @dataclass
 class ModelConfig:
     name: str = "vit_l"
-    d_model: int = 256
+    d_model: int = 288
     num_layers: int = 24
     num_heads: int = 16
     mlp_ratio: float = 4.0
