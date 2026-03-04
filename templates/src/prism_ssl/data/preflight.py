@@ -233,49 +233,51 @@ class NiftiScan:
         vol_shape = np.asarray(self.data.shape, dtype=np.int64)
         return bool(np.all(ends > 0) and np.all(starts < vol_shape))
 
-    def _extract_patch(self, center_vox: np.ndarray, patch_vox: np.ndarray) -> np.ndarray:
-        """Extract a 3D patch and squeeze the thin axis to get a 2D slice."""
-        starts = center_vox - (patch_vox // 2)
-        ends = starts + patch_vox
-
-        patch = np.zeros(tuple(int(v) for v in patch_vox.tolist()), dtype=np.float32)
-
-        src_starts = np.maximum(starts, 0)
-        src_ends = np.minimum(ends, np.asarray(self.data.shape, dtype=np.int64))
-
-        # If no overlap on any axis, return zeros
-        if np.any(src_ends <= src_starts):
-            thin = self.geometry.thin_axis
-            return np.take(patch, indices=patch.shape[thin] // 2, axis=thin).astype(np.float32, copy=False)
-
-        dst_starts = src_starts - starts
-        dst_ends = dst_starts + (src_ends - src_starts)
-
-        patch[
-            slice(int(dst_starts[0]), int(dst_ends[0])),
-            slice(int(dst_starts[1]), int(dst_ends[1])),
-            slice(int(dst_starts[2]), int(dst_ends[2])),
-        ] = self.data[
-            slice(int(src_starts[0]), int(src_ends[0])),
-            slice(int(src_starts[1]), int(src_ends[1])),
-            slice(int(src_starts[2]), int(src_ends[2])),
-        ]
-
-        # Squeeze the thin axis to get a 2D native-plane slice.
-        thin = self.geometry.thin_axis
-        patch_2d = np.take(patch, indices=patch.shape[thin] // 2, axis=thin)
-        return patch_2d.astype(np.float32, copy=False)
-
     def _extract_patches(self, centers_vox: np.ndarray, patch_vox: np.ndarray, output_size: int) -> np.ndarray:
-        """Extract 2D native-plane patches, resize to fixed output_size x output_size."""
-        patches_2d = [self._extract_patch(c, patch_vox) for c in centers_vox]
-        h, w = patches_2d[0].shape
-        if h == output_size and w == output_size:
-            return np.stack(patches_2d, axis=0)
-        resized = np.empty((len(patches_2d), output_size, output_size), dtype=np.float32)
-        for i, p in enumerate(patches_2d):
-            resized[i] = np.array(Image.fromarray(p).resize((output_size, output_size), Image.BILINEAR), dtype=np.float32)
-        return resized
+        """Extract 2D native-plane patches via direct slicing, resize to output_size x output_size."""
+        thin = self.geometry.thin_axis
+        in_plane = [i for i in range(3) if i != thin]
+        ax_r, ax_c = in_plane[0], in_plane[1]
+        half = patch_vox // 2
+        vol_shape = np.asarray(self.data.shape, dtype=np.int64)
+        h_in = int(patch_vox[ax_r])
+        w_in = int(patch_vox[ax_c])
+        need_resize = (h_in != output_size or w_in != output_size)
+
+        n = len(centers_vox)
+        out = np.zeros((n, output_size, output_size), dtype=np.float32)
+
+        for i, center in enumerate(centers_vox):
+            starts = center - half
+            ends = starts + patch_vox
+            src_s = np.maximum(starts, 0)
+            src_e = np.minimum(ends, vol_shape)
+            if np.any(src_e <= src_s):
+                continue
+            dst_s = src_s - starts
+            dst_e = dst_s + (src_e - src_s)
+
+            # Slice the thin axis directly (always index 0 within the 1-thick dim)
+            thin_idx = int(np.clip(center[thin], 0, vol_shape[thin] - 1))
+            if thin == 0:
+                plane = self.data[thin_idx, src_s[1]:src_e[1], src_s[2]:src_e[2]]
+            elif thin == 1:
+                plane = self.data[src_s[0]:src_e[0], thin_idx, src_s[2]:src_e[2]]
+            else:
+                plane = self.data[src_s[0]:src_e[0], src_s[1]:src_e[1], thin_idx]
+
+            if need_resize:
+                # Place into full-size native patch, then resize
+                native = np.zeros((h_in, w_in), dtype=np.float32)
+                native[dst_s[ax_r]:dst_e[ax_r], dst_s[ax_c]:dst_e[ax_c]] = plane
+                out[i] = np.array(
+                    Image.fromarray(native, mode="F").resize((output_size, output_size), Image.BILINEAR),
+                    dtype=np.float32,
+                )
+            else:
+                out[i, dst_s[ax_r]:dst_e[ax_r], dst_s[ax_c]:dst_e[ax_c]] = plane
+
+        return out
 
     def train_sample(
         self,

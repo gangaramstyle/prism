@@ -24,7 +24,7 @@ data:
   n_patches: 256
   patch_mm: 20.0
   storage_mode: sharded
-  workers: 8
+  workers: 16
   warm_pool_size: 16
   visits_per_scan: 100
   max_prefetch_replacements: 2

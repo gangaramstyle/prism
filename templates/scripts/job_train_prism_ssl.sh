@@ -2,7 +2,7 @@
 #SBATCH --job-name=prism-ssl-train
 #SBATCH --partition=dgx-b200
 #SBATCH --gpus=1
-#SBATCH --cpus-per-task=16
+#SBATCH --cpus-per-task=32
 #SBATCH --mem=256G
 #SBATCH --time=24:00:00
 #SBATCH --output=logs/%x_%j.out
