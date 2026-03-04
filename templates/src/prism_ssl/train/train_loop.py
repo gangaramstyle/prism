@@ -254,6 +254,8 @@ def run_training(config: RunConfig) -> dict[str, Any]:
                     break
                 raise
 
+            data_wait_ms = (time.perf_counter() - t0) * 1000.0
+
             patches_a = batch["patches_a"].to(device, non_blocking=True)
             positions_a = batch["positions_a"].to(device, non_blocking=True)
             patches_b = batch["patches_b"].to(device, non_blocking=True)
@@ -327,6 +329,7 @@ def run_training(config: RunConfig) -> dict[str, Any]:
                         loss_supcon=float(loss_bundle.supcon.item()),
                         supcon_weight=loss_bundle.supcon_weight,
                         step_time_ms=step_time_ms,
+                        data_wait_ms=data_wait_ms,
                         throughput_effective=throughput_effective,
                         broken_ratio=accum.broken_ratio,
                     ),
@@ -362,6 +365,8 @@ def run_training(config: RunConfig) -> dict[str, Any]:
                     "train/pred_window_std": diagnostics["pred_window_std"],
                     "train/supcon_positives_per_anchor_mean": positives_mean,
                     "train/step_time_ms": step_time_ms,
+                    "train/data_wait_ms": data_wait_ms,
+                    "train/gpu_time_ms": step_time_ms - data_wait_ms,
                     "train/patches_per_sec_step": patches_this_step / max(step_time_s, 1e-6),
                     "train/throughput_effective_patches_per_sec": throughput_effective,
                     "train/gpu_mem_peak_mb": gpu_mem_mb,
