@@ -21,10 +21,22 @@ with app.setup:
         load_catalog,
         load_nifti_scan,
         sample_scan_candidates,
+        voxel_points_to_world,
+        world_points_to_voxel,
     )
     from prism_ssl.config.schema import ScanRecord
 
     AXIS_LABELS = {0: "x(R)", 1: "y(A)", 2: "z(S)"}
+
+    def scan_world_bounds(scan):
+        """Return (world_min, world_max, world_center) for the scan volume."""
+        shape = np.array(scan.data.shape, dtype=np.float32)
+        corners = np.array([[0, 0, 0], shape - 1], dtype=np.float32)
+        world_corners = voxel_points_to_world(corners, scan.affine)
+        w_min = world_corners.min(axis=0)
+        w_max = world_corners.max(axis=0)
+        w_center = (w_min + w_max) / 2.0
+        return w_min, w_max, w_center
 
     def window_to_rgb(slice_2d: np.ndarray, wc: float, ww: float) -> np.ndarray:
         ww_safe = max(float(ww), 1e-6)
@@ -182,6 +194,8 @@ def slice_browser(scan, scan_geo):
 
 @app.cell
 def sample_controls(scan):
+    _w_min, _w_max, _w_center = scan_world_bounds(scan)
+
     n_patches = mo.ui.slider(1, 64, value=16, step=1, label="N patches")
     sample_seed = mo.ui.number(value=42, label="Seed")
     sample_wc = mo.ui.slider(
@@ -193,16 +207,36 @@ def sample_controls(scan):
         value=float(4.0 * scan.robust_std), step=1.0, label="Window width",
     )
     sample_radius = mo.ui.slider(5.0, 100.0, value=25.0, step=1.0, label="Sampling radius (mm)")
+    center_x = mo.ui.slider(
+        float(_w_min[0]), float(_w_max[0]),
+        value=float(_w_center[0]), step=0.5, label="Center X (R) mm",
+    )
+    center_y = mo.ui.slider(
+        float(_w_min[1]), float(_w_max[1]),
+        value=float(_w_center[1]), step=0.5, label="Center Y (A) mm",
+    )
+    center_z = mo.ui.slider(
+        float(_w_min[2]), float(_w_max[2]),
+        value=float(_w_center[2]), step=0.5, label="Center Z (S) mm",
+    )
+
     mo.vstack([
         mo.md("## 4. Sample Patches"),
         mo.hstack([n_patches, sample_seed, sample_radius]),
         mo.hstack([sample_wc, sample_ww]),
+        mo.md("**Sampling center (world mm)**"),
+        mo.hstack([center_x, center_y, center_z]),
     ])
-    return n_patches, sample_seed, sample_wc, sample_ww, sample_radius
+    return n_patches, sample_seed, sample_wc, sample_ww, sample_radius, center_x, center_y, center_z
 
 
 @app.cell
-def do_sample(scan, n_patches, sample_seed, sample_wc, sample_ww, sample_radius):
+def do_sample(scan, n_patches, sample_seed, sample_wc, sample_ww, sample_radius, center_x, center_y, center_z):
+    # Convert world center to voxel
+    _center_world = np.array([center_x.value, center_y.value, center_z.value], dtype=np.float32)
+    _center_vox = world_points_to_voxel(_center_world, scan.affine)[0]
+    _center_vox = np.clip(np.rint(_center_vox).astype(np.int64), 0, np.array(scan.data.shape) - 1)
+
     _t0 = time.perf_counter()
     result = scan.train_sample(
         n_patches.value,
@@ -210,6 +244,7 @@ def do_sample(scan, n_patches, sample_seed, sample_wc, sample_ww, sample_radius)
         wc=sample_wc.value,
         ww=sample_ww.value,
         sampling_radius_mm=sample_radius.value,
+        subset_center_vox=_center_vox,
     )
     sample_time_ms = (time.perf_counter() - _t0) * 1000.0
 
@@ -218,7 +253,9 @@ def do_sample(scan, n_patches, sample_seed, sample_wc, sample_ww, sample_radius)
         f"({n_patches.value / max(sample_time_ms, 0.001) * 1000:.0f} patches/sec)\n\n"
         f"Window: wc={result['wc']:.1f}, ww={result['ww']:.1f} | "
         f"Sampling radius: {result['sampling_radius_mm']:.1f} mm | "
-        f"Plane: {result['native_acquisition_plane']}"
+        f"Plane: {result['native_acquisition_plane']}\n\n"
+        f"Prism center vox: ({_center_vox[0]}, {_center_vox[1]}, {_center_vox[2]}) | "
+        f"world: ({center_x.value:.1f}, {center_y.value:.1f}, {center_z.value:.1f}) mm"
     )
     return result, sample_time_ms
 
@@ -256,11 +293,96 @@ def slice_overlay(scan, result, scan_geo):
 
 
 @app.cell
+def patch_probe_controls(result):
+    _radius = float(result["sampling_radius_mm"])
+    _limit = max(_radius, 50.0)
+    probe_x = mo.ui.slider(-_limit, _limit, value=0.0, step=0.5, label="Probe X offset (mm)")
+    probe_y = mo.ui.slider(-_limit, _limit, value=0.0, step=0.5, label="Probe Y offset (mm)")
+    probe_z = mo.ui.slider(-_limit, _limit, value=0.0, step=0.5, label="Probe Z offset (mm)")
+    mo.vstack([
+        mo.md("## 6. Patch Probe — place a single patch at an offset from prism center"),
+        mo.hstack([probe_x, probe_y, probe_z]),
+    ])
+    return probe_x, probe_y, probe_z
+
+
+@app.cell
+def patch_probe_view(scan, result, scan_geo, probe_x, probe_y, probe_z):
+    _prism_world = result["prism_center_pt"]
+    _prism_vox = result["prism_center_vox"]
+    _offset_mm = np.array([probe_x.value, probe_y.value, probe_z.value], dtype=np.float32)
+    _probe_world = _prism_world + _offset_mm
+    _probe_vox_f = world_points_to_voxel(_probe_world, scan.affine)[0]
+    _shape = np.array(scan.data.shape, dtype=np.int64)
+    _probe_vox = np.clip(np.rint(_probe_vox_f).astype(np.int64), 0, _shape - 1)
+
+    # Extract single patch at probe location
+    _probe_result = scan.train_sample(
+        1,
+        seed=0,
+        wc=result["wc"],
+        ww=result["ww"],
+        subset_center_vox=_probe_vox,
+        patch_centers_vox=_probe_vox[np.newaxis, :],
+    )
+    _probe_patch = _probe_result["normalized_patches"][0]
+
+    # Enlarge patch
+    _lo, _hi = float(_probe_patch.min()), float(_probe_patch.max())
+    if _hi - _lo < 1e-6:
+        _hi = _lo + 1.0
+    _probe_gray = ((_probe_patch - _lo) / (_hi - _lo) * 255.0).astype(np.uint8)
+    _probe_big = np.array(Image.fromarray(_probe_gray).resize((160, 160), Image.NEAREST))
+
+    # Render slice at probe depth
+    _thin = scan_geo.thin_axis
+    _in_plane = [i for i in range(3) if i != _thin]
+    _ax_r, _ax_c = _in_plane[0], _in_plane[1]
+    _probe_slice_idx = int(_probe_vox[_thin])
+    _vol_slice = np.take(scan.data, indices=_probe_slice_idx, axis=_thin)
+    _probe_rgb = window_to_rgb(_vol_slice, result["wc"], result["ww"])
+
+    # Draw prism center (red cross)
+    draw_cross(_probe_rgb, int(_prism_vox[_ax_r]), int(_prism_vox[_ax_c]), (255, 0, 0), radius=5)
+
+    # Draw existing patch centers as dim dots
+    for _cv in result["patch_centers_vox"]:
+        draw_dot(_probe_rgb, int(_cv[_ax_r]), int(_cv[_ax_c]), (100, 100, 0), radius=1)
+
+    # Draw probe patch (cyan box + dot)
+    _half_h = scan.patch_shape_vox[_ax_r] // 2
+    _half_w = scan.patch_shape_vox[_ax_c] // 2
+    draw_dot(_probe_rgb, int(_probe_vox[_ax_r]), int(_probe_vox[_ax_c]), (0, 255, 255), radius=3)
+    draw_rect(_probe_rgb, int(_probe_vox[_ax_r]), int(_probe_vox[_ax_c]), int(_half_h), int(_half_w), (0, 255, 255))
+
+    _probe_rgb = resize_rgb(_probe_rgb, max_dim=500)
+
+    _dist = float(np.linalg.norm(_offset_mm))
+
+    mo.vstack([
+        mo.md(f"**Probe** offset: ({probe_x.value:.1f}, {probe_y.value:.1f}, {probe_z.value:.1f}) mm | "
+               f"distance: {_dist:.1f} mm | "
+               f"vox: ({_probe_vox[0]}, {_probe_vox[1]}, {_probe_vox[2]}) | "
+               f"world: ({_probe_world[0]:.1f}, {_probe_world[1]:.1f}, {_probe_world[2]:.1f}) mm"),
+        mo.hstack([
+            mo.vstack([mo.md("**Probe patch** (160x160 nearest)"), mo.image(Image.fromarray(_probe_big))]),
+            mo.vstack([
+                mo.md(f"**Slice {_probe_slice_idx}** — "
+                       f"cyan box = probe patch, red cross = prism center, "
+                       f"dim dots = sampled patches"),
+                mo.image(Image.fromarray(_probe_rgb)),
+            ]),
+        ]),
+    ])
+    return
+
+
+@app.cell
 def patch_explorer_controls(result):
     _total = result["normalized_patches"].shape[0]
     patch_idx = mo.ui.slider(0, max(_total - 1, 0), value=0, step=1, label="Patch index")
     mo.vstack([
-        mo.md("## 6. Patch Explorer"),
+        mo.md("## 7. Patch Explorer"),
         patch_idx,
     ])
     return patch_idx,
@@ -335,7 +457,7 @@ def patch_explorer_view(scan, result, scan_geo, patch_idx):
 
 @app.cell
 def show_patch_grid(result):
-    mo.md("## 7. Patch Grid")
+    mo.md("## 8. Patch Grid")
 
     _patches = result["normalized_patches"]
     _grid_img = patch_grid(_patches, max_patches=64, cols=8)
@@ -352,7 +474,7 @@ def show_patch_grid(result):
 
 @app.cell
 def position_scatter(result):
-    mo.md("## 8. Position Scatter (World mm, relative to prism center)")
+    mo.md("## 9. Position Scatter (World mm, relative to prism center)")
 
     _pos = result["relative_patch_centers_pt"]
     _norm = np.linalg.norm(_pos, axis=1)
@@ -390,7 +512,7 @@ def position_scatter(result):
 
 @app.cell
 def pair_view(scan, n_patches, sample_seed, sample_wc, sample_ww, sample_radius):
-    mo.md("## 9. Pair View Comparison")
+    mo.md("## 10. Pair View Comparison")
 
     _seed_a = int(sample_seed.value) * 2
     _seed_b = int(sample_seed.value) * 2 + 1
@@ -433,7 +555,7 @@ def pair_view(scan, n_patches, sample_seed, sample_wc, sample_ww, sample_radius)
 def bench_controls():
     run_bench = mo.ui.button(label="Run benchmark (100 samples from 1 scan)")
     mo.vstack([
-        mo.md("## 10. Extraction Benchmark"),
+        mo.md("## 11. Extraction Benchmark"),
         mo.hstack([run_bench]),
     ])
     return run_bench,
@@ -472,9 +594,6 @@ def run_benchmark(run_bench, records, scan_idx, patch_mm, n_patches):
         ],
     })
 
-    _bench_data = {
-        "time_ms": _times_list,
-    }
     _hist_chart = alt.Chart(alt.Data(values=[{"time_ms": t} for t in _times_list])).mark_bar().encode(
         x=alt.X("time_ms:Q", bin=alt.Bin(maxbins=30), title="Sample time (ms)"),
         y=alt.Y("count()", title="Count"),
@@ -489,7 +608,7 @@ def run_benchmark(run_bench, records, scan_idx, patch_mm, n_patches):
 
 @app.cell
 def coordinate_table(result):
-    mo.md("## 11. Patch Coordinate Table")
+    mo.md("## 12. Patch Coordinate Table")
 
     _pos_world = result["patch_centers_pt"]
     _pos_rel = result["relative_patch_centers_pt"]
