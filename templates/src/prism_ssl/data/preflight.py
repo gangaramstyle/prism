@@ -10,6 +10,8 @@ from typing import Any
 
 import nibabel as nib
 import numpy as np
+from PIL import Image
+
 from prism_ssl.config.schema import ScanRecord
 
 
@@ -202,15 +204,15 @@ class NiftiScan:
 
     @property
     def patch_shape_vox(self) -> np.ndarray:
-        """Default patch shape from base_patch_mm (used by sharded dataset)."""
-        return self._patch_vox_shape(self.target_patch_size)
+        """Physical voxel footprint for base_patch_mm (used for overlay box drawing)."""
+        return self._mm_patch_vox_shape(self.base_patch_mm)
 
-    def _patch_vox_shape(self, n_pixels: int) -> np.ndarray:
-        """Compute 3D voxel shape for an NxN in-plane patch (1 voxel on thin axis)."""
+    def _mm_patch_vox_shape(self, patch_mm: float) -> np.ndarray:
+        """Compute 3D voxel shape covering patch_mm in-plane, 1 voxel on thin axis."""
         thin = self.geometry.thin_axis
-        shape = np.full(3, n_pixels, dtype=np.int64)
-        shape[thin] = 1
-        return shape
+        n_vox = np.maximum(np.ceil(patch_mm / self.voxel_axis_mm).astype(np.int64), 1)
+        n_vox[thin] = 1
+        return n_vox
 
     def _sample_center(self, rng: np.random.Generator, patch_vox: np.ndarray) -> np.ndarray:
         """Pick a random voxel inside the volume with just enough margin for one patch."""
@@ -264,10 +266,16 @@ class NiftiScan:
         patch_2d = np.take(patch, indices=patch.shape[thin] // 2, axis=thin)
         return patch_2d.astype(np.float32, copy=False)
 
-    def _extract_patches(self, centers_vox: np.ndarray, patch_vox: np.ndarray) -> np.ndarray:
-        """Extract 2D native-plane patches via direct array slicing. No resize."""
-        patches_2d = np.stack([self._extract_patch(c, patch_vox) for c in centers_vox], axis=0)
-        return patches_2d
+    def _extract_patches(self, centers_vox: np.ndarray, patch_vox: np.ndarray, output_size: int) -> np.ndarray:
+        """Extract 2D native-plane patches, resize to fixed output_size x output_size."""
+        patches_2d = [self._extract_patch(c, patch_vox) for c in centers_vox]
+        h, w = patches_2d[0].shape
+        if h == output_size and w == output_size:
+            return np.stack(patches_2d, axis=0)
+        resized = np.empty((len(patches_2d), output_size, output_size), dtype=np.float32)
+        for i, p in enumerate(patches_2d):
+            resized[i] = np.array(Image.fromarray(p).resize((output_size, output_size), Image.BILINEAR), dtype=np.float32)
+        return resized
 
     def train_sample(
         self,
@@ -282,7 +290,7 @@ class NiftiScan:
         target_patch_size: int | None = None,
     ) -> dict[str, Any]:
         resolved_patch_size = int(self.target_patch_size if target_patch_size is None else target_patch_size)
-        patch_vox = self._patch_vox_shape(resolved_patch_size)
+        patch_vox = self._mm_patch_vox_shape(self.base_patch_mm)
         rng = np.random.default_rng(seed)
 
         shape = np.asarray(self.data.shape, dtype=np.int64)
@@ -325,7 +333,7 @@ class NiftiScan:
                     f"patch_centers_vox has {centers_arr.shape[0]} centers but n_patches={int(n_patches)}"
                 )
 
-        raw_patches = self._extract_patches(centers_arr, patch_vox)
+        raw_patches = self._extract_patches(centers_arr, patch_vox, resolved_patch_size)
 
         if wc is None or ww is None:
             wc = float(rng.uniform(self.robust_median - self.robust_std, self.robust_median + self.robust_std))

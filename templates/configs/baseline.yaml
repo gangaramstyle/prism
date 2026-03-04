@@ -22,7 +22,7 @@ data:
   n_scans: 5000
   modality_filter: [CT, MR]
   n_patches: 256
-  patch_mm: 16.0
+  patch_mm: 20.0
   storage_mode: sharded
   workers: 8
   warm_pool_size: 16
