@@ -183,46 +183,6 @@ def load_scan(records, scan_idx, patch_mm):
 
 
 @app.cell
-def slice_browser_controls(scan, scan_geo):
-    _thin = scan_geo.thin_axis
-    _max_slice = scan.data.shape[_thin] - 1
-
-    slice_slider = mo.ui.slider(0, _max_slice, value=_max_slice // 2, label=f"Slice along {AXIS_LABELS[_thin]}")
-    browser_wc = mo.ui.slider(
-        float(scan.robust_low), float(scan.robust_high),
-        value=float(scan.robust_median), step=1.0, label="Window center",
-    )
-    browser_ww = mo.ui.slider(
-        1.0, float(6.0 * scan.robust_std),
-        value=float(4.0 * scan.robust_std), step=1.0, label="Window width",
-    )
-
-    mo.vstack([
-        mo.md("## 3. Scroll Through Scan"),
-        mo.hstack([slice_slider, browser_wc, browser_ww]),
-    ])
-    return slice_slider, browser_wc, browser_ww
-
-
-@app.cell
-def slice_browser_view(scan, scan_geo, slice_slider, browser_wc, browser_ww):
-    _thin = scan_geo.thin_axis
-    _in_plane = [i for i in range(3) if i != _thin]
-
-    _vol_slice = np.take(scan.data, indices=slice_slider.value, axis=_thin)
-    _browse_rgb = window_to_rgb(_vol_slice, browser_wc.value, browser_ww.value)
-    _browse_rgb = resize_rgb(_browse_rgb)
-
-    mo.vstack([
-        mo.md(f"**{scan_geo.acquisition_plane}** plane | "
-               f"slice {slice_slider.value}/{scan.data.shape[_thin] - 1} along {AXIS_LABELS[_thin]} | "
-               f"rows={AXIS_LABELS[_in_plane[0]]}, cols={AXIS_LABELS[_in_plane[1]]}"),
-        mo.image(Image.fromarray(_browse_rgb), width=512),
-    ])
-    return
-
-
-@app.cell
 def sample_controls(scan):
     _w_min, _w_max, _w_center = scan_world_bounds(scan)
 
@@ -547,15 +507,17 @@ def position_scatter(result):
 
 
 @app.cell
-def pair_view(scan, n_patches, sample_seed, sample_wc, sample_ww, sample_radius):
+def pair_view(scan, result):
     mo.md("## 10. Pair View Comparison")
 
-    _seed_a = int(sample_seed.value) * 2
-    _seed_b = int(sample_seed.value) * 2 + 1
+    # Use result's params but different seeds for A/B views
+    _n = result["normalized_patches"].shape[0]
+    _wc, _ww = result["wc"], result["ww"]
+    _radius = result["sampling_radius_mm"]
 
     _t0 = time.perf_counter()
-    _res_a = scan.train_sample(n_patches.value, seed=_seed_a, wc=sample_wc.value, ww=sample_ww.value, sampling_radius_mm=sample_radius.value)
-    _res_b = scan.train_sample(n_patches.value, seed=_seed_b, wc=sample_wc.value, ww=sample_ww.value, sampling_radius_mm=sample_radius.value)
+    _res_a = scan.train_sample(_n, seed=7777, wc=_wc, ww=_ww, sampling_radius_mm=_radius)
+    _res_b = scan.train_sample(_n, seed=7778, wc=_wc, ww=_ww, sampling_radius_mm=_radius)
     _pair_dt_ms = (time.perf_counter() - _t0) * 1000.0
 
     _center_a = _res_a["prism_center_pt"]
