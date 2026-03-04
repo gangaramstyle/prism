@@ -78,11 +78,15 @@ with app.setup:
         for i in range(n):
             r, c = divmod(i, cols)
             grid[r * h:(r + 1) * h, c * w:(c + 1) * w] = patches[i]
-        lo, hi = float(grid.min()), float(grid.max())
-        if hi - lo < 1e-6:
-            hi = lo + 1.0
-        gray = ((grid - lo) / (hi - lo) * 255.0).astype(np.uint8)
+        # Anchor corners to [-1, +1] so all patches share the same intensity scale
+        grid[0, 0] = -1.0
+        grid[0, 1] = 1.0
+        gray = ((grid - (-1.0)) / 2.0 * 255.0).astype(np.uint8)
         return gray
+
+    def normalize_patch_for_display(patch: np.ndarray) -> np.ndarray:
+        """Convert a normalized [-1, 1] patch to uint8 [0, 255]."""
+        return np.clip((patch - (-1.0)) / 2.0 * 255.0, 0, 255).astype(np.uint8)
 
     def resize_rgb(rgb: np.ndarray, max_dim: int = 600) -> np.ndarray:
         h, w = rgb.shape[:2]
@@ -330,11 +334,8 @@ def patch_probe_view(scan, result, scan_geo, probe_x, probe_y, probe_z, patch_pi
     )
     _probe_patch = _probe_result["normalized_patches"][0]
 
-    # Enlarge patch
-    _lo, _hi = float(_probe_patch.min()), float(_probe_patch.max())
-    if _hi - _lo < 1e-6:
-        _hi = _lo + 1.0
-    _probe_gray = ((_probe_patch - _lo) / (_hi - _lo) * 255.0).astype(np.uint8)
+    # Enlarge patch, anchored to [-1, 1]
+    _probe_gray = normalize_patch_for_display(_probe_patch)
     _probe_big = np.array(Image.fromarray(_probe_gray).resize((160, 160), Image.NEAREST))
 
     # Render slice at probe depth
@@ -405,12 +406,8 @@ def patch_explorer_view(scan, result, scan_geo, patch_idx):
     _in_plane = [i for i in range(3) if i != _thin]
     _ax_r, _ax_c = _in_plane[0], _in_plane[1]
 
-    # Render the selected patch enlarged
-    _p = _patches[_idx]
-    _lo, _hi = float(_p.min()), float(_p.max())
-    if _hi - _lo < 1e-6:
-        _hi = _lo + 1.0
-    _patch_gray = ((_p - _lo) / (_hi - _lo) * 255.0).astype(np.uint8)
+    # Render the selected patch enlarged, anchored to [-1, 1]
+    _patch_gray = normalize_patch_for_display(_patches[_idx])
     _patch_big = np.array(Image.fromarray(_patch_gray).resize((128, 128), Image.NEAREST))
 
     # Render slice with this patch highlighted
