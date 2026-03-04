@@ -197,6 +197,7 @@ def sample_controls(scan):
     _w_min, _w_max, _w_center = scan_world_bounds(scan)
 
     n_patches = mo.ui.slider(1, 64, value=16, step=1, label="N patches")
+    patch_pixels = mo.ui.slider(16, 64, value=16, step=8, label="Patch pixels (NxN)")
     sample_seed = mo.ui.number(value=42, label="Seed")
     sample_wc = mo.ui.slider(
         float(scan.robust_low), float(scan.robust_high),
@@ -222,16 +223,16 @@ def sample_controls(scan):
 
     mo.vstack([
         mo.md("## 4. Sample Patches"),
-        mo.hstack([n_patches, sample_seed, sample_radius]),
+        mo.hstack([n_patches, patch_pixels, sample_seed, sample_radius]),
         mo.hstack([sample_wc, sample_ww]),
         mo.md("**Sampling center (world mm)**"),
         mo.hstack([center_x, center_y, center_z]),
     ])
-    return n_patches, sample_seed, sample_wc, sample_ww, sample_radius, center_x, center_y, center_z
+    return n_patches, patch_pixels, sample_seed, sample_wc, sample_ww, sample_radius, center_x, center_y, center_z
 
 
 @app.cell
-def do_sample(scan, n_patches, sample_seed, sample_wc, sample_ww, sample_radius, center_x, center_y, center_z):
+def do_sample(scan, n_patches, patch_pixels, sample_seed, sample_wc, sample_ww, sample_radius, center_x, center_y, center_z):
     # Convert world center to voxel
     _center_world = np.array([center_x.value, center_y.value, center_z.value], dtype=np.float32)
     _center_vox = world_points_to_voxel(_center_world, scan.affine)[0]
@@ -245,6 +246,7 @@ def do_sample(scan, n_patches, sample_seed, sample_wc, sample_ww, sample_radius,
         ww=sample_ww.value,
         sampling_radius_mm=sample_radius.value,
         subset_center_vox=_center_vox,
+        target_patch_size=patch_pixels.value,
     )
     sample_time_ms = (time.perf_counter() - _t0) * 1000.0
 
@@ -307,7 +309,7 @@ def patch_probe_controls(result):
 
 
 @app.cell
-def patch_probe_view(scan, result, scan_geo, probe_x, probe_y, probe_z):
+def patch_probe_view(scan, result, scan_geo, probe_x, probe_y, probe_z, patch_pixels):
     _prism_world = result["prism_center_pt"]
     _prism_vox = result["prism_center_vox"]
     _offset_mm = np.array([probe_x.value, probe_y.value, probe_z.value], dtype=np.float32)
@@ -324,6 +326,7 @@ def patch_probe_view(scan, result, scan_geo, probe_x, probe_y, probe_z):
         ww=result["ww"],
         subset_center_vox=_probe_vox,
         patch_centers_vox=_probe_vox[np.newaxis, :],
+        target_patch_size=patch_pixels.value,
     )
     _probe_patch = _probe_result["normalized_patches"][0]
 
