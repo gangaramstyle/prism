@@ -379,9 +379,10 @@ def patch_probe_view(scan, result, scan_geo, probe_x, probe_y, probe_z, patch_pi
     for _cv in result["patch_centers_vox"]:
         draw_dot(_probe_rgb, int(_cv[_ax_r]), int(_cv[_ax_c]), (100, 100, 0), radius=1)
 
-    # Draw probe patch (cyan box + dot)
-    _half_h = scan.patch_shape_vox[_ax_r] // 2
-    _half_w = scan.patch_shape_vox[_ax_c] // 2
+    # Draw probe patch (cyan box + dot) — use actual voxel footprint from result
+    _pvs = result["patch_vox_shape"]
+    _half_h = _pvs[_ax_r] // 2
+    _half_w = _pvs[_ax_c] // 2
     draw_dot(_probe_rgb, int(_probe_vox[_ax_r]), int(_probe_vox[_ax_c]), (0, 255, 255), radius=3)
     draw_rect(_probe_rgb, int(_probe_vox[_ax_r]), int(_probe_vox[_ax_c]), int(_half_h), int(_half_w), (0, 255, 255))
 
@@ -451,8 +452,9 @@ def patch_explorer_view(scan, result, scan_geo, patch_idx):
             draw_dot(_explore_rgb, int(_ov[_ax_r]), int(_ov[_ax_c]), (100, 100, 0), radius=1)
 
     # Draw selected patch center and bounding box (physical voxel footprint)
-    _half_h = int(scan.patch_shape_vox[_ax_r] // 2)
-    _half_w = int(scan.patch_shape_vox[_ax_c] // 2)
+    _pvs_e = result["patch_vox_shape"]
+    _half_h = int(_pvs_e[_ax_r] // 2)
+    _half_w = int(_pvs_e[_ax_c] // 2)
     draw_dot(_explore_rgb, int(_cv[_ax_r]), int(_cv[_ax_c]), (0, 255, 0), radius=3)
     draw_rect(_explore_rgb, int(_cv[_ax_r]), int(_cv[_ax_c]), _half_h, _half_w, (0, 255, 0))
 
