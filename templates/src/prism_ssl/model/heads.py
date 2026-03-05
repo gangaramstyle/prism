@@ -13,7 +13,7 @@ from prism_ssl.model.backbone import TransformerPatchPositionEncoder
 
 @dataclass
 class PrismModelOutput:
-    center_delta_mm: torch.Tensor
+    direction_logits: torch.Tensor  # [B, 3] — binary logits per axis (R, A, S)
     window_delta: torch.Tensor
     proj_a: torch.Tensor
     proj_b: torch.Tensor
@@ -45,7 +45,7 @@ class PrismSSLModel(nn.Module):
         else:
             raise ValueError(f"Unknown model.name='{model_name}'. Supported: vit_l")
 
-        self.distance_head = nn.Sequential(nn.LayerNorm(d_model * 2), nn.Linear(d_model * 2, 3))
+        self.direction_head = nn.Sequential(nn.LayerNorm(d_model * 2), nn.Linear(d_model * 2, 3))
         self.window_head = nn.Sequential(nn.LayerNorm(d_model * 2), nn.Linear(d_model * 2, 2))
 
         self.proj_head = nn.Sequential(
@@ -66,14 +66,14 @@ class PrismSSLModel(nn.Module):
         emb_b = self.encoder(patches_b, positions_b)
         fused = torch.cat([emb_a, emb_b], dim=1)
 
-        center_delta_mm = self.distance_head(fused)
+        direction_logits = self.direction_head(fused)
         window_delta = self.window_head(fused)
 
         proj_a = F.normalize(self.proj_head(emb_a), dim=1)
         proj_b = F.normalize(self.proj_head(emb_b), dim=1)
 
         return PrismModelOutput(
-            center_delta_mm=center_delta_mm,
+            direction_logits=direction_logits,
             window_delta=window_delta,
             proj_a=proj_a,
             proj_b=proj_b,

@@ -46,7 +46,7 @@ train:
   allow_failures: false
 
 loss:
-  w_distance: 1.0
+  w_direction: 1.0
   w_window: 1.0
   w_supcon_target: 0.2
   supcon_temperature: 0.1

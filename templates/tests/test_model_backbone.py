@@ -26,7 +26,7 @@ def test_vit_l_backbone_forward_shapes():
         dropout=0.0,
     )
     out = model(*_inputs())
-    assert out.center_delta_mm.shape == (2, 3)
+    assert out.direction_logits.shape == (2, 3)
     assert out.window_delta.shape == (2, 2)
     assert out.proj_a.shape == (2, 32)
     assert out.proj_b.shape == (2, 32)
@@ -44,7 +44,7 @@ def test_vit_l_backbone_second_config_forward_shapes():
         dropout=0.0,
     )
     out = model(*_inputs())
-    assert out.center_delta_mm.shape == (2, 3)
+    assert out.direction_logits.shape == (2, 3)
     assert out.window_delta.shape == (2, 2)
     assert out.proj_a.shape == (2, 64)
     assert out.proj_b.shape == (2, 64)

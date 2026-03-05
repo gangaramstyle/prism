@@ -197,7 +197,6 @@ def run_training(config: RunConfig) -> dict[str, Any]:
         flush=True,
     )
 
-    distance_loss_fn = nn.SmoothL1Loss()
     window_loss_fn = nn.SmoothL1Loss()
 
     use_amp = config.train.precision == "bf16" and device.type == "cuda"
@@ -275,7 +274,6 @@ def run_training(config: RunConfig) -> dict[str, Any]:
                     batch,
                     config.loss,
                     step=step,
-                    distance_loss_fn=distance_loss_fn,
                     window_loss_fn=window_loss_fn,
                 )
 
@@ -324,7 +322,8 @@ def run_training(config: RunConfig) -> dict[str, Any]:
                     format_step_log(
                         step=final_step,
                         total_loss=float(loss_bundle.total.item()),
-                        loss_distance=float(loss_bundle.distance.item()),
+                        loss_direction=float(loss_bundle.direction.item()),
+                        direction_acc=diagnostics["direction_acc"],
                         loss_window=float(loss_bundle.window.item()),
                         loss_supcon=float(loss_bundle.supcon.item()),
                         supcon_weight=loss_bundle.supcon_weight,
@@ -353,7 +352,11 @@ def run_training(config: RunConfig) -> dict[str, Any]:
 
                 metrics = {
                     "train/loss": float(loss_bundle.total.item()),
-                    "train/loss_center_delta_mm": float(loss_bundle.distance.item()),
+                    "train/loss_direction": float(loss_bundle.direction.item()),
+                    "train/direction_acc": diagnostics["direction_acc"],
+                    "train/direction_acc_R": diagnostics["direction_acc_R"],
+                    "train/direction_acc_A": diagnostics["direction_acc_A"],
+                    "train/direction_acc_S": diagnostics["direction_acc_S"],
                     "train/loss_window": float(loss_bundle.window.item()),
                     "train/loss_supcon": float(loss_bundle.supcon.item()),
                     "train/w_supcon": float(loss_bundle.supcon_weight),
@@ -361,7 +364,7 @@ def run_training(config: RunConfig) -> dict[str, Any]:
                     "train/target_window_abs_mean": diagnostics["target_window_abs_mean"],
                     "train/target_center_delta_std": diagnostics["target_center_delta_std"],
                     "train/target_window_std": diagnostics["target_window_std"],
-                    "train/pred_center_delta_std": diagnostics["pred_center_delta_std"],
+                    "train/pred_window_abs_mean": diagnostics["pred_window_abs_mean"],
                     "train/pred_window_std": diagnostics["pred_window_std"],
                     "train/supcon_positives_per_anchor_mean": positives_mean,
                     "train/step_time_ms": step_time_ms,

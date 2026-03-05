@@ -54,7 +54,7 @@ class DataConfig:
 
 @dataclass
 class LossConfig:
-    w_distance: float = 1.0
+    w_direction: float = 1.0
     w_window: float = 1.0
     w_supcon_target: float = 0.2
     supcon_temperature: float = 0.1
