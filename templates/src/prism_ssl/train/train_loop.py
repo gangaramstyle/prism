@@ -166,11 +166,12 @@ def run_training(config: RunConfig) -> dict[str, Any]:
         "batch_size": config.train.batch_size,
         "num_workers": config.data.workers,
         "pin_memory": device.type == "cuda",
+        "pin_memory_device": str(device) if device.type == "cuda" else "",
         "collate_fn": collate_prism_batch,
     }
     if config.data.workers > 0:
         loader_kwargs["persistent_workers"] = True
-        loader_kwargs["prefetch_factor"] = 2
+        loader_kwargs["prefetch_factor"] = 4
 
     loader = DataLoader(dataset, **loader_kwargs)
     data_iter = iter(loader)
