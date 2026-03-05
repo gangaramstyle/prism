@@ -35,11 +35,11 @@ data:
   max_broken_series_log: 2000
 
 train:
-  batch_size: 128
+  batch_size: 512
   max_steps: 50000
-  log_every: 100
+  log_every: 25
   precision: bf16
-  lr: 1.6e-3
+  lr: 6.4e-3
   weight_decay: 1.0e-2
   seed: 42
   device: auto
