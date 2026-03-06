@@ -200,7 +200,7 @@ def _(Path, ShardedScanDataset, DataLoader, collate_prism_batch, load_catalog, m
 def _(batch, fetch_ms, mo, np, pl, records):
     deltas = batch["center_delta_mm"].numpy()
     targets = (deltas > 0).astype(np.int64)
-    center_dist = batch["center_distance_mm"].numpy()
+    _center_dist = batch["center_distance_mm"].numpy()
     window_delta = batch["window_delta"].numpy()
     positives = targets.mean(axis=0)
 
@@ -212,8 +212,8 @@ def _(batch, fetch_ms, mo, np, pl, records):
                 "n_patches": int(batch["patches_a"].shape[1]),
                 "patch_shape": f"{int(batch['patches_a'].shape[2])}x{int(batch['patches_a'].shape[3])}x{int(batch['patches_a'].shape[4])}",
                 "fetch_ms": float(fetch_ms),
-                "center_distance_mean_mm": float(center_dist.mean()),
-                "center_distance_p95_mm": float(np.percentile(center_dist, 95.0)),
+                "center_distance_mean_mm": float(_center_dist.mean()),
+                "center_distance_p95_mm": float(np.percentile(_center_dist, 95.0)),
                 "target_pos_frac_R": float(positives[0]),
                 "target_pos_frac_A": float(positives[1]),
                 "target_pos_frac_S": float(positives[2]),
@@ -292,11 +292,11 @@ def _(Image, batch, mo, np, patch_grid, preview_cols, preview_patches, sample_id
     grid_b = patch_grid(pb, max_patches=int(preview_patches.value), cols=int(preview_cols.value))
 
     center_delta = batch["center_delta_mm"][i].numpy()
-    center_dist = float(batch["center_distance_mm"][i].item())
+    _center_dist = float(batch["center_distance_mm"][i].item())
     signs = (center_delta > 0).astype(np.int64)
     header = (
         f"sample={i} | delta_mm=({center_delta[0]:.2f}, {center_delta[1]:.2f}, {center_delta[2]:.2f}) "
-        f"| target=({int(signs[0])}, {int(signs[1])}, {int(signs[2])}) | dist={center_dist:.2f}mm"
+        f"| target=({int(signs[0])}, {int(signs[1])}, {int(signs[2])}) | dist={_center_dist:.2f}mm"
     )
 
     mo.vstack(
