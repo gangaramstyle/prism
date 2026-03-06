@@ -1,8 +1,7 @@
 import marimo
 
-__generated_with = "0.13.0"
+__generated_with = "0.19.11"
 app = marimo.App(width="full")
-
 
 with app.setup:
     import os
@@ -78,25 +77,23 @@ with app.setup:
 
 
 @app.cell
-def _(mo):
-    mo.md(
-        """
-# Training Sampler Sanity Notebook
+def _():
+    mo.md("""
+    # Training Sampler Sanity Notebook
 
-This notebook builds the exact same `ShardedScanDataset` + `DataLoader` path used by training, then inspects:
-- sampled A/B tensors and shapes,
-- center-delta targets (R/A/S sign balance),
-- window deltas and replacement counters,
-- patch previews for selected samples.
+    This notebook builds the exact same `ShardedScanDataset` + `DataLoader` path used by training, then inspects:
+    - sampled A/B tensors and shapes,
+    - center-delta targets (R/A/S sign balance),
+    - window deltas and replacement counters,
+    - patch previews for selected samples.
 
-Use this to debug whether the model should be able to learn from your current sampling settings.
-"""
-    )
+    Use this to debug whether the model should be able to learn from your current sampling settings.
+    """)
     return
 
 
 @app.cell
-def _(Path, mo):
+def _():
     default_cfg = str((Path(__file__).resolve().parents[1] / "configs" / "baseline.yaml"))
     config_path = mo.ui.text(label="Config path", value=default_cfg)
     catalog_path_override = mo.ui.text(label="Catalog path override (optional)", value="")
@@ -136,11 +133,8 @@ def _(
     batch_size,
     catalog_path_override,
     config_path,
-    load_run_config,
-    mo,
     n_patches,
     n_scans,
-    pl,
     seed,
     visits_per_scan,
     warm_pool_size,
@@ -172,11 +166,11 @@ def _(
         [{"field": k, "value": str(v)} for k, v in resolved.items()]
     )
     mo.vstack([mo.md("## Resolved Settings"), mo.ui.table(cfg_tbl, label="resolved")])
-    return cfg, resolved
+    return (resolved,)
 
 
 @app.cell
-def _(Path, ShardedScanDataset, DataLoader, collate_prism_batch, load_catalog, mo, os, resolved, sample_scan_candidates, time):
+def _(resolved):
     t0 = time.perf_counter()
     df = load_catalog(str(resolved["catalog_path"]))
     records = sample_scan_candidates(
@@ -228,7 +222,7 @@ def _(Path, ShardedScanDataset, DataLoader, collate_prism_batch, load_catalog, m
 
 
 @app.cell
-def _(batch, fetch_ms, mo, np, pl, records):
+def _(batch, fetch_ms, records):
     deltas = batch["center_delta_mm"].numpy()
     targets = (deltas > 0).astype(np.int64)
     _center_dist = batch["center_distance_mm"].numpy()
@@ -268,7 +262,7 @@ def _(batch, fetch_ms, mo, np, pl, records):
 
 
 @app.cell
-def _(batch, deltas, mo, np, pl, targets):
+def _(batch, deltas, targets):
     rows = pl.DataFrame(
         {
             "idx": np.arange(batch["center_delta_mm"].shape[0], dtype=np.int64),
@@ -284,11 +278,11 @@ def _(batch, deltas, mo, np, pl, targets):
         }
     )
     mo.vstack([mo.md("## Per-Sample Target Table"), mo.ui.table(rows, label="targets")])
-    return rows
+    return (rows,)
 
 
 @app.cell
-def _(alt, mo, rows):
+def _(rows):
     chart = (
         alt.Chart(rows.to_dicts())
         .mark_circle(size=80)
@@ -311,7 +305,7 @@ def _(alt, mo, rows):
 
 
 @app.cell
-def _(batch, mo):
+def _(batch):
     max_idx = max(int(batch["patches_a"].shape[0]) - 1, 0)
     sample_idx = mo.ui.slider(0, max_idx, value=0, label="sample_idx")
     preview_patches = mo.ui.slider(4, min(128, int(batch["patches_a"].shape[1])), value=32, step=4, label="preview_patches")
@@ -321,7 +315,7 @@ def _(batch, mo):
 
 
 @app.cell
-def _(Image, batch, mo, np, patch_grid, preview_cols, preview_patches, sample_idx):
+def _(batch, preview_cols, preview_patches, sample_idx):
     i = int(sample_idx.value)
     pa = batch["patches_a"][i].numpy()
     pb = batch["patches_b"][i].numpy()
@@ -352,6 +346,7 @@ def _(Image, batch, mo, np, patch_grid, preview_cols, preview_patches, sample_id
 
 
 @app.cell
+<<<<<<< Updated upstream
 def _(batch, mo, records, sample_idx):
     sample_batch_index = int(sample_idx.value)
     sample_scan_id = str(batch["scan_id"][sample_batch_index])
@@ -612,21 +607,6 @@ def _(
     )
     return
 
-
-@app.cell
-def _(mo):
-    mo.md(
-        """
-## Cluster Overfit Run (40 fixed scans)
-
-Single-line launch example:
-
-```bash
-cd ~/prism-ssl/templates && export PATH="$HOME/.local/bin:$PATH" && jid=$(N_SCANS=40 WARM_POOL_SIZE=40 VISITS_PER_SCAN=10000000 BATCH_SIZE=64 N_PATCHES=256 WORKERS=16 sbatch scripts/job_train_prism_ssl.sh | awk '{print $4}') && echo "JOB=$jid"
-```
-"""
-    )
-    return
 
 
 if __name__ == "__main__":
