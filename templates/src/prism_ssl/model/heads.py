@@ -13,7 +13,7 @@ from prism_ssl.model.backbone import AbsoluteSinCosPositionEmbedding3D, Transfor
 
 @dataclass
 class PrismModelOutput:
-    distance_logits: torch.Tensor  # [B, 3] — binary logits per axis (R, A, S)
+    distance_logits: torch.Tensor  # [B, 5] — binary logits for (R, A, S, wc, ww)
     proj_a: torch.Tensor
     proj_b: torch.Tensor
     mim_pred_a: torch.Tensor
@@ -133,7 +133,7 @@ class PrismSSLModel(nn.Module):
         self.patch_dim = int(patch_dim)
         self.mim_mask_ratio = float(max(0.0, min(0.95, mim_mask_ratio)))
 
-        self.distance_head = nn.Sequential(nn.LayerNorm(d_model * 2), nn.Linear(d_model * 2, 3))
+        self.distance_head = nn.Sequential(nn.LayerNorm(d_model * 2), nn.Linear(d_model * 2, 5))
 
         self.proj_head = nn.Sequential(
             nn.LayerNorm(d_model),

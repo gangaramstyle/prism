@@ -292,6 +292,7 @@ def run_training(config: RunConfig) -> dict[str, Any]:
 
             batch["center_delta_mm"] = batch["center_delta_mm"].to(device, non_blocking=True)
             batch["center_distance_mm"] = batch["center_distance_mm"].to(device, non_blocking=True)
+            batch["window_delta"] = batch["window_delta"].to(device, non_blocking=True)
             batch["series_label"] = batch["series_label"].to(device, non_blocking=True)
 
             autocast_enabled = use_amp
@@ -399,6 +400,9 @@ def run_training(config: RunConfig) -> dict[str, Any]:
                         total_loss=float(loss_bundle.total.item()),
                         loss_distance=float(loss_bundle.distance.item()),
                         distance_acc=diagnostics["distance_acc"],
+                        distance_acc_shared=diagnostics["distance_acc_shared"],
+                        window_acc_wc=diagnostics["window_acc_wc"],
+                        window_acc_ww=diagnostics["window_acc_ww"],
                         loss_supcon=float(loss_bundle.supcon.item()),
                         loss_mim=float(loss_bundle.mim.item()),
                         supcon_weight=loss_bundle.supcon_weight,
@@ -432,6 +436,9 @@ def run_training(config: RunConfig) -> dict[str, Any]:
                     "train/distance_acc_R": diagnostics["distance_acc_R"],
                     "train/distance_acc_A": diagnostics["distance_acc_A"],
                     "train/distance_acc_S": diagnostics["distance_acc_S"],
+                    "train/distance_acc_shared": diagnostics["distance_acc_shared"],
+                    "train/window_acc_wc": diagnostics["window_acc_wc"],
+                    "train/window_acc_ww": diagnostics["window_acc_ww"],
                     "train/distance_valid_ratio": diagnostics["distance_valid_ratio"],
                     "train/loss_supcon": float(loss_bundle.supcon.item()),
                     "train/loss_mim": float(loss_bundle.mim.item()),

@@ -36,7 +36,7 @@ class WandbConfig:
 @dataclass
 class DataConfig:
     catalog_path: str = "data/pmbb_catalog.csv.gz"
-    n_scans: int = 5000
+    n_scans: int = 0
     modality_filter: tuple[str, ...] = ("CT", "MR")
     n_patches: int = 1024
     patch_mm: float = 16.0

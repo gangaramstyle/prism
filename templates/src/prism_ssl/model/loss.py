@@ -47,11 +47,25 @@ def compute_loss_bundle(
     step: int,
 ) -> tuple[LossBundle, dict[str, float]]:
     target_center_delta = batch["center_delta_mm"].float()
+    target_window_delta = batch["window_delta"].float()
 
-    # Binary relative-position classification per axis.
-    distance_targets = (target_center_delta > 0).float()
+    # Binary relative-position classification on shared CLS head:
+    # (R, A, S, window_center, window_width).
+    distance_targets = torch.cat(
+        [
+            (target_center_delta > 0).float(),
+            (target_window_delta > 0).float(),
+        ],
+        dim=1,
+    )
     distance_logits = outputs.distance_logits
-    distance_valid = (torch.abs(target_center_delta) >= 1.0).float()
+    distance_valid = torch.cat(
+        [
+            (torch.abs(target_center_delta) >= 1.0).float(),
+            torch.ones_like(target_window_delta),
+        ],
+        dim=1,
+    )
     loss_distance_raw = F.binary_cross_entropy_with_logits(distance_logits, distance_targets, reduction="none")
     distance_valid_count = distance_valid.sum().clamp(min=1.0)
     loss_distance = (loss_distance_raw * distance_valid).sum() / distance_valid_count
@@ -69,9 +83,18 @@ def compute_loss_bundle(
     with torch.no_grad():
         distance_preds = (distance_logits > 0).float()
         distance_correct = (distance_preds == distance_targets).float()
-        distance_acc = (distance_correct * distance_valid).sum() / distance_valid_count
+        center_valid = distance_valid[:, :3]
+        center_correct = distance_correct[:, :3]
+        center_valid_count = center_valid.sum().clamp(min=1.0)
+        distance_acc = (center_correct * center_valid).sum() / center_valid_count
         distance_acc_per_axis = (
-            (distance_correct * distance_valid).sum(dim=0) / distance_valid.sum(dim=0).clamp(min=1.0)
+            (center_correct * center_valid).sum(dim=0) / center_valid.sum(dim=0).clamp(min=1.0)
+        )
+        shared_acc = (distance_correct * distance_valid).sum() / distance_valid_count
+        window_correct = distance_correct[:, 3:]
+        window_valid = distance_valid[:, 3:]
+        window_acc_per_axis = (
+            (window_correct * window_valid).sum(dim=0) / window_valid.sum(dim=0).clamp(min=1.0)
         )
 
     supcon_emb = torch.cat([outputs.proj_a, outputs.proj_b], dim=0)
@@ -100,6 +123,9 @@ def compute_loss_bundle(
         "distance_acc_R": float(distance_acc_per_axis[0].item()),
         "distance_acc_A": float(distance_acc_per_axis[1].item()),
         "distance_acc_S": float(distance_acc_per_axis[2].item()),
+        "distance_acc_shared": float(shared_acc.item()),
+        "window_acc_wc": float(window_acc_per_axis[0].item()),
+        "window_acc_ww": float(window_acc_per_axis[1].item()),
         "distance_valid_ratio": float(distance_valid.mean().item()),
         "target_center_delta_mean": float(torch.mean(target_center_delta).item()),
         "target_center_delta_std": float(torch.std(target_center_delta).item()),

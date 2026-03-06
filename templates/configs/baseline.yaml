@@ -23,7 +23,7 @@ model:
 
 data:
   catalog_path: data/pmbb_catalog.csv.gz
-  n_scans: 5000
+  n_scans: 0
   modality_filter: [CT, MR]
   n_patches: 256
   patch_mm: 20.0
