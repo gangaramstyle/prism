@@ -346,7 +346,6 @@ def _(batch, preview_cols, preview_patches, sample_idx):
 
 
 @app.cell
-<<<<<<< Updated upstream
 def _(batch, mo, records, sample_idx):
     sample_batch_index = int(sample_idx.value)
     sample_scan_id = str(batch["scan_id"][sample_batch_index])
