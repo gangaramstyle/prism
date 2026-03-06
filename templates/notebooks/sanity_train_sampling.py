@@ -20,7 +20,14 @@ with app.setup:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
     from prism_ssl.config import load_run_config
-    from prism_ssl.data import ShardedScanDataset, collate_prism_batch, load_catalog, sample_scan_candidates
+    from prism_ssl.data import (
+        ShardedScanDataset,
+        collate_prism_batch,
+        load_catalog,
+        load_nifti_scan,
+        sample_scan_candidates,
+        world_points_to_voxel,
+    )
 
     def patch_grid(patches: np.ndarray, max_patches: int, cols: int) -> np.ndarray:
         arr = np.asarray(patches, dtype=np.float32)
@@ -44,6 +51,30 @@ with app.setup:
         grid[0, 0] = -1.0
         grid[0, 1] = 1.0
         return np.clip((grid + 1.0) * 0.5 * 255.0, 0, 255).astype(np.uint8)
+
+    def window_to_rgb(slice_2d: np.ndarray, wc: float, ww: float) -> np.ndarray:
+        _ww = max(float(ww), 1e-6)
+        _wmin = float(wc) - 0.5 * _ww
+        _wmax = float(wc) + 0.5 * _ww
+        _clipped = np.clip(slice_2d, _wmin, _wmax)
+        _gray = np.clip((_clipped - _wmin) / max(_wmax - _wmin, 1e-6) * 255.0, 0, 255).astype(np.uint8)
+        return np.stack([_gray, _gray, _gray], axis=-1)
+
+    def draw_square(img: np.ndarray, row: int, col: int, color: tuple[int, int, int], radius: int) -> None:
+        _h, _w = img.shape[:2]
+        _r0 = max(0, int(row) - int(radius))
+        _r1 = min(_h, int(row) + int(radius) + 1)
+        _c0 = max(0, int(col) - int(radius))
+        _c1 = min(_w, int(col) + int(radius) + 1)
+        img[_r0:_r1, _c0:_c1] = np.array(color, dtype=np.uint8)
+
+    def vox_points_to_rc(points_vox: np.ndarray, axis: int) -> tuple[np.ndarray, np.ndarray]:
+        _pts = np.asarray(points_vox, dtype=np.int64)
+        if axis == 2:
+            return _pts[:, 0], _pts[:, 1]
+        if axis == 1:
+            return _pts[:, 0], _pts[:, 2]
+        return _pts[:, 1], _pts[:, 2]
 
 
 @app.cell
@@ -313,6 +344,268 @@ def _(Image, batch, mo, np, patch_grid, preview_cols, preview_patches, sample_id
                 [
                     mo.vstack([mo.md("View A"), mo.image(Image.fromarray(grid_a), width=520)]),
                     mo.vstack([mo.md("View B"), mo.image(Image.fromarray(grid_b), width=520)]),
+                ]
+            ),
+        ]
+    )
+    return
+
+
+@app.cell
+def _(batch, mo, records, sample_idx):
+    sample_batch_index = int(sample_idx.value)
+    sample_scan_id = str(batch["scan_id"][sample_batch_index])
+    sample_series_id = str(batch["series_id"][sample_batch_index])
+
+    sample_record = None
+    for _rec in records:
+        if str(_rec.scan_id) == sample_scan_id and str(_rec.series_id) == sample_series_id:
+            sample_record = _rec
+            break
+    if sample_record is None:
+        for _rec in records:
+            if str(_rec.scan_id) == sample_scan_id:
+                sample_record = _rec
+                break
+
+    mo.stop(
+        sample_record is None,
+        mo.callout(
+            f"Could not map sampled pair back to records for scan_id={sample_scan_id}, series_id={sample_series_id}.",
+            kind="danger",
+        ),
+    )
+    return sample_batch_index, sample_record, sample_scan_id, sample_series_id
+
+
+@app.cell
+def _(batch, load_nifti_scan, np, resolved, sample_batch_index, sample_record, world_points_to_voxel):
+    sample_scan, sample_nifti_path = load_nifti_scan(sample_record, base_patch_mm=float(resolved["patch_mm"]))
+    scan_volume = np.asarray(sample_scan.data, dtype=np.float32)
+    scan_shape_xyz = np.asarray(scan_volume.shape, dtype=np.int64)
+    _clip_hi = np.maximum(scan_shape_xyz - 1, 0)
+
+    _wc_a = float(batch["window_params_a"][sample_batch_index][0].item())
+    _ww_a = float(batch["window_params_a"][sample_batch_index][1].item())
+    _wc_b = float(batch["window_params_b"][sample_batch_index][0].item())
+    _ww_b = float(batch["window_params_b"][sample_batch_index][1].item())
+    scan_overlay_wc = 0.5 * (_wc_a + _wc_b)
+    scan_overlay_ww = max(1e-3, 0.5 * (_ww_a + _ww_b))
+
+    _center_a_world = batch["prism_center_pt_a"][sample_batch_index].numpy().astype(np.float32, copy=False)
+    _center_b_world = batch["prism_center_pt_b"][sample_batch_index].numpy().astype(np.float32, copy=False)
+    center_a_vox = np.rint(world_points_to_voxel(_center_a_world, sample_scan.affine)[0]).astype(np.int64)
+    center_b_vox = np.rint(world_points_to_voxel(_center_b_world, sample_scan.affine)[0]).astype(np.int64)
+    center_a_vox = np.clip(center_a_vox, 0, _clip_hi).astype(np.int64, copy=False)
+    center_b_vox = np.clip(center_b_vox, 0, _clip_hi).astype(np.int64, copy=False)
+
+    _rel_a = batch["positions_a"][sample_batch_index].numpy().astype(np.float32, copy=False)
+    _rel_b = batch["positions_b"][sample_batch_index].numpy().astype(np.float32, copy=False)
+    _patch_world_a = _center_a_world[np.newaxis, :] + _rel_a
+    _patch_world_b = _center_b_world[np.newaxis, :] + _rel_b
+    patch_centers_a_vox = np.rint(world_points_to_voxel(_patch_world_a, sample_scan.affine)).astype(np.int64)
+    patch_centers_b_vox = np.rint(world_points_to_voxel(_patch_world_b, sample_scan.affine)).astype(np.int64)
+    patch_centers_a_vox = np.clip(patch_centers_a_vox, 0, _clip_hi[np.newaxis, :]).astype(np.int64, copy=False)
+    patch_centers_b_vox = np.clip(patch_centers_b_vox, 0, _clip_hi[np.newaxis, :]).astype(np.int64, copy=False)
+
+    return (
+        center_a_vox,
+        center_b_vox,
+        patch_centers_a_vox,
+        patch_centers_b_vox,
+        sample_nifti_path,
+        scan_overlay_wc,
+        scan_overlay_ww,
+        scan_shape_xyz,
+        scan_volume,
+    )
+
+
+@app.cell
+def _(center_a_vox, center_b_vox, mo, patch_centers_a_vox, scan_shape_xyz):
+    viewer_plane = mo.ui.dropdown(
+        options=["axial (z)", "coronal (y)", "sagittal (x)"],
+        value="axial (z)",
+        label="slice plane",
+    )
+    if viewer_plane.value == "axial (z)":
+        viewer_axis = 2
+    elif viewer_plane.value == "coronal (y)":
+        viewer_axis = 1
+    else:
+        viewer_axis = 0
+
+    _axis_size = int(scan_shape_xyz[viewer_axis])
+    _default_slice = int(round(0.5 * (int(center_a_vox[viewer_axis]) + int(center_b_vox[viewer_axis]))))
+    _default_slice = min(max(_default_slice, 0), max(_axis_size - 1, 0))
+    viewer_slice_idx = mo.ui.slider(0, max(_axis_size - 1, 0), value=_default_slice, step=1, label="slice index")
+    viewer_slice_tol = mo.ui.slider(0, 8, value=1, step=1, label="slice tolerance (vox)")
+
+    _n_patch = int(patch_centers_a_vox.shape[0])
+    viewer_max_points = mo.ui.slider(
+        0,
+        max(_n_patch, 0),
+        value=min(_n_patch, 128),
+        step=1,
+        label="max patch points per view",
+    )
+    viewer_center_radius = mo.ui.slider(1, 8, value=4, step=1, label="center marker radius")
+    viewer_patch_radius = mo.ui.slider(1, 4, value=1, step=1, label="patch marker radius")
+
+    mo.vstack(
+        [
+            mo.md("## Original Scan + A/B Centers"),
+            mo.hstack([viewer_plane, viewer_slice_idx, viewer_slice_tol]),
+            mo.hstack([viewer_max_points, viewer_center_radius, viewer_patch_radius]),
+        ]
+    )
+    return (
+        viewer_axis,
+        viewer_center_radius,
+        viewer_max_points,
+        viewer_patch_radius,
+        viewer_plane,
+        viewer_slice_idx,
+        viewer_slice_tol,
+    )
+
+
+@app.cell
+def _(
+    Image,
+    alt,
+    center_a_vox,
+    center_b_vox,
+    draw_square,
+    mo,
+    np,
+    patch_centers_a_vox,
+    patch_centers_b_vox,
+    pl,
+    sample_nifti_path,
+    sample_scan_id,
+    sample_series_id,
+    scan_overlay_wc,
+    scan_overlay_ww,
+    scan_volume,
+    viewer_axis,
+    viewer_center_radius,
+    viewer_max_points,
+    viewer_patch_radius,
+    viewer_plane,
+    viewer_slice_idx,
+    viewer_slice_tol,
+    vox_points_to_rc,
+    window_to_rgb,
+):
+    _axis = int(viewer_axis)
+    _slice_idx = int(viewer_slice_idx.value)
+    _slice_tol = int(viewer_slice_tol.value)
+    if _axis == 2:
+        _slice_2d = scan_volume[:, :, _slice_idx]
+    elif _axis == 1:
+        _slice_2d = scan_volume[:, _slice_idx, :]
+    else:
+        _slice_2d = scan_volume[_slice_idx, :, :]
+
+    _overlay_rgb = window_to_rgb(_slice_2d, wc=float(scan_overlay_wc), ww=float(scan_overlay_ww))
+
+    def _slice_subset(points_vox: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        _pts = np.asarray(points_vox, dtype=np.int64)
+        if _pts.ndim != 2 or _pts.shape[1] != 3 or _pts.shape[0] == 0:
+            return np.zeros((0, 3), dtype=np.int64), np.zeros((0,), dtype=np.int64)
+        _dist = np.abs(_pts[:, _axis] - _slice_idx).astype(np.int64, copy=False)
+        _keep = np.where(_dist <= _slice_tol)[0]
+        if _keep.size == 0:
+            return np.zeros((0, 3), dtype=np.int64), np.zeros((0,), dtype=np.int64)
+        _order = np.argsort(_dist[_keep], kind="stable")
+        _keep = _keep[_order]
+        _max_points = int(viewer_max_points.value)
+        if _max_points >= 0:
+            _keep = _keep[:_max_points]
+        return _pts[_keep], _dist[_keep]
+
+    _patch_a, _dist_a = _slice_subset(patch_centers_a_vox)
+    _patch_b, _dist_b = _slice_subset(patch_centers_b_vox)
+
+    _rows_a, _cols_a = vox_points_to_rc(_patch_a, _axis)
+    _rows_b, _cols_b = vox_points_to_rc(_patch_b, _axis)
+
+    _patch_radius = int(viewer_patch_radius.value)
+    for _r, _c in zip(_rows_a.tolist(), _cols_a.tolist()):
+        draw_square(_overlay_rgb, int(_r), int(_c), (0, 255, 255), radius=_patch_radius)
+    for _r, _c in zip(_rows_b.tolist(), _cols_b.tolist()):
+        draw_square(_overlay_rgb, int(_r), int(_c), (255, 0, 255), radius=_patch_radius)
+
+    _a_center_delta = abs(int(center_a_vox[_axis]) - _slice_idx)
+    _b_center_delta = abs(int(center_b_vox[_axis]) - _slice_idx)
+    _center_radius = int(viewer_center_radius.value)
+    if _a_center_delta <= _slice_tol:
+        _r_a, _c_a = vox_points_to_rc(np.asarray([center_a_vox], dtype=np.int64), _axis)
+        draw_square(_overlay_rgb, int(_r_a[0]), int(_c_a[0]), (255, 80, 80), radius=_center_radius)
+    if _b_center_delta <= _slice_tol:
+        _r_b, _c_b = vox_points_to_rc(np.asarray([center_b_vox], dtype=np.int64), _axis)
+        draw_square(_overlay_rgb, int(_r_b[0]), int(_c_b[0]), (80, 255, 80), radius=_center_radius)
+
+    _points_rows = []
+    for _view, _rows, _cols, _dist in (("A", _rows_a, _cols_a, _dist_a), ("B", _rows_b, _cols_b, _dist_b)):
+        for _row, _col, _delta in zip(_rows.tolist(), _cols.tolist(), _dist.tolist()):
+            _points_rows.append(
+                {
+                    "view": _view,
+                    "row": int(_row),
+                    "col": int(_col),
+                    "slice_delta_vox": int(_delta),
+                }
+            )
+
+    if len(_points_rows) > 0:
+        _points_chart = (
+            alt.Chart(_points_rows)
+            .mark_circle(size=55, opacity=0.65)
+            .encode(
+                x=alt.X("col:Q", title="col"),
+                y=alt.Y("row:Q", title="row"),
+                color=alt.Color("view:N", title="view"),
+                tooltip=[
+                    alt.Tooltip("view:N", title="view"),
+                    alt.Tooltip("row:Q", title="row"),
+                    alt.Tooltip("col:Q", title="col"),
+                    alt.Tooltip("slice_delta_vox:Q", title="slice_delta_vox"),
+                ],
+            )
+            .properties(title="Patch centers near current slice", width=360, height=300)
+        )
+    else:
+        _points_chart = mo.callout("No A/B patch centers fall inside current slice tolerance.", kind="warn")
+
+    _summary = pl.DataFrame(
+        [
+            {
+                "plane": str(viewer_plane.value),
+                "slice_idx": int(_slice_idx),
+                "slice_tol_vox": int(_slice_tol),
+                "a_center_coord_axis": int(center_a_vox[_axis]),
+                "b_center_coord_axis": int(center_b_vox[_axis]),
+                "a_center_slice_delta": int(_a_center_delta),
+                "b_center_slice_delta": int(_b_center_delta),
+                "a_patch_points_shown": int(_patch_a.shape[0]),
+                "b_patch_points_shown": int(_patch_b.shape[0]),
+            }
+        ]
+    )
+    mo.vstack(
+        [
+            mo.md(
+                f"`scan_id={sample_scan_id}`  `series_id={sample_series_id}`  `nifti={sample_nifti_path}`"
+            ),
+            mo.md(
+                "Legend: A center=red, B center=green, A patch centers=cyan, B patch centers=magenta."
+            ),
+            mo.hstack(
+                [
+                    mo.image(Image.fromarray(_overlay_rgb), width=760),
+                    mo.vstack([mo.ui.table(_summary, label="overlay"), _points_chart]),
                 ]
             ),
         ]
