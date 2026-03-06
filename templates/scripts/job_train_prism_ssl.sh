@@ -33,11 +33,11 @@ cleanup_tmp() {
 trap cleanup_tmp EXIT
 
 SUMMARY_PATH="results/train/prism_ssl_${SLURM_JOB_ID}.json"
-CATALOG_PATH="${CATALOG_PATH:-data/pmbb_catalog.csv.gz}"
-MODEL_NAME="${MODEL_NAME:-vit_l}"
-BATCH_SIZE="${BATCH_SIZE:-8}"
-N_PATCHES="${N_PATCHES:-256}"
-WORKERS="${WORKERS:-8}"
+CATALOG_PATH="${CATALOG_PATH:-}"
+MODEL_NAME="${MODEL_NAME:-}"
+BATCH_SIZE="${BATCH_SIZE:-}"
+N_PATCHES="${N_PATCHES:-}"
+WORKERS="${WORKERS:-}"
 
 uv run python - <<'PY'
 import torch
@@ -46,14 +46,28 @@ if not torch.cuda.is_available():
 print(f"torch={torch.__version__} cuda_build={torch.version.cuda} gpu={torch.cuda.get_device_name(0)}")
 PY
 
-uv run python scripts/train_prism_ssl.py \
-  --config configs/baseline.yaml \
-  --catalog-path "$CATALOG_PATH" \
-  --model-name "$MODEL_NAME" \
-  --batch-size "$BATCH_SIZE" \
-  --n-patches "$N_PATCHES" \
-  --workers "$WORKERS" \
-  --wandb-mode online \
-  --tmp-run-dir "$TMP_BASE" \
-  --local-ckpt-dir "$TMP_BASE/checkpoints/<run_id>" \
+TRAIN_ARGS=(
+  --config configs/baseline.yaml
+  --wandb-mode online
+  --tmp-run-dir "$TMP_BASE"
+  --local-ckpt-dir "$TMP_BASE/checkpoints/<run_id>"
   --summary-output "$SUMMARY_PATH"
+)
+
+if [[ -n "$CATALOG_PATH" ]]; then
+  TRAIN_ARGS+=(--catalog-path "$CATALOG_PATH")
+fi
+if [[ -n "$MODEL_NAME" ]]; then
+  TRAIN_ARGS+=(--model-name "$MODEL_NAME")
+fi
+if [[ -n "$BATCH_SIZE" ]]; then
+  TRAIN_ARGS+=(--batch-size "$BATCH_SIZE")
+fi
+if [[ -n "$N_PATCHES" ]]; then
+  TRAIN_ARGS+=(--n-patches "$N_PATCHES")
+fi
+if [[ -n "$WORKERS" ]]; then
+  TRAIN_ARGS+=(--workers "$WORKERS")
+fi
+
+uv run python scripts/train_prism_ssl.py "${TRAIN_ARGS[@]}"

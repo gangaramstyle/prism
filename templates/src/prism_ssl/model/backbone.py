@@ -127,7 +127,7 @@ class TimmRoPEBlock(nn.Module):
             dim=dim,
             num_heads=num_heads,
             qkv_bias=True,
-            num_prefix_tokens=1,
+            num_prefix_tokens=2,
             attn_drop=dropout,
             proj_drop=dropout,
         )
@@ -151,7 +151,7 @@ class TimmRoPEBlock(nn.Module):
 
 
 class TransformerPatchPositionEncoder(nn.Module):
-    """ViT-style token encoder with absolute 3D sin/cos + RoPE attention via timm."""
+    """Token encoder with task-specific CLS tokens plus patch tokens."""
 
     def __init__(
         self,
@@ -168,7 +168,8 @@ class TransformerPatchPositionEncoder(nn.Module):
 
         self.patch_proj = nn.Linear(patch_dim, d_model)
         self.pos_abs = AbsoluteSinCosPositionEmbedding3D(d_model)
-        self.cls_token = nn.Parameter(torch.zeros(1, 1, d_model))
+        self.distance_cls_token = nn.Parameter(torch.zeros(1, 1, d_model))
+        self.supcon_cls_token = nn.Parameter(torch.zeros(1, 1, d_model))
         self.dropout = nn.Dropout(dropout)
         self.rope_embed = MultiAxisRoPEEmbeddingCat(d_model // num_heads)
         self.blocks = nn.ModuleList(
@@ -185,18 +186,20 @@ class TransformerPatchPositionEncoder(nn.Module):
             ]
         )
         self.norm = nn.LayerNorm(d_model)
-        nn.init.trunc_normal_(self.cls_token, std=0.02)
+        nn.init.trunc_normal_(self.distance_cls_token, std=0.02)
+        nn.init.trunc_normal_(self.supcon_cls_token, std=0.02)
 
     def forward(self, patches: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
         bsz, n_patches = patches.shape[:2]
         x = patches.reshape(bsz, n_patches, -1)
         x = self.patch_proj(x)
         x = x + self.pos_abs(positions).to(dtype=x.dtype)
-        cls = self.cls_token.expand(bsz, -1, -1)
-        x = torch.cat([cls, x], dim=1)
+        distance_cls = self.distance_cls_token.expand(bsz, -1, -1)
+        supcon_cls = self.supcon_cls_token.expand(bsz, -1, -1)
+        x = torch.cat([distance_cls, supcon_cls, x], dim=1)
         x = self.dropout(x)
 
         rope = self.rope_embed(positions).to(dtype=x.dtype)
         for block in self.blocks:
             x = block(x, rope)
-        return self.norm(x[:, 0, :])
+        return self.norm(x)

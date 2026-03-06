@@ -16,9 +16,9 @@ from prism_ssl.model.schedules import supcon_weight
 @dataclass
 class LossBundle:
     total: torch.Tensor
-    direction: torch.Tensor
-    window: torch.Tensor
+    distance: torch.Tensor
     supcon: torch.Tensor
+    mim: torch.Tensor
     supcon_weight: float
 
 
@@ -40,39 +40,33 @@ def supervised_contrastive_loss(emb: torch.Tensor, labels: torch.Tensor, temp: f
     return per_anchor[valid].mean()
 
 
-def _normalize_pair(pred: torch.Tensor, target: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    target_std = torch.std(target.detach())
-    scale = torch.clamp(target_std, min=1e-6)
-    return pred / scale, target / scale, target_std
-
-
 def compute_loss_bundle(
     outputs: PrismModelOutput,
     batch: dict,
     loss_cfg: LossConfig,
     step: int,
-    window_loss_fn: nn.Module,
 ) -> tuple[LossBundle, dict[str, float]]:
     target_center_delta = batch["center_delta_mm"].float()
-    target_window = batch["window_delta"].float()
 
-    # Direction: binary classification per axis — is view B positive or negative along R/A/S?
-    direction_targets = (target_center_delta > 0).float()  # [B, 3]
-    direction_logits = outputs.direction_logits  # [B, 3]
-    loss_direction = F.binary_cross_entropy_with_logits(direction_logits, direction_targets)
+    # Binary relative-position classification per axis.
+    distance_targets = (target_center_delta > 0).float()
+    distance_logits = outputs.distance_logits
+    loss_distance = F.binary_cross_entropy_with_logits(distance_logits, distance_targets)
 
-    # Direction accuracy
-    with torch.no_grad():
-        direction_preds = (direction_logits > 0).float()
-        direction_acc = (direction_preds == direction_targets).float().mean()
-        direction_acc_per_axis = (direction_preds == direction_targets).float().mean(dim=0)
-
-    pred_window = outputs.window_delta
-    if loss_cfg.normalize_targets:
-        pred_window_n, target_window_n, w_std = _normalize_pair(pred_window, target_window)
-        loss_window = window_loss_fn(pred_window_n, target_window_n)
+    mim_losses: list[torch.Tensor] = []
+    if outputs.mim_target_a.numel() > 0:
+        mim_losses.append(F.l1_loss(outputs.mim_pred_a, outputs.mim_target_a))
+    if outputs.mim_target_b.numel() > 0:
+        mim_losses.append(F.l1_loss(outputs.mim_pred_b, outputs.mim_target_b))
+    if mim_losses:
+        loss_mim = torch.stack(mim_losses).mean()
     else:
-        loss_window = window_loss_fn(pred_window, target_window)
+        loss_mim = loss_distance.new_tensor(0.0)
+
+    with torch.no_grad():
+        distance_preds = (distance_logits > 0).float()
+        distance_acc = (distance_preds == distance_targets).float().mean()
+        distance_acc_per_axis = (distance_preds == distance_targets).float().mean(dim=0)
 
     supcon_emb = torch.cat([outputs.proj_a, outputs.proj_b], dim=0)
     supcon_labels = torch.cat([batch["series_label"], batch["series_label"]], dim=0)
@@ -90,31 +84,52 @@ def compute_loss_bundle(
     )
 
     total = (
-        loss_cfg.w_direction * loss_direction
-        + loss_cfg.w_window * loss_window
+        loss_cfg.w_distance * loss_distance
         + w_supcon * loss_supcon
+        + loss_cfg.w_mim * loss_mim
     )
 
     diagnostics = {
-        "direction_acc": float(direction_acc.item()),
-        "direction_acc_R": float(direction_acc_per_axis[0].item()),
-        "direction_acc_A": float(direction_acc_per_axis[1].item()),
-        "direction_acc_S": float(direction_acc_per_axis[2].item()),
+        "distance_acc": float(distance_acc.item()),
+        "distance_acc_R": float(distance_acc_per_axis[0].item()),
+        "distance_acc_A": float(distance_acc_per_axis[1].item()),
+        "distance_acc_S": float(distance_acc_per_axis[2].item()),
         "target_center_delta_mean": float(torch.mean(target_center_delta).item()),
-        "target_window_abs_mean": float(torch.mean(torch.abs(target_window)).item()),
         "target_center_delta_std": float(torch.std(target_center_delta).item()),
-        "target_window_std": float(torch.std(target_window).item()),
-        "pred_window_abs_mean": float(torch.mean(torch.abs(pred_window.detach())).item()),
-        "pred_window_std": float(torch.std(pred_window.detach()).item()),
+        "mim_target_abs_mean": float(
+            torch.mean(
+                torch.abs(
+                    torch.cat(
+                        [t.reshape(-1) for t in (outputs.mim_target_a, outputs.mim_target_b) if t.numel() > 0],
+                        dim=0,
+                    )
+                )
+            ).item()
+        )
+        if outputs.mim_target_a.numel() > 0 or outputs.mim_target_b.numel() > 0
+        else 0.0,
+        "mim_pred_abs_mean": float(
+            torch.mean(
+                torch.abs(
+                    torch.cat(
+                        [t.detach().reshape(-1) for t in (outputs.mim_pred_a, outputs.mim_pred_b) if t.numel() > 0],
+                        dim=0,
+                    )
+                )
+            ).item()
+        )
+        if outputs.mim_pred_a.numel() > 0 or outputs.mim_pred_b.numel() > 0
+        else 0.0,
+        "mim_masked_patch_count": float(outputs.mim_target_a.shape[1] + outputs.mim_target_b.shape[1]),
         "supcon_weight": float(w_supcon),
     }
 
     return (
         LossBundle(
             total=total,
-            direction=loss_direction,
-            window=loss_window,
+            distance=loss_distance,
             supcon=loss_supcon,
+            mim=loss_mim,
             supcon_weight=float(w_supcon),
         ),
         diagnostics,

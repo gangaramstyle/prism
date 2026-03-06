@@ -54,13 +54,12 @@ class DataConfig:
 
 @dataclass
 class LossConfig:
-    w_direction: float = 1.0
-    w_window: float = 1.0
+    w_distance: float = 1.0
+    w_mim: float = 1.0
     w_supcon_target: float = 0.2
     supcon_temperature: float = 0.1
     supcon_warmup_steps: int = 2000
     supcon_ramp_steps: int = 3000
-    normalize_targets: bool = True
 
 
 @dataclass
@@ -85,11 +84,15 @@ class ModelConfig:
     mlp_ratio: float = 4.0
     dropout: float = 0.1
     proj_dim: int = 128
+    mim_mask_ratio: float = 0.25
+    mim_decoder_layers: int = 2
 
 
 @dataclass
 class CheckpointConfig:
-    artifact_every_steps: int = 5000
+    local_ckpt_every_hours: float = 12.0
+    artifact_every_hours: float = 12.0
+    artifact_every_steps: int = 0
     max_local_checkpoints: int = 1
     local_ckpt_dir: str = "~/prism_ssl/checkpoints/<run_id>"
     no_resume: bool = False

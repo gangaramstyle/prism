@@ -10,7 +10,7 @@ from prism_ssl.utils.time import StepTimeTracker
 @dataclass
 class RunAccumulator:
     running_wall_s: float = 0.0
-    running_patches: int = 0
+    running_patch_views: int = 0
     replacement_completed_count: int = 0
     replacement_failed_count: int = 0
     replacement_wait_time_ms_total: float = 0.0
@@ -20,16 +20,16 @@ class RunAccumulator:
     def update_step(
         self,
         *,
-        step_time_s: float,
-        patches_this_step: int,
+        elapsed_wall_s: float,
+        patch_views_this_step: int,
         replacement_completed_delta: int,
         replacement_failed_delta: int,
         replacement_wait_ms_delta: float,
         attempted_series_delta: int,
         broken_series_delta: int,
     ) -> float:
-        self.running_wall_s += float(step_time_s)
-        self.running_patches += int(patches_this_step)
+        self.running_wall_s = max(self.running_wall_s, float(elapsed_wall_s))
+        self.running_patch_views += int(patch_views_this_step)
         self.replacement_completed_count += int(replacement_completed_delta)
         self.replacement_failed_count += int(replacement_failed_delta)
         self.replacement_wait_time_ms_total += float(replacement_wait_ms_delta)
@@ -41,7 +41,7 @@ class RunAccumulator:
     def throughput_effective_patches_per_sec(self) -> float:
         if self.running_wall_s <= 0:
             return 0.0
-        return self.running_patches / self.running_wall_s
+        return self.running_patch_views / self.running_wall_s
 
     @property
     def broken_ratio(self) -> float:

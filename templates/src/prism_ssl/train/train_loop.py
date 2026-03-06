@@ -85,9 +85,19 @@ def _count_unique_broken_series(log_path: Path) -> int:
     return len(seen)
 
 
+def _hours_to_seconds(hours: float) -> float:
+    return max(float(hours), 0.0) * 3600.0
+
+
+def _checkpoint_due(*, now_s: float, last_s: float, every_hours: float) -> bool:
+    interval_s = _hours_to_seconds(every_hours)
+    return interval_s > 0.0 and (now_s - last_s) >= interval_s
+
+
 def run_training(config: RunConfig) -> dict[str, Any]:
+    flat_config = flatten_config(config)
     result: dict[str, Any] = {"status": "ok"}
-    result.update({f"cfg_{k}": v for k, v in flatten_config(config).items()})
+    result.update({f"cfg_{k}": v for k, v in flat_config.items()})
 
     set_global_seed(config.train.seed)
 
@@ -118,7 +128,7 @@ def run_training(config: RunConfig) -> dict[str, Any]:
                 mode=config.wandb.mode,
                 id=config.wandb.resume_id or None,
                 resume="allow",
-                config=flatten_config(config),
+                config=flat_config,
                 tags=config.wandb.tags,
             )
             run_id = run.id
@@ -186,6 +196,8 @@ def run_training(config: RunConfig) -> dict[str, Any]:
         num_heads=config.model.num_heads,
         mlp_ratio=config.model.mlp_ratio,
         dropout=config.model.dropout,
+        mim_mask_ratio=config.model.mim_mask_ratio,
+        mim_decoder_layers=config.model.mim_decoder_layers,
     ).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.train.lr, weight_decay=config.train.weight_decay)
 
@@ -194,11 +206,20 @@ def run_training(config: RunConfig) -> dict[str, Any]:
         "[model] "
         f"name={config.model.name} d_model={config.model.d_model} "
         f"layers={config.model.num_layers} heads={config.model.num_heads} "
-        f"proj_dim={config.model.proj_dim} params={result['model_param_count']}",
+        f"proj_dim={config.model.proj_dim} mim_mask_ratio={config.model.mim_mask_ratio:.2f} "
+        f"mim_decoder_layers={config.model.mim_decoder_layers} params={result['model_param_count']}",
         flush=True,
     )
-
-    window_loss_fn = nn.SmoothL1Loss()
+    print(
+        "[train] "
+        f"batch_size={config.train.batch_size} n_patches={config.data.n_patches} "
+        f"patch_views_per_step={config.train.batch_size * config.data.n_patches * 2} "
+        f"workers={config.data.workers} log_every={config.train.log_every} "
+        f"local_ckpt_every_h={config.checkpoint.local_ckpt_every_hours:.2f} "
+        f"artifact_every_h={config.checkpoint.artifact_every_hours:.2f} "
+        f"artifact_every_steps={config.checkpoint.artifact_every_steps}",
+        flush=True,
+    )
 
     use_amp = config.train.precision == "bf16" and device.type == "cuda"
 
@@ -229,11 +250,15 @@ def run_training(config: RunConfig) -> dict[str, Any]:
 
     step_times = StepTimeTracker()
     accum = RunAccumulator()
+    run_wall_t0 = time.perf_counter()
+    last_local_ckpt_s = run_wall_t0
+    last_artifact_ckpt_s = run_wall_t0
 
     try:
         for step in range(start_step, config.train.max_steps):
+            step_t0 = time.perf_counter()
             _sync(device)
-            t0 = time.perf_counter()
+            data_wait_t0 = time.perf_counter()
 
             try:
                 batch = next(data_iter)
@@ -254,7 +279,8 @@ def run_training(config: RunConfig) -> dict[str, Any]:
                     break
                 raise
 
-            data_wait_ms = (time.perf_counter() - t0) * 1000.0
+            data_wait_ms = (time.perf_counter() - data_wait_t0) * 1000.0
+            compute_t0 = time.perf_counter()
 
             patches_a = batch["patches_a"].to(device, non_blocking=True)
             positions_a = batch["positions_a"].to(device, non_blocking=True)
@@ -263,7 +289,6 @@ def run_training(config: RunConfig) -> dict[str, Any]:
 
             batch["center_delta_mm"] = batch["center_delta_mm"].to(device, non_blocking=True)
             batch["center_distance_mm"] = batch["center_distance_mm"].to(device, non_blocking=True)
-            batch["window_delta"] = batch["window_delta"].to(device, non_blocking=True)
             batch["series_label"] = batch["series_label"].to(device, non_blocking=True)
 
             autocast_enabled = use_amp
@@ -275,30 +300,17 @@ def run_training(config: RunConfig) -> dict[str, Any]:
                     batch,
                     config.loss,
                     step=step,
-                    window_loss_fn=window_loss_fn,
                 )
 
             optimizer.zero_grad(set_to_none=True)
             loss_bundle.total.backward()
             optimizer.step()
             _sync(device)
-
-            step_time_s = time.perf_counter() - t0
-            step_time_ms = step_time_s * 1000.0
-            step_times.add(step_time_ms)
+            gpu_time_s = time.perf_counter() - compute_t0
 
             final_step = step + 1
-            patches_this_step = int(patches_a.shape[0] * patches_a.shape[1])
-
-            throughput_effective = accum.update_step(
-                step_time_s=step_time_s,
-                patches_this_step=patches_this_step,
-                replacement_completed_delta=batch["replacement_completed_count_delta"],
-                replacement_failed_delta=batch["replacement_failed_count_delta"],
-                replacement_wait_ms_delta=batch["replacement_wait_time_ms_delta"],
-                attempted_series_delta=batch["attempted_series_delta"],
-                broken_series_delta=batch["broken_series_delta"],
-            )
+            pair_patches_this_step = int(patches_a.shape[0] * patches_a.shape[1])
+            patch_views_this_step = pair_patches_this_step * 2
 
             labels = batch["series_label"]
             same = labels[:, None] == labels[None, :]
@@ -308,7 +320,6 @@ def run_training(config: RunConfig) -> dict[str, Any]:
 
             target_std_flags = [
                 diagnostics["target_center_delta_std"] < 1e-6,
-                diagnostics["target_window_std"] < 1e-6,
             ]
             if any(target_std_flags):
                 near_zero_target_std_windows += 1
@@ -318,18 +329,81 @@ def run_training(config: RunConfig) -> dict[str, Any]:
             if best_loss is None or float(loss_bundle.total.item()) < best_loss:
                 best_loss = float(loss_bundle.total.item())
 
+            now_s = time.perf_counter()
+            if _checkpoint_due(
+                now_s=now_s,
+                last_s=last_local_ckpt_s,
+                every_hours=config.checkpoint.local_ckpt_every_hours,
+            ):
+                save_checkpoint(local_last_ckpt, model, optimizer, final_step, flat_config)
+                prune_local_checkpoints(local_ckpt_dir, max_keep=config.checkpoint.max_local_checkpoints)
+                last_local_ckpt_s = time.perf_counter()
+                print(f"[ckpt] local step={final_step} path={local_last_ckpt}", flush=True)
+
+            if (
+                run is not None
+                and wandb_mod is not None
+                and (
+                    (
+                        config.checkpoint.artifact_every_steps > 0
+                        and final_step % config.checkpoint.artifact_every_steps == 0
+                    )
+                    or _checkpoint_due(
+                        now_s=time.perf_counter(),
+                        last_s=last_artifact_ckpt_s,
+                        every_hours=config.checkpoint.artifact_every_hours,
+                    )
+                )
+            ):
+                temp_ckpt = tmp_run_dir / "artifact_ckpts" / f"step_{final_step}.ckpt"
+                save_checkpoint(temp_ckpt, model, optimizer, final_step, flat_config)
+                try:
+                    upload_artifact_checkpoint(
+                        run=run,
+                        wandb_mod=wandb_mod,
+                        artifact_name=artifact_name,
+                        ckpt_path=temp_ckpt,
+                        step=final_step,
+                        include_best_alias=best_loss is not None and float(loss_bundle.total.item()) <= best_loss,
+                    )
+                    last_artifact_ckpt_s = time.perf_counter()
+                    print(f"[ckpt] artifact step={final_step} name={artifact_name}", flush=True)
+                finally:
+                    temp_ckpt.unlink(missing_ok=True)
+
+            step_time_s = time.perf_counter() - step_t0
+            step_time_ms = step_time_s * 1000.0
+            gpu_time_ms = gpu_time_s * 1000.0
+            post_step_ms = max(step_time_ms - data_wait_ms - gpu_time_ms, 0.0)
+            step_times.add(step_time_ms)
+            step_throughput = patch_views_this_step / max(step_time_s, 1e-6)
+            compute_throughput = patch_views_this_step / max(gpu_time_s, 1e-6)
+
+            throughput_effective = accum.update_step(
+                elapsed_wall_s=time.perf_counter() - run_wall_t0,
+                patch_views_this_step=patch_views_this_step,
+                replacement_completed_delta=batch["replacement_completed_count_delta"],
+                replacement_failed_delta=batch["replacement_failed_count_delta"],
+                replacement_wait_ms_delta=batch["replacement_wait_time_ms_delta"],
+                attempted_series_delta=batch["attempted_series_delta"],
+                broken_series_delta=batch["broken_series_delta"],
+            )
+
             if final_step % config.train.log_every == 0:
                 print(
                     format_step_log(
                         step=final_step,
                         total_loss=float(loss_bundle.total.item()),
-                        loss_direction=float(loss_bundle.direction.item()),
-                        direction_acc=diagnostics["direction_acc"],
-                        loss_window=float(loss_bundle.window.item()),
+                        loss_distance=float(loss_bundle.distance.item()),
+                        distance_acc=diagnostics["distance_acc"],
                         loss_supcon=float(loss_bundle.supcon.item()),
+                        loss_mim=float(loss_bundle.mim.item()),
                         supcon_weight=loss_bundle.supcon_weight,
                         step_time_ms=step_time_ms,
                         data_wait_ms=data_wait_ms,
+                        gpu_time_ms=gpu_time_ms,
+                        post_step_ms=post_step_ms,
+                        step_throughput=step_throughput,
                         throughput_effective=throughput_effective,
                         broken_ratio=accum.broken_ratio,
                     ),
@@ -342,9 +416,6 @@ def run_training(config: RunConfig) -> dict[str, Any]:
                         flush=True,
                     )
 
-                save_checkpoint(local_last_ckpt, model, optimizer, final_step, flatten_config(config))
-                prune_local_checkpoints(local_ckpt_dir, max_keep=config.checkpoint.max_local_checkpoints)
-
                 gpu_mem_mb = (
                     float(torch.cuda.max_memory_allocated(device) / (1024.0 * 1024.0))
                     if device.type == "cuda"
@@ -353,25 +424,27 @@ def run_training(config: RunConfig) -> dict[str, Any]:
 
                 metrics = {
                     "train/loss": float(loss_bundle.total.item()),
-                    "train/loss_direction": float(loss_bundle.direction.item()),
-                    "train/direction_acc": diagnostics["direction_acc"],
-                    "train/direction_acc_R": diagnostics["direction_acc_R"],
-                    "train/direction_acc_A": diagnostics["direction_acc_A"],
-                    "train/direction_acc_S": diagnostics["direction_acc_S"],
-                    "train/loss_window": float(loss_bundle.window.item()),
+                    "train/loss_distance": float(loss_bundle.distance.item()),
+                    "train/distance_acc": diagnostics["distance_acc"],
+                    "train/distance_acc_R": diagnostics["distance_acc_R"],
+                    "train/distance_acc_A": diagnostics["distance_acc_A"],
+                    "train/distance_acc_S": diagnostics["distance_acc_S"],
                     "train/loss_supcon": float(loss_bundle.supcon.item()),
+                    "train/loss_mim": float(loss_bundle.mim.item()),
                     "train/w_supcon": float(loss_bundle.supcon_weight),
                     "train/target_center_delta_mm_mean": diagnostics["target_center_delta_mean"],
-                    "train/target_window_abs_mean": diagnostics["target_window_abs_mean"],
                     "train/target_center_delta_std": diagnostics["target_center_delta_std"],
-                    "train/target_window_std": diagnostics["target_window_std"],
-                    "train/pred_window_abs_mean": diagnostics["pred_window_abs_mean"],
-                    "train/pred_window_std": diagnostics["pred_window_std"],
+                    "train/mim_target_abs_mean": diagnostics["mim_target_abs_mean"],
+                    "train/mim_pred_abs_mean": diagnostics["mim_pred_abs_mean"],
+                    "train/mim_masked_patch_count": diagnostics["mim_masked_patch_count"],
                     "train/supcon_positives_per_anchor_mean": positives_mean,
                     "train/step_time_ms": step_time_ms,
                     "train/data_wait_ms": data_wait_ms,
-                    "train/gpu_time_ms": step_time_ms - data_wait_ms,
-                    "train/patches_per_sec_step": patches_this_step / max(step_time_s, 1e-6),
+                    "train/gpu_time_ms": gpu_time_ms,
+                    "train/post_step_ms": post_step_ms,
+                    "train/patch_views_per_step": patch_views_this_step,
+                    "train/patches_per_sec_step": step_throughput,
+                    "train/patches_per_sec_compute_step": compute_throughput,
                     "train/throughput_effective_patches_per_sec": throughput_effective,
                     "train/gpu_mem_peak_mb": gpu_mem_mb,
                     "data/attempted_series": accum.attempted_series_count,
@@ -395,26 +468,6 @@ def run_training(config: RunConfig) -> dict[str, Any]:
                     result["status"] = "stopped_quota"
                     break
 
-            if (
-                run is not None
-                and wandb_mod is not None
-                and config.checkpoint.artifact_every_steps > 0
-                and final_step % config.checkpoint.artifact_every_steps == 0
-            ):
-                temp_ckpt = tmp_run_dir / "artifact_ckpts" / f"step_{final_step}.ckpt"
-                save_checkpoint(temp_ckpt, model, optimizer, final_step, flatten_config(config))
-                try:
-                    upload_artifact_checkpoint(
-                        run=run,
-                        wandb_mod=wandb_mod,
-                        artifact_name=artifact_name,
-                        ckpt_path=temp_ckpt,
-                        step=final_step,
-                        include_best_alias=best_loss is not None and float(loss_bundle.total.item()) <= best_loss,
-                    )
-                finally:
-                    temp_ckpt.unlink(missing_ok=True)
-
         if not data_health_abort and not training_stopped_for_quota:
             result["status"] = "ok"
 
@@ -433,7 +486,7 @@ def run_training(config: RunConfig) -> dict[str, Any]:
             raise
     finally:
         try:
-            save_checkpoint(local_last_ckpt, model, optimizer, final_step, flatten_config(config))
+            save_checkpoint(local_last_ckpt, model, optimizer, final_step, flat_config)
             prune_local_checkpoints(local_ckpt_dir, max_keep=config.checkpoint.max_local_checkpoints)
         except Exception:
             pass
@@ -457,6 +510,7 @@ def run_training(config: RunConfig) -> dict[str, Any]:
         result["local_ckpt_path"] = str(local_last_ckpt)
         result["local_ckpt_dir_size_gb"] = float(compute_dir_size_gb(local_ckpt_dir))
         result["home_usage_gb"] = compute_home_usage_gb()
+        result["patch_views_per_step"] = int(config.train.batch_size * config.data.n_patches * 2)
         result["hostname"] = platform.node()
         result["slurm_job_id"] = os.environ.get("SLURM_JOB_ID", "")
         result["timestamp"] = time.strftime("%Y-%m-%dT%H:%M:%S")

@@ -59,6 +59,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--tmp-run-dir", type=str, default=None)
     p.add_argument("--summary-output", type=str, default=None)
     p.add_argument("--local-ckpt-dir", type=str, default=None)
+    p.add_argument("--local-ckpt-every-hours", type=float, default=None)
+    p.add_argument("--artifact-every-hours", type=float, default=None)
+    p.add_argument("--artifact-every-steps", type=int, default=None)
 
     p.add_argument("--no-resume", action="store_true")
     p.add_argument("--allow-failures", action="store_true")
@@ -102,6 +105,9 @@ def main() -> int:
         "runtime.tmp_run_dir": args.tmp_run_dir,
         "runtime.summary_output": args.summary_output,
         "checkpoint.local_ckpt_dir": args.local_ckpt_dir,
+        "checkpoint.local_ckpt_every_hours": args.local_ckpt_every_hours,
+        "checkpoint.artifact_every_hours": args.artifact_every_hours,
+        "checkpoint.artifact_every_steps": args.artifact_every_steps,
         "checkpoint.no_resume": args.no_resume,
         "train.allow_failures": args.allow_failures,
     }
