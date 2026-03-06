@@ -395,27 +395,27 @@ class ShardedScanDataset(IterableDataset):
 
     @staticmethod
     def _sample_pair_center_vox(scan: Any, center_a_vox: np.ndarray, seed: int) -> np.ndarray:
-        """Sample a paired view center near A with non-trivial signed RAS displacement."""
+        """Sample an unrestricted paired-view center from any valid patch center in the scan."""
         rng = np.random.default_rng(int(seed))
         center_a = np.asarray(center_a_vox, dtype=np.int64).reshape(3)
         shape = np.asarray(scan.data.shape, dtype=np.int64)
-        affine_inv = np.asarray(scan.affine_linear_inv, dtype=np.float32)
+        patch_vox = np.asarray(scan.patch_shape_vox, dtype=np.int64).reshape(3)
+        half_patch = (patch_vox // 2).astype(np.int64)
+        min_idx = half_patch
+        max_idx = shape - half_patch - 1
+        if np.any(max_idx < min_idx):
+            return np.clip(center_a, 0, np.maximum(shape - 1, 0))
 
-        # Keep paired centers close enough for anatomical correspondence while avoiding near-zero deltas.
-        min_axis_mm = 8.0
-        max_axis_mm = 24.0
-        for _ in range(16):
-            magnitudes = rng.uniform(min_axis_mm, max_axis_mm, size=3).astype(np.float32)
-            signs = rng.choice(np.array([-1.0, 1.0], dtype=np.float32), size=3)
-            delta_mm = magnitudes * signs
-            delta_vox = affine_inv @ delta_mm
-            center_b = center_a + np.rint(delta_vox).astype(np.int64)
-            center_b = np.clip(center_b, 0, shape - 1)
+        for _ in range(32):
+            center_b = np.array(
+                [rng.integers(low=int(lo), high=int(hi) + 1) for lo, hi in zip(min_idx, max_idx)],
+                dtype=np.int64,
+            )
             if np.any(center_b != center_a):
                 return center_b
 
         jitter = rng.integers(low=-2, high=3, size=3, dtype=np.int64)
-        return np.clip(center_a + jitter, 0, shape - 1)
+        return np.clip(center_a + jitter, min_idx, max_idx)
 
     def __iter__(self):
         worker = torch.utils.data.get_worker_info()
@@ -491,22 +491,15 @@ class ShardedScanDataset(IterableDataset):
                     scan = slot["scan"]
                     if self.pair_views:
                         result_a = scan.train_sample(self.n_patches, seed=sample_seed * 2)
-                        center_a_vox = np.asarray(result_a["prism_center_vox"], dtype=np.int64)
-                        patch_centers_a_vox = np.asarray(result_a["patch_centers_vox"], dtype=np.int64)
                         pair_center_b_vox = self._sample_pair_center_vox(
                             scan,
-                            center_a_vox,
+                            np.asarray(result_a["prism_center_vox"], dtype=np.int64),
                             seed=sample_seed * 2 + 1,
                         )
-                        pair_offset_vox = pair_center_b_vox - center_a_vox
-                        patch_centers_b_vox = patch_centers_a_vox + pair_offset_vox.reshape(1, 3)
                         result_b = scan.train_sample(
                             self.n_patches,
                             seed=sample_seed * 2 + 3,
                             subset_center_vox=pair_center_b_vox,
-                            patch_centers_vox=patch_centers_b_vox,
-                            wc=float(result_a["wc"]),
-                            ww=float(result_a["ww"]),
                         )
                     else:
                         result_a = scan.train_sample(self.n_patches, seed=sample_seed)
