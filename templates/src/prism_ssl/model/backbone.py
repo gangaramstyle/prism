@@ -35,7 +35,7 @@ class AbsoluteSinCosPositionEmbedding3D(nn.Module):
         dim: int,
         *,
         min_wavelength_mm: float = 4.0,
-        max_wavelength_mm: float = 512.0,
+        max_wavelength_mm: float = 64.0,
     ) -> None:
         super().__init__()
         self.dim = int(dim)
@@ -74,7 +74,7 @@ class MultiAxisRoPEEmbeddingCat(nn.Module):
         head_dim: int,
         *,
         min_wavelength_mm: float = 4.0,
-        max_wavelength_mm: float = 512.0,
+        max_wavelength_mm: float = 64.0,
     ) -> None:
         super().__init__()
         self.head_dim = int(head_dim)
@@ -161,17 +161,27 @@ class TransformerPatchPositionEncoder(nn.Module):
         num_heads: int = 16,
         mlp_ratio: float = 4.0,
         dropout: float = 0.1,
+        pos_min_wavelength_mm: float = 4.0,
+        pos_max_wavelength_mm: float = 64.0,
     ) -> None:
         super().__init__()
         if d_model % num_heads != 0:
             raise ValueError(f"d_model ({d_model}) must be divisible by num_heads ({num_heads})")
 
         self.patch_proj = nn.Linear(patch_dim, d_model)
-        self.pos_abs = AbsoluteSinCosPositionEmbedding3D(d_model)
+        self.pos_abs = AbsoluteSinCosPositionEmbedding3D(
+            d_model,
+            min_wavelength_mm=pos_min_wavelength_mm,
+            max_wavelength_mm=pos_max_wavelength_mm,
+        )
         self.distance_cls_token = nn.Parameter(torch.zeros(1, 1, d_model))
         self.supcon_cls_token = nn.Parameter(torch.zeros(1, 1, d_model))
         self.dropout = nn.Dropout(dropout)
-        self.rope_embed = MultiAxisRoPEEmbeddingCat(d_model // num_heads)
+        self.rope_embed = MultiAxisRoPEEmbeddingCat(
+            d_model // num_heads,
+            min_wavelength_mm=pos_min_wavelength_mm,
+            max_wavelength_mm=pos_max_wavelength_mm,
+        )
         self.blocks = nn.ModuleList(
             [
                 TimmRoPEBlock(

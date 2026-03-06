@@ -84,6 +84,8 @@ class ModelConfig:
     mlp_ratio: float = 4.0
     dropout: float = 0.1
     proj_dim: int = 128
+    pos_min_wavelength_mm: float = 4.0
+    pos_max_wavelength_mm: float = 64.0
     mim_mask_ratio: float = 0.25
     mim_decoder_layers: int = 2
 

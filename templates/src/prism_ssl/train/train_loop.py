@@ -195,6 +195,8 @@ def run_training(config: RunConfig) -> dict[str, Any]:
         num_heads=config.model.num_heads,
         mlp_ratio=config.model.mlp_ratio,
         dropout=config.model.dropout,
+        pos_min_wavelength_mm=config.model.pos_min_wavelength_mm,
+        pos_max_wavelength_mm=config.model.pos_max_wavelength_mm,
         mim_mask_ratio=config.model.mim_mask_ratio,
         mim_decoder_layers=config.model.mim_decoder_layers,
     ).to(device)
@@ -205,7 +207,9 @@ def run_training(config: RunConfig) -> dict[str, Any]:
         "[model] "
         f"name={config.model.name} d_model={config.model.d_model} "
         f"layers={config.model.num_layers} heads={config.model.num_heads} "
-        f"proj_dim={config.model.proj_dim} mim_mask_ratio={config.model.mim_mask_ratio:.2f} "
+        f"proj_dim={config.model.proj_dim} "
+        f"pos_wl_mm=({config.model.pos_min_wavelength_mm:.1f},{config.model.pos_max_wavelength_mm:.1f}) "
+        f"mim_mask_ratio={config.model.mim_mask_ratio:.2f} "
         f"mim_decoder_layers={config.model.mim_decoder_layers} params={result['model_param_count']}",
         flush=True,
     )

@@ -43,8 +43,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--model-mlp-ratio", type=float, default=None)
     p.add_argument("--model-dropout", type=float, default=None)
     p.add_argument("--model-proj-dim", type=int, default=None)
+    p.add_argument("--model-pos-min-wavelength-mm", type=float, default=None)
+    p.add_argument("--model-pos-max-wavelength-mm", type=float, default=None)
+    p.add_argument("--model-mim-mask-ratio", type=float, default=None)
 
     p.add_argument("--loss-weight-supcon", type=float, default=None)
+    p.add_argument("--loss-weight-mim", type=float, default=None)
     p.add_argument("--supcon-warmup-steps", type=int, default=None)
     p.add_argument("--supcon-ramp-steps", type=int, default=None)
 
@@ -94,7 +98,11 @@ def main() -> int:
         "model.mlp_ratio": args.model_mlp_ratio,
         "model.dropout": args.model_dropout,
         "model.proj_dim": args.model_proj_dim,
+        "model.pos_min_wavelength_mm": args.model_pos_min_wavelength_mm,
+        "model.pos_max_wavelength_mm": args.model_pos_max_wavelength_mm,
+        "model.mim_mask_ratio": args.model_mim_mask_ratio,
         "loss.w_supcon_target": args.loss_weight_supcon,
+        "loss.w_mim": args.loss_weight_mim,
         "loss.supcon_warmup_steps": args.supcon_warmup_steps,
         "loss.supcon_ramp_steps": args.supcon_ramp_steps,
         "data.broken_abort_ratio": args.broken_abort_ratio,

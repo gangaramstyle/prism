@@ -16,7 +16,9 @@ model:
   mlp_ratio: 4.0
   dropout: 0.1
   proj_dim: 256
-  mim_mask_ratio: 0.25
+  pos_min_wavelength_mm: 4.0
+  pos_max_wavelength_mm: 64.0
+  mim_mask_ratio: 0.0
   mim_decoder_layers: 2
 
 data:
@@ -49,8 +51,8 @@ train:
 
 loss:
   w_distance: 1.0
-  w_mim: 1.0
-  w_supcon_target: 0.2
+  w_mim: 0.0
+  w_supcon_target: 0.0
   supcon_temperature: 0.1
   supcon_warmup_steps: 2000
   supcon_ramp_steps: 3000

@@ -64,9 +64,15 @@ class MaskedPatchDecoder(nn.Module):
         num_layers: int,
         mlp_ratio: float,
         dropout: float,
+        pos_min_wavelength_mm: float,
+        pos_max_wavelength_mm: float,
     ) -> None:
         super().__init__()
-        self.pos_embed = AbsoluteSinCosPositionEmbedding3D(dim)
+        self.pos_embed = AbsoluteSinCosPositionEmbedding3D(
+            dim,
+            min_wavelength_mm=pos_min_wavelength_mm,
+            max_wavelength_mm=pos_max_wavelength_mm,
+        )
         self.layers = nn.ModuleList(
             [
                 CrossAttentionBlock(
@@ -102,6 +108,8 @@ class PrismSSLModel(nn.Module):
         num_heads: int = 16,
         mlp_ratio: float = 4.0,
         dropout: float = 0.1,
+        pos_min_wavelength_mm: float = 4.0,
+        pos_max_wavelength_mm: float = 64.0,
         mim_mask_ratio: float = 0.25,
         mim_decoder_layers: int = 2,
     ):
@@ -115,6 +123,8 @@ class PrismSSLModel(nn.Module):
                 num_heads=num_heads,
                 mlp_ratio=mlp_ratio,
                 dropout=dropout,
+                pos_min_wavelength_mm=pos_min_wavelength_mm,
+                pos_max_wavelength_mm=pos_max_wavelength_mm,
             )
         else:
             raise ValueError(f"Unknown model.name='{model_name}'. Supported: vit_l")
@@ -138,6 +148,8 @@ class PrismSSLModel(nn.Module):
             num_layers=mim_decoder_layers,
             mlp_ratio=mlp_ratio,
             dropout=dropout,
+            pos_min_wavelength_mm=pos_min_wavelength_mm,
+            pos_max_wavelength_mm=pos_max_wavelength_mm,
         )
 
     @staticmethod
