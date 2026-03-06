@@ -38,6 +38,9 @@ MODEL_NAME="${MODEL_NAME:-}"
 BATCH_SIZE="${BATCH_SIZE:-}"
 N_PATCHES="${N_PATCHES:-}"
 WORKERS="${WORKERS:-}"
+N_SCANS="${N_SCANS:-}"
+WARM_POOL_SIZE="${WARM_POOL_SIZE:-}"
+VISITS_PER_SCAN="${VISITS_PER_SCAN:-}"
 
 uv run python - <<'PY'
 import torch
@@ -68,6 +71,15 @@ if [[ -n "$N_PATCHES" ]]; then
 fi
 if [[ -n "$WORKERS" ]]; then
   TRAIN_ARGS+=(--workers "$WORKERS")
+fi
+if [[ -n "$N_SCANS" ]]; then
+  TRAIN_ARGS+=(--n-scans "$N_SCANS")
+fi
+if [[ -n "$WARM_POOL_SIZE" ]]; then
+  TRAIN_ARGS+=(--warm-pool-size "$WARM_POOL_SIZE")
+fi
+if [[ -n "$VISITS_PER_SCAN" ]]; then
+  TRAIN_ARGS+=(--visits-per-scan "$VISITS_PER_SCAN")
 fi
 
 uv run python scripts/train_prism_ssl.py "${TRAIN_ARGS[@]}"

@@ -212,6 +212,7 @@ def run_training(config: RunConfig) -> dict[str, Any]:
     print(
         "[train] "
         f"batch_size={config.train.batch_size} n_patches={config.data.n_patches} "
+        f"n_scans={len(records)} warm_pool_size={config.data.warm_pool_size} visits_per_scan={config.data.visits_per_scan} "
         f"patch_views_per_step={config.train.batch_size * config.data.n_patches * 2} "
         f"workers={config.data.workers} log_every={config.train.log_every} "
         f"local_ckpt_every_h={config.checkpoint.local_ckpt_every_hours:.2f} "
