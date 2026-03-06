@@ -393,6 +393,30 @@ class ShardedScanDataset(IterableDataset):
         self.scratch_dir = scratch_dir
         self.pair_views = bool(pair_views)
 
+    @staticmethod
+    def _sample_pair_center_vox(scan: Any, center_a_vox: np.ndarray, seed: int) -> np.ndarray:
+        """Sample a paired view center near A with non-trivial signed RAS displacement."""
+        rng = np.random.default_rng(int(seed))
+        center_a = np.asarray(center_a_vox, dtype=np.int64).reshape(3)
+        shape = np.asarray(scan.data.shape, dtype=np.int64)
+        affine_inv = np.asarray(scan.affine_linear_inv, dtype=np.float32)
+
+        # Keep paired centers close enough for anatomical correspondence while avoiding near-zero deltas.
+        min_axis_mm = 8.0
+        max_axis_mm = 24.0
+        for _ in range(16):
+            magnitudes = rng.uniform(min_axis_mm, max_axis_mm, size=3).astype(np.float32)
+            signs = rng.choice(np.array([-1.0, 1.0], dtype=np.float32), size=3)
+            delta_mm = magnitudes * signs
+            delta_vox = affine_inv @ delta_mm
+            center_b = center_a + np.rint(delta_vox).astype(np.int64)
+            center_b = np.clip(center_b, 0, shape - 1)
+            if np.any(center_b != center_a):
+                return center_b
+
+        jitter = rng.integers(low=-2, high=3, size=3, dtype=np.int64)
+        return np.clip(center_a + jitter, 0, shape - 1)
+
     def __iter__(self):
         worker = torch.utils.data.get_worker_info()
         if worker is None:
@@ -467,7 +491,16 @@ class ShardedScanDataset(IterableDataset):
                     scan = slot["scan"]
                     if self.pair_views:
                         result_a = scan.train_sample(self.n_patches, seed=sample_seed * 2)
-                        result_b = scan.train_sample(self.n_patches, seed=sample_seed * 2 + 1)
+                        pair_center_b_vox = self._sample_pair_center_vox(
+                            scan,
+                            np.asarray(result_a["prism_center_vox"], dtype=np.int64),
+                            seed=sample_seed * 2 + 1,
+                        )
+                        result_b = scan.train_sample(
+                            self.n_patches,
+                            seed=sample_seed * 2 + 3,
+                            subset_center_vox=pair_center_b_vox,
+                        )
                     else:
                         result_a = scan.train_sample(self.n_patches, seed=sample_seed)
                         result_b = result_a

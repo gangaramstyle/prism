@@ -51,7 +51,10 @@ def compute_loss_bundle(
     # Binary relative-position classification per axis.
     distance_targets = (target_center_delta > 0).float()
     distance_logits = outputs.distance_logits
-    loss_distance = F.binary_cross_entropy_with_logits(distance_logits, distance_targets)
+    distance_valid = (torch.abs(target_center_delta) >= 1.0).float()
+    loss_distance_raw = F.binary_cross_entropy_with_logits(distance_logits, distance_targets, reduction="none")
+    distance_valid_count = distance_valid.sum().clamp(min=1.0)
+    loss_distance = (loss_distance_raw * distance_valid).sum() / distance_valid_count
 
     mim_losses: list[torch.Tensor] = []
     if outputs.mim_target_a.numel() > 0:
@@ -65,8 +68,11 @@ def compute_loss_bundle(
 
     with torch.no_grad():
         distance_preds = (distance_logits > 0).float()
-        distance_acc = (distance_preds == distance_targets).float().mean()
-        distance_acc_per_axis = (distance_preds == distance_targets).float().mean(dim=0)
+        distance_correct = (distance_preds == distance_targets).float()
+        distance_acc = (distance_correct * distance_valid).sum() / distance_valid_count
+        distance_acc_per_axis = (
+            (distance_correct * distance_valid).sum(dim=0) / distance_valid.sum(dim=0).clamp(min=1.0)
+        )
 
     supcon_emb = torch.cat([outputs.proj_a, outputs.proj_b], dim=0)
     supcon_labels = torch.cat([batch["series_label"], batch["series_label"]], dim=0)
@@ -94,6 +100,7 @@ def compute_loss_bundle(
         "distance_acc_R": float(distance_acc_per_axis[0].item()),
         "distance_acc_A": float(distance_acc_per_axis[1].item()),
         "distance_acc_S": float(distance_acc_per_axis[2].item()),
+        "distance_valid_ratio": float(distance_valid.mean().item()),
         "target_center_delta_mean": float(torch.mean(target_center_delta).item()),
         "target_center_delta_std": float(torch.std(target_center_delta).item()),
         "mim_target_abs_mean": float(

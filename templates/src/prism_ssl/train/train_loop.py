@@ -94,6 +94,9 @@ def _checkpoint_due(*, now_s: float, last_s: float, every_hours: float) -> bool:
     return interval_s > 0.0 and (now_s - last_s) >= interval_s
 
 
+QUOTA_CHECK_MIN_INTERVAL_S = 300.0
+
+
 def run_training(config: RunConfig) -> dict[str, Any]:
     flat_config = flatten_config(config)
     result: dict[str, Any] = {"status": "ok"}
@@ -176,7 +179,6 @@ def run_training(config: RunConfig) -> dict[str, Any]:
         "batch_size": config.train.batch_size,
         "num_workers": config.data.workers,
         "pin_memory": device.type == "cuda",
-        "pin_memory_device": str(device) if device.type == "cuda" else "",
         "collate_fn": collate_prism_batch,
     }
     if config.data.workers > 0:
@@ -253,6 +255,8 @@ def run_training(config: RunConfig) -> dict[str, Any]:
     run_wall_t0 = time.perf_counter()
     last_local_ckpt_s = run_wall_t0
     last_artifact_ckpt_s = run_wall_t0
+    last_quota_check_s = run_wall_t0 - QUOTA_CHECK_MIN_INTERVAL_S
+    last_home_usage_gb: float | None = None
 
     try:
         for step in range(start_step, config.train.max_steps):
@@ -429,6 +433,7 @@ def run_training(config: RunConfig) -> dict[str, Any]:
                     "train/distance_acc_R": diagnostics["distance_acc_R"],
                     "train/distance_acc_A": diagnostics["distance_acc_A"],
                     "train/distance_acc_S": diagnostics["distance_acc_S"],
+                    "train/distance_valid_ratio": diagnostics["distance_valid_ratio"],
                     "train/loss_supcon": float(loss_bundle.supcon.item()),
                     "train/loss_mim": float(loss_bundle.mim.item()),
                     "train/w_supcon": float(loss_bundle.supcon_weight),
@@ -458,15 +463,19 @@ def run_training(config: RunConfig) -> dict[str, Any]:
                 if run is not None:
                     run.log(metrics, step=final_step)
 
-                home_usage_gb = compute_home_usage_gb()
-                quota = quota_state(home_usage_gb, config.quota.home_soft_limit_gb, config.quota.home_hard_limit_gb)
-                if quota == "soft":
-                    print(f"[quota] soft-limit reached: home_usage_gb={home_usage_gb:.2f}", flush=True)
-                elif quota == "hard":
-                    print(f"[quota] hard-limit reached: home_usage_gb={home_usage_gb:.2f}; stopping run", flush=True)
-                    training_stopped_for_quota = True
-                    result["status"] = "stopped_quota"
-                    break
+                quota_now_s = time.perf_counter()
+                if (quota_now_s - last_quota_check_s) >= QUOTA_CHECK_MIN_INTERVAL_S:
+                    home_usage_gb = compute_home_usage_gb()
+                    last_home_usage_gb = home_usage_gb
+                    last_quota_check_s = quota_now_s
+                    quota = quota_state(home_usage_gb, config.quota.home_soft_limit_gb, config.quota.home_hard_limit_gb)
+                    if quota == "soft":
+                        print(f"[quota] soft-limit reached: home_usage_gb={home_usage_gb:.2f}", flush=True)
+                    elif quota == "hard":
+                        print(f"[quota] hard-limit reached: home_usage_gb={home_usage_gb:.2f}; stopping run", flush=True)
+                        training_stopped_for_quota = True
+                        result["status"] = "stopped_quota"
+                        break
 
         if not data_health_abort and not training_stopped_for_quota:
             result["status"] = "ok"
@@ -509,7 +518,9 @@ def run_training(config: RunConfig) -> dict[str, Any]:
 
         result["local_ckpt_path"] = str(local_last_ckpt)
         result["local_ckpt_dir_size_gb"] = float(compute_dir_size_gb(local_ckpt_dir))
-        result["home_usage_gb"] = compute_home_usage_gb()
+        result["home_usage_gb"] = (
+            float(last_home_usage_gb) if last_home_usage_gb is not None else compute_home_usage_gb()
+        )
         result["patch_views_per_step"] = int(config.train.batch_size * config.data.n_patches * 2)
         result["hostname"] = platform.node()
         result["slurm_job_id"] = os.environ.get("SLURM_JOB_ID", "")
