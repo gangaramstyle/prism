@@ -120,7 +120,7 @@ def main() -> int:
         write_summary(config.runtime.summary_output, result)
         print(f"[summary] Wrote {config.runtime.summary_output}", flush=True)
 
-    if result["status"] not in {"ok", "stopped_quota"} and not config.train.allow_failures:
+    if result["status"] != "ok" and not config.train.allow_failures:
         return 1
     return 0
 
