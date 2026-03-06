@@ -265,7 +265,13 @@ def _(alt, mo, rows):
             x=alt.X("delta_R_mm:Q", title="Delta R (mm)"),
             y=alt.Y("delta_A_mm:Q", title="Delta A (mm)"),
             color=alt.Color("target_S:N", title="Target S"),
-            tooltip=["idx", "delta_R_mm", "delta_A_mm", "delta_S_mm", "center_distance_mm"],
+            tooltip=[
+                alt.Tooltip("idx:Q", title="idx"),
+                alt.Tooltip("delta_R_mm:Q", title="delta_R_mm"),
+                alt.Tooltip("delta_A_mm:Q", title="delta_A_mm"),
+                alt.Tooltip("delta_S_mm:Q", title="delta_S_mm"),
+                alt.Tooltip("center_distance_mm:Q", title="center_distance_mm"),
+            ],
         )
         .properties(title="Center Delta Scatter", width=420, height=360)
     )
