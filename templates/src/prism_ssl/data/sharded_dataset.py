@@ -491,15 +491,22 @@ class ShardedScanDataset(IterableDataset):
                     scan = slot["scan"]
                     if self.pair_views:
                         result_a = scan.train_sample(self.n_patches, seed=sample_seed * 2)
+                        center_a_vox = np.asarray(result_a["prism_center_vox"], dtype=np.int64)
+                        patch_centers_a_vox = np.asarray(result_a["patch_centers_vox"], dtype=np.int64)
                         pair_center_b_vox = self._sample_pair_center_vox(
                             scan,
-                            np.asarray(result_a["prism_center_vox"], dtype=np.int64),
+                            center_a_vox,
                             seed=sample_seed * 2 + 1,
                         )
+                        pair_offset_vox = pair_center_b_vox - center_a_vox
+                        patch_centers_b_vox = patch_centers_a_vox + pair_offset_vox.reshape(1, 3)
                         result_b = scan.train_sample(
                             self.n_patches,
                             seed=sample_seed * 2 + 3,
                             subset_center_vox=pair_center_b_vox,
+                            patch_centers_vox=patch_centers_b_vox,
+                            wc=float(result_a["wc"]),
+                            ww=float(result_a["ww"]),
                         )
                     else:
                         result_a = scan.train_sample(self.n_patches, seed=sample_seed)
