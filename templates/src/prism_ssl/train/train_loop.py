@@ -394,6 +394,16 @@ def run_training(config: RunConfig) -> dict[str, Any]:
             )
 
             if final_step % config.train.log_every == 0:
+                gpu_mem_mb = (
+                    float(torch.cuda.max_memory_allocated(device) / (1024.0 * 1024.0))
+                    if device.type == "cuda"
+                    else 0.0
+                )
+                gpu_reserved_mb = (
+                    float(torch.cuda.max_memory_reserved(device) / (1024.0 * 1024.0))
+                    if device.type == "cuda"
+                    else 0.0
+                )
                 print(
                     format_step_log(
                         step=final_step,
@@ -409,6 +419,8 @@ def run_training(config: RunConfig) -> dict[str, Any]:
                         step_time_ms=step_time_ms,
                         data_wait_ms=data_wait_ms,
                         gpu_time_ms=gpu_time_ms,
+                        gpu_mem_peak_mb=gpu_mem_mb,
+                        gpu_mem_reserved_mb=gpu_reserved_mb,
                         post_step_ms=post_step_ms,
                         step_throughput=step_throughput,
                         throughput_effective=throughput_effective,
@@ -422,12 +434,6 @@ def run_training(config: RunConfig) -> dict[str, Any]:
                         "[warn] Target std has been near-zero for >=5 windows; verify sampling diversity.",
                         flush=True,
                     )
-
-                gpu_mem_mb = (
-                    float(torch.cuda.max_memory_allocated(device) / (1024.0 * 1024.0))
-                    if device.type == "cuda"
-                    else 0.0
-                )
 
                 metrics = {
                     "train/loss": float(loss_bundle.total.item()),
@@ -458,6 +464,7 @@ def run_training(config: RunConfig) -> dict[str, Any]:
                     "train/patches_per_sec_compute_step": compute_throughput,
                     "train/throughput_effective_patches_per_sec": throughput_effective,
                     "train/gpu_mem_peak_mb": gpu_mem_mb,
+                    "train/gpu_mem_reserved_mb": gpu_reserved_mb,
                     "data/attempted_series": accum.attempted_series_count,
                     "data/broken_series": accum.broken_series_count,
                     "data/broken_ratio": accum.broken_ratio,

@@ -22,6 +22,8 @@ def format_step_log(
     step_time_ms: float,
     data_wait_ms: float = 0.0,
     gpu_time_ms: float = 0.0,
+    gpu_mem_peak_mb: float = 0.0,
+    gpu_mem_reserved_mb: float = 0.0,
     post_step_ms: float = 0.0,
     step_throughput: float = 0.0,
     throughput_effective: float,
@@ -33,6 +35,7 @@ def format_step_log(
         f"shared_acc={distance_acc_shared:.3f} wc_acc={window_acc_wc:.3f} ww_acc={window_acc_ww:.3f} "
         f"c={sci(loss_supcon)} mim={sci(loss_mim)} w_supcon={supcon_weight:.4f} "
         f"step_ms={step_time_ms:.1f} data_ms={data_wait_ms:.1f} gpu_ms={gpu_time_ms:.1f} "
+        f"gpu_mem_mb={gpu_mem_peak_mb:.0f} gpu_res_mb={gpu_mem_reserved_mb:.0f} "
         f"post_ms={post_step_ms:.1f} step_tput={step_throughput:.1f} "
         f"eff_tput={throughput_effective:.1f} broken_ratio={broken_ratio:.4f}"
     )
