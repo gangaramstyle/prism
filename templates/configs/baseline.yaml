@@ -32,6 +32,11 @@ data:
   warm_pool_size: 16
   visits_per_scan: 500
   max_prefetch_replacements: 2
+  use_totalseg_body_centers: true
+  pair_local_curriculum_steps: 200000
+  pair_local_final_prob: 0.35
+  pair_local_start_radius_mm: 192.0
+  pair_local_end_radius_mm: 64.0
   strict_background_errors: false
   use_local_scratch: true
   broken_abort_ratio: 0.10

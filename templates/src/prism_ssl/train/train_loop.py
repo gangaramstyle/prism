@@ -163,6 +163,11 @@ def run_training(config: RunConfig) -> dict[str, Any]:
         visits_per_scan=config.data.visits_per_scan,
         seed=config.train.seed,
         max_prefetch_replacements=config.data.max_prefetch_replacements,
+        use_totalseg_body_centers=config.data.use_totalseg_body_centers,
+        pair_local_curriculum_steps=config.data.pair_local_curriculum_steps,
+        pair_local_final_prob=config.data.pair_local_final_prob,
+        pair_local_start_radius_mm=config.data.pair_local_start_radius_mm,
+        pair_local_end_radius_mm=config.data.pair_local_end_radius_mm,
         strict_background_errors=config.data.strict_background_errors,
         broken_abort_ratio=config.data.broken_abort_ratio,
         broken_abort_min_attempts=config.data.broken_abort_min_attempts,
@@ -219,6 +224,10 @@ def run_training(config: RunConfig) -> dict[str, Any]:
         f"n_scans={len(records)} warm_pool_size={config.data.warm_pool_size} visits_per_scan={config.data.visits_per_scan} "
         f"patch_views_per_step={config.train.batch_size * config.data.n_patches * 2} "
         f"workers={config.data.workers} log_every={config.train.log_every} "
+        f"ts_body_centers={str(config.data.use_totalseg_body_centers).lower()} "
+        f"pair_local_prob_final={config.data.pair_local_final_prob:.2f} "
+        f"pair_local_radius_mm=({config.data.pair_local_start_radius_mm:.0f},{config.data.pair_local_end_radius_mm:.0f}) "
+        f"pair_local_steps={config.data.pair_local_curriculum_steps} "
         f"local_ckpt_every_h={config.checkpoint.local_ckpt_every_hours:.2f} "
         f"artifact_every_h={config.checkpoint.artifact_every_hours:.2f} "
         f"artifact_every_steps={config.checkpoint.artifact_every_steps}",

@@ -67,6 +67,7 @@ class WarmPool:
         worker_id: int,
         strict_background_errors: bool,
         max_prefetch_replacements: int,
+        use_totalseg_body_centers: bool,
         broken_abort_ratio: float,
         broken_abort_min_attempts: int,
         max_broken_series_log: int,
@@ -78,6 +79,7 @@ class WarmPool:
         self._base_patch_mm = float(base_patch_mm)
         self._strict_background_errors = bool(strict_background_errors)
         self._max_prefetch_replacements = max(1, int(max_prefetch_replacements))
+        self._use_totalseg_body_centers = bool(use_totalseg_body_centers)
         self._broken_abort_ratio = float(broken_abort_ratio)
         self._broken_abort_min_attempts = int(broken_abort_min_attempts)
         self._max_broken_series_log = int(max_broken_series_log)
@@ -205,7 +207,11 @@ class WarmPool:
 
     def _load_one(self, record: ScanRecord, slot_idx: int) -> tuple[Any, str]:
         if self._worker_scratch is None:
-            return load_nifti_scan(record, base_patch_mm=self._base_patch_mm)
+            return load_nifti_scan(
+                record,
+                base_patch_mm=self._base_patch_mm,
+                use_totalseg_body_centers=self._use_totalseg_body_centers,
+            )
 
         source_path = record.nifti_path or resolve_nifti_path(record.series_path)
         staged_path = self._stage_to_scratch(slot_idx, source_path)
@@ -217,7 +223,11 @@ class WarmPool:
             nifti_path=staged_path,
         )
         try:
-            return load_nifti_scan(staged_record, base_patch_mm=self._base_patch_mm)
+            return load_nifti_scan(
+                staged_record,
+                base_patch_mm=self._base_patch_mm,
+                use_totalseg_body_centers=self._use_totalseg_body_centers,
+            )
         except Exception:
             self._clear_slot_scratch(slot_idx)
             raise
@@ -370,6 +380,11 @@ class ShardedScanDataset(IterableDataset):
         visits_per_scan: int,
         seed: int,
         max_prefetch_replacements: int,
+        use_totalseg_body_centers: bool,
+        pair_local_curriculum_steps: int,
+        pair_local_final_prob: float,
+        pair_local_start_radius_mm: float,
+        pair_local_end_radius_mm: float,
         strict_background_errors: bool,
         broken_abort_ratio: float,
         broken_abort_min_attempts: int,
@@ -385,6 +400,11 @@ class ShardedScanDataset(IterableDataset):
         self.visits_per_scan = int(visits_per_scan)
         self.seed = int(seed)
         self.max_prefetch_replacements = int(max_prefetch_replacements)
+        self.use_totalseg_body_centers = bool(use_totalseg_body_centers)
+        self.pair_local_curriculum_steps = max(0, int(pair_local_curriculum_steps))
+        self.pair_local_final_prob = float(np.clip(pair_local_final_prob, 0.0, 1.0))
+        self.pair_local_start_radius_mm = max(float(pair_local_start_radius_mm), 0.0)
+        self.pair_local_end_radius_mm = max(float(pair_local_end_radius_mm), 0.0)
         self.strict_background_errors = bool(strict_background_errors)
         self.broken_abort_ratio = float(broken_abort_ratio)
         self.broken_abort_min_attempts = int(broken_abort_min_attempts)
@@ -393,29 +413,43 @@ class ShardedScanDataset(IterableDataset):
         self.scratch_dir = scratch_dir
         self.pair_views = bool(pair_views)
 
-    @staticmethod
-    def _sample_pair_center_vox(scan: Any, center_a_vox: np.ndarray, seed: int) -> np.ndarray:
-        """Sample an unrestricted paired-view center from any valid patch center in the scan."""
+    def _pair_curriculum(self, sample_index: int) -> tuple[float, float]:
+        if self.pair_local_curriculum_steps <= 0 or self.pair_local_final_prob <= 0.0:
+            return 0.0, self.pair_local_start_radius_mm
+        progress = min(max(int(sample_index), 0) / float(self.pair_local_curriculum_steps), 1.0)
+        local_prob = self.pair_local_final_prob * progress
+        radius_mm = self.pair_local_start_radius_mm + (
+            self.pair_local_end_radius_mm - self.pair_local_start_radius_mm
+        ) * progress
+        return float(local_prob), float(max(radius_mm, 0.0))
+
+    def _sample_pair_center_vox(self, scan: Any, center_a_vox: np.ndarray, seed: int, sample_index: int) -> np.ndarray:
+        """Sample paired-view centers with a slow global-to-local curriculum."""
         rng = np.random.default_rng(int(seed))
         center_a = np.asarray(center_a_vox, dtype=np.int64).reshape(3)
-        shape = np.asarray(scan.data.shape, dtype=np.int64)
-        patch_vox = np.asarray(scan.patch_shape_vox, dtype=np.int64).reshape(3)
-        half_patch = (patch_vox // 2).astype(np.int64)
-        min_idx = half_patch
-        max_idx = shape - half_patch - 1
-        if np.any(max_idx < min_idx):
-            return np.clip(center_a, 0, np.maximum(shape - 1, 0))
+        local_prob, local_radius_mm = self._pair_curriculum(sample_index)
+
+        if local_prob > 0.0 and float(rng.random()) < local_prob:
+            local_center = scan.sample_center_near_vox(
+                rng,
+                center_a,
+                radius_mm=local_radius_mm,
+                patch_vox=scan.patch_shape_vox,
+            )
+            if np.any(local_center != center_a):
+                return local_center
 
         for _ in range(32):
-            center_b = np.array(
-                [rng.integers(low=int(lo), high=int(hi) + 1) for lo, hi in zip(min_idx, max_idx)],
-                dtype=np.int64,
-            )
+            center_b = scan.sample_prism_center_vox(rng, patch_vox=scan.patch_shape_vox)
             if np.any(center_b != center_a):
                 return center_b
 
-        jitter = rng.integers(low=-2, high=3, size=3, dtype=np.int64)
-        return np.clip(center_a + jitter, min_idx, max_idx)
+        return scan.sample_center_near_vox(
+            rng,
+            center_a,
+            radius_mm=max(local_radius_mm, self.base_patch_mm * 2.0),
+            patch_vox=scan.patch_shape_vox,
+        )
 
     def __iter__(self):
         worker = torch.utils.data.get_worker_info()
@@ -442,6 +476,7 @@ class ShardedScanDataset(IterableDataset):
             worker_id=worker_id,
             strict_background_errors=self.strict_background_errors,
             max_prefetch_replacements=self.max_prefetch_replacements,
+            use_totalseg_body_centers=self.use_totalseg_body_centers,
             broken_abort_ratio=self.broken_abort_ratio,
             broken_abort_min_attempts=self.broken_abort_min_attempts,
             max_broken_series_log=self.max_broken_series_log,
@@ -495,6 +530,7 @@ class ShardedScanDataset(IterableDataset):
                             scan,
                             np.asarray(result_a["prism_center_vox"], dtype=np.int64),
                             seed=sample_seed * 2 + 1,
+                            sample_index=sample_count,
                         )
                         result_b = scan.train_sample(
                             self.n_patches,

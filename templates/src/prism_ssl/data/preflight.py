@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import glob
+import hashlib
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -42,6 +43,9 @@ class ScanGeometry:
 
 _AXIS_NAMES = ("x", "y", "z")
 _PLANE_BY_THIN_AXIS = {0: "sagittal", 1: "coronal", 2: "axial"}
+_TOTALSEG_TOTAL_CT_SUFFIX = "_e1_ts_total_ct.nii.gz"
+_TOTALSEG_BODY_MAX_CANDIDATES = 4096
+_TOTALSEG_BODY_GRID_STEPS = (4, 2, 1)
 
 
 def infer_scan_geometry(
@@ -107,6 +111,18 @@ def resolve_nifti_path(series_path: str) -> str:
     return candidates[0]
 
 
+def resolve_totalseg_total_ct_path(series_path: str) -> str:
+    """Resolve a matching TotalSegmentator total-CT path when the PMBB layout is present."""
+    normalized = os.path.normpath(str(series_path))
+    marker = f"{os.sep}subjects{os.sep}"
+    if marker not in normalized:
+        return ""
+    prefix, suffix = normalized.split(marker, 1)
+    series_name = Path(normalized).name
+    candidate = Path(prefix) / "processing" / "totalsegmentator" / suffix / f"{series_name}{_TOTALSEG_TOTAL_CT_SUFFIX}"
+    return str(candidate) if candidate.is_file() else ""
+
+
 def compute_robust_stats(data: np.ndarray) -> tuple[float, float, float, float]:
     """Return median/std and robust lower/upper bounds."""
     arr = np.asarray(data, dtype=np.float32)
@@ -167,6 +183,9 @@ class NiftiScan:
     robust_std: float
     robust_low: float
     robust_high: float
+    body_center_candidates_vox: np.ndarray | None = field(default=None, repr=False)
+    body_center_candidates_pt: np.ndarray | None = field(default=None, repr=False)
+    body_sampling_source: str = ""
     target_patch_size: int = 16
     affine_linear: np.ndarray = field(init=False, repr=False)
     affine_translation: np.ndarray = field(init=False, repr=False)
@@ -197,6 +216,19 @@ class NiftiScan:
         self.affine_linear_inv = np.linalg.inv(self.affine_linear.astype(np.float64)).astype(np.float32, copy=False)
         axis_mm = np.linalg.norm(self.affine_linear.astype(np.float64), axis=0).astype(np.float32)
         self.voxel_axis_mm = np.clip(axis_mm, 1e-6, None)
+        if self.body_center_candidates_vox is None:
+            self.body_center_candidates_vox = np.empty((0, 3), dtype=np.int32)
+        else:
+            body_centers = np.asarray(self.body_center_candidates_vox, dtype=np.int32)
+            self.body_center_candidates_vox = body_centers.reshape(-1, 3) if body_centers.size else np.empty((0, 3), dtype=np.int32)
+        if self.body_center_candidates_pt is None:
+            if len(self.body_center_candidates_vox) > 0:
+                self.body_center_candidates_pt = voxel_points_to_world(self.body_center_candidates_vox, self.affine)
+            else:
+                self.body_center_candidates_pt = np.empty((0, 3), dtype=np.float32)
+        else:
+            body_points = np.asarray(self.body_center_candidates_pt, dtype=np.float32)
+            self.body_center_candidates_pt = body_points.reshape(-1, 3) if body_points.size else np.empty((0, 3), dtype=np.float32)
 
     @property
     def geometry(self) -> ScanGeometry:
@@ -218,6 +250,52 @@ class NiftiScan:
         """Pick a random voxel inside the volume with just enough margin for one patch."""
         min_idx, max_idx = self._center_bounds_for_full_patch(patch_vox)
         return np.array([rng.integers(low=int(lo), high=int(hi) + 1) for lo, hi in zip(min_idx, max_idx)], dtype=np.int64)
+
+    def sample_prism_center_vox(self, rng: np.random.Generator, patch_vox: np.ndarray | None = None) -> np.ndarray:
+        """Sample a valid prism center, preferring TotalSegmentator body voxels when available."""
+        if len(self.body_center_candidates_vox) > 0:
+            idx = int(rng.integers(low=0, high=len(self.body_center_candidates_vox)))
+            return np.asarray(self.body_center_candidates_vox[idx], dtype=np.int64).copy()
+        resolved_patch_vox = self.patch_shape_vox if patch_vox is None else np.asarray(patch_vox, dtype=np.int64)
+        return self._sample_center(rng, resolved_patch_vox)
+
+    def sample_center_near_vox(
+        self,
+        rng: np.random.Generator,
+        anchor_center_vox: np.ndarray,
+        radius_mm: float,
+        patch_vox: np.ndarray | None = None,
+        max_attempts: int = 32,
+    ) -> np.ndarray:
+        """Sample a center near an anchor, preferring nearby body voxels when available."""
+        resolved_patch_vox = self.patch_shape_vox if patch_vox is None else np.asarray(patch_vox, dtype=np.int64)
+        min_idx, max_idx = self._center_bounds_for_full_patch(resolved_patch_vox)
+        anchor = np.asarray(anchor_center_vox, dtype=np.int64).reshape(3)
+        anchor = np.clip(anchor, min_idx, max_idx)
+        radius_mm = max(float(radius_mm), 0.0)
+
+        if len(self.body_center_candidates_vox) > 0 and len(self.body_center_candidates_pt) > 0 and radius_mm > 0.0:
+            anchor_pt = voxel_points_to_world(anchor.astype(np.float32), self.affine)[0]
+            dist_mm = np.linalg.norm(self.body_center_candidates_pt - anchor_pt[np.newaxis, :], axis=1)
+            nearby = np.flatnonzero((dist_mm > 1e-3) & (dist_mm <= radius_mm))
+            if len(nearby) > 0:
+                idx = int(nearby[int(rng.integers(low=0, high=len(nearby)))])
+                return np.asarray(self.body_center_candidates_vox[idx], dtype=np.int64).copy()
+
+        for _ in range(max(1, int(max_attempts))):
+            direction = rng.normal(loc=0.0, scale=1.0, size=3)
+            norm = float(np.linalg.norm(direction))
+            if norm <= 1e-6:
+                continue
+            direction = direction / norm
+            radius = radius_mm * float(rng.random() ** (1.0 / 3.0))
+            delta_mm = direction * radius
+            delta_vox = (self.affine_linear_inv @ np.asarray(delta_mm, dtype=np.float32)).astype(np.float32, copy=False)
+            center = anchor + np.rint(delta_vox).astype(np.int64)
+            center = np.clip(center, min_idx, max_idx)
+            if np.any(center != anchor):
+                return center
+        return self.sample_prism_center_vox(rng, patch_vox=resolved_patch_vox)
 
     def _center_bounds_for_full_patch(self, patch_vox: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         """Return per-axis center bounds that keep a full patch inside the scan."""
@@ -307,7 +385,7 @@ class NiftiScan:
         sampling_radius_mm = max(sampling_radius_mm, 0.0)
 
         if subset_center_vox is None:
-            prism_center = self._sample_center(rng, patch_vox)
+            prism_center = self.sample_prism_center_vox(rng, patch_vox=patch_vox)
         else:
             prism_center = np.asarray(subset_center_vox, dtype=np.int64)
             if prism_center.shape != (3,):
@@ -376,10 +454,83 @@ class NiftiScan:
             "w_min": float(w_min),
             "w_max": float(w_max),
             "sampling_radius_mm": float(sampling_radius_mm),
+            "body_sampling_source": str(self.body_sampling_source),
         }
 
 
-def load_nifti_scan(record: ScanRecord | dict[str, Any], base_patch_mm: float) -> tuple[NiftiScan, str]:
+def _stable_seed_from_text(text: str) -> int:
+    digest = hashlib.sha1(text.encode("utf-8")).digest()
+    return int.from_bytes(digest[:8], byteorder="little", signed=False)
+
+
+def _resolve_body_center_candidates(
+    *,
+    series_path: str,
+    reference_shape: tuple[int, int, int],
+    reference_affine: np.ndarray,
+    patch_vox: np.ndarray,
+) -> tuple[np.ndarray | None, str]:
+    """Build a small set of valid body-center candidates from a TotalSegmentator volume."""
+    ts_path = resolve_totalseg_total_ct_path(series_path)
+    if not ts_path:
+        return None, ""
+
+    try:
+        raw = nib.load(ts_path)
+        try:
+            img = nib.as_closest_canonical(raw)
+        except Exception:
+            img = raw
+        seg = np.asarray(img.dataobj)
+        if seg.ndim == 4:
+            seg = seg[..., 0]
+        if seg.ndim != 3:
+            return None, ts_path
+        if tuple(int(v) for v in seg.shape) != tuple(int(v) for v in reference_shape):
+            return None, ts_path
+        if not np.allclose(np.asarray(img.affine, dtype=np.float32), np.asarray(reference_affine, dtype=np.float32), atol=1e-2, rtol=1e-3):
+            return None, ts_path
+
+        patch = np.asarray(patch_vox, dtype=np.int64).reshape(3)
+        shape = np.asarray(reference_shape, dtype=np.int64).reshape(3)
+        half_patch = (patch // 2).astype(np.int64)
+        min_idx = half_patch
+        max_idx = shape - patch + half_patch
+        if np.any(max_idx < min_idx):
+            return None, ts_path
+
+        lower = tuple(int(v) for v in min_idx.tolist())
+        upper = tuple(int(v) + 1 for v in max_idx.tolist())
+        cropped = seg[lower[0]:upper[0], lower[1]:upper[1], lower[2]:upper[2]]
+        if cropped.size == 0:
+            return None, ts_path
+
+        centers: np.ndarray | None = None
+        for step in _TOTALSEG_BODY_GRID_STEPS:
+            view = np.asarray(cropped[::step, ::step, ::step] > 0, dtype=bool)
+            coords = np.argwhere(view)
+            if coords.size == 0:
+                continue
+            centers = min_idx[np.newaxis, :] + coords.astype(np.int64, copy=False) * int(step)
+            break
+        if centers is None or len(centers) == 0:
+            return None, ts_path
+
+        if len(centers) > _TOTALSEG_BODY_MAX_CANDIDATES:
+            rng = np.random.default_rng(_stable_seed_from_text(series_path))
+            choice = rng.choice(len(centers), size=_TOTALSEG_BODY_MAX_CANDIDATES, replace=False)
+            centers = centers[np.asarray(choice, dtype=np.int64)]
+        return np.asarray(centers, dtype=np.int32), ts_path
+    except Exception:
+        return None, ts_path
+
+
+def load_nifti_scan(
+    record: ScanRecord | dict[str, Any],
+    base_patch_mm: float,
+    *,
+    use_totalseg_body_centers: bool = True,
+) -> tuple[NiftiScan, str]:
     """Load a scan object from a record; resolve NIfTI path lazily if needed."""
     if isinstance(record, ScanRecord):
         rec = record
@@ -407,6 +558,19 @@ def load_nifti_scan(record: ScanRecord | dict[str, Any], base_patch_mm: float) -
         if np.any(spacing <= 0):
             raise NiftiLoadError(f"Invalid spacing for {effective_path}: {spacing}")
         median, std, p_low, p_high = compute_robust_stats(data)
+        patch_vox = np.maximum(np.ceil(float(base_patch_mm) / np.clip(spacing, 1e-6, None)).astype(np.int64), 1)
+        geometry = infer_scan_geometry(data.shape, spacing)
+        patch_vox[int(geometry.thin_axis)] = 1
+        body_center_candidates_vox, body_sampling_source = (
+            _resolve_body_center_candidates(
+                series_path=series_path,
+                reference_shape=tuple(int(v) for v in data.shape),
+                reference_affine=np.asarray(img.affine, dtype=np.float32),
+                patch_vox=patch_vox,
+            )
+            if use_totalseg_body_centers
+            else (None, "")
+        )
         scan = NiftiScan(
             data=data,
             affine=np.asarray(img.affine, dtype=np.float32),
@@ -417,6 +581,8 @@ def load_nifti_scan(record: ScanRecord | dict[str, Any], base_patch_mm: float) -
             robust_std=std,
             robust_low=p_low,
             robust_high=p_high,
+            body_center_candidates_vox=body_center_candidates_vox,
+            body_sampling_source=body_sampling_source,
         )
         return scan, effective_path
     except (NiftiResolutionError, NiftiLoadError):

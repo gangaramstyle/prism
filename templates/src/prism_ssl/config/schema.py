@@ -45,6 +45,11 @@ class DataConfig:
     warm_pool_size: int = 16
     visits_per_scan: int = 100
     max_prefetch_replacements: int = 2
+    use_totalseg_body_centers: bool = True
+    pair_local_curriculum_steps: int = 200_000
+    pair_local_final_prob: float = 0.35
+    pair_local_start_radius_mm: float = 192.0
+    pair_local_end_radius_mm: float = 64.0
     use_local_scratch: bool = True
     strict_background_errors: bool = False
     broken_abort_ratio: float = 0.10
