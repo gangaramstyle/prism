@@ -14,8 +14,8 @@ from prism_ssl.data.preflight import (
     voxel_points_to_world,
     world_points_to_voxel,
 )
-from prism_ssl.data.sample_contract import build_dataset_item, compute_pair_targets, tensorize_sample_view
-from prism_ssl.data.sharded_dataset import BrokenScanRateExceeded, ShardedScanDataset
+from prism_ssl.data.sample_contract import build_dataset_item, build_study4_dataset_item, compute_pair_targets, tensorize_sample_view
+from prism_ssl.data.sharded_dataset import BrokenScanRateExceeded, ShardedScanDataset, StudyShardedScanDataset
 
 __all__ = [
     "build_scan_id",
@@ -35,6 +35,8 @@ __all__ = [
     "tensorize_sample_view",
     "compute_pair_targets",
     "build_dataset_item",
+    "build_study4_dataset_item",
     "BrokenScanRateExceeded",
     "ShardedScanDataset",
+    "StudyShardedScanDataset",
 ]

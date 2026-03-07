@@ -30,8 +30,13 @@ def format_step_log(
     broken_ratio: float,
     ts_loaded_ratio: float = 0.0,
     ts_view_ratio: float = 0.0,
+    loss_mim_register: float | None = None,
+    loss_mim_cross: float | None = None,
+    cross_valid_ratio: float | None = None,
+    mim_register_weight: float | None = None,
+    mim_cross_weight: float | None = None,
 ) -> str:
-    return (
+    line = (
         f"[train] step={step} "
         f"loss={sci(total_loss)} dist={sci(loss_distance)} dist_acc={distance_acc:.3f} "
         f"shared_acc={distance_acc_shared:.3f} wc_acc={window_acc_wc:.3f} ww_acc={window_acc_ww:.3f} "
@@ -42,3 +47,14 @@ def format_step_log(
         f"post_ms={post_step_ms:.1f} step_tput={step_throughput:.1f} "
         f"eff_tput={throughput_effective:.1f} broken_ratio={broken_ratio:.4f}"
     )
+    if loss_mim_register is not None:
+        line += f" mim_reg={sci(loss_mim_register)}"
+    if loss_mim_cross is not None:
+        line += f" mim_cross={sci(loss_mim_cross)}"
+    if cross_valid_ratio is not None:
+        line += f" cross_valid={cross_valid_ratio:.3f}"
+    if mim_register_weight is not None:
+        line += f" w_mim_reg={mim_register_weight:.4f}"
+    if mim_cross_weight is not None:
+        line += f" w_mim_cross={mim_cross_weight:.4f}"
+    return line

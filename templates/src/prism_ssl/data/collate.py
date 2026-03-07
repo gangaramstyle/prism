@@ -8,6 +8,45 @@ import torch
 
 
 def collate_prism_batch(batch: list[dict[str, Any]]) -> dict[str, Any]:
+    if batch and "patches_views" in batch[0]:
+        series_ids_flat = []
+        for item in batch:
+            series_ids_flat.extend([str(item["series_id_x"]), str(item["series_id_y"]), str(item["series_id_x"]), str(item["series_id_y"])])
+        series_to_label: dict[str, int] = {}
+        series_labels_flat = []
+        for sid in series_ids_flat:
+            if sid not in series_to_label:
+                series_to_label[sid] = len(series_to_label)
+            series_labels_flat.append(series_to_label[sid])
+        series_labels_views = torch.tensor(series_labels_flat, dtype=torch.long).view(len(batch), 4)
+
+        return {
+            "patches_views": torch.stack([b["patches_views"] for b in batch]),
+            "positions_views": torch.stack([b["positions_views"] for b in batch]),
+            "prism_center_pt_views": torch.stack([b["prism_center_pt_views"] for b in batch]),
+            "window_params_views": torch.stack([b["window_params_views"] for b in batch]),
+            "center_delta_mm_x": torch.stack([b["center_delta_mm_x"] for b in batch]),
+            "center_distance_mm_x": torch.stack([b["center_distance_mm_x"] for b in batch]),
+            "window_delta_x": torch.stack([b["window_delta_x"] for b in batch]),
+            "center_delta_mm_y": torch.stack([b["center_delta_mm_y"] for b in batch]),
+            "center_distance_mm_y": torch.stack([b["center_distance_mm_y"] for b in batch]),
+            "window_delta_y": torch.stack([b["window_delta_y"] for b in batch]),
+            "study_id": [str(b["study_id"]) for b in batch],
+            "series_id_x": [str(b["series_id_x"]) for b in batch],
+            "series_id_y": [str(b["series_id_y"]) for b in batch],
+            "series_label_views": series_labels_views,
+            "cross_valid": torch.tensor([bool(b["cross_valid"]) for b in batch], dtype=torch.bool),
+            "cross_mode": [str(b["cross_mode"]) for b in batch],
+            "replacement_completed_count_delta": int(sum(int(b.get("replacement_completed_count_delta", 0)) for b in batch)),
+            "replacement_failed_count_delta": int(sum(int(b.get("replacement_failed_count_delta", 0)) for b in batch)),
+            "replacement_wait_time_ms_delta": float(sum(float(b.get("replacement_wait_time_ms_delta", 0.0)) for b in batch)),
+            "attempted_series_delta": int(sum(int(b.get("attempted_series_delta", 0)) for b in batch)),
+            "broken_series_delta": int(sum(int(b.get("broken_series_delta", 0)) for b in batch)),
+            "loaded_series_delta": int(sum(int(b.get("loaded_series_delta", 0)) for b in batch)),
+            "loaded_with_body_delta": int(sum(int(b.get("loaded_with_body_delta", 0)) for b in batch)),
+            "sampled_body_center_views_delta": int(sum(int(b.get("sampled_body_center_views_delta", 0)) for b in batch)),
+        }
+
     series_ids = [str(b["series_id"]) for b in batch]
     series_to_label: dict[str, int] = {}
     series_labels = []
