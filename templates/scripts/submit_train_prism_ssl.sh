@@ -8,6 +8,15 @@ MEM="${MEM:-128G}"
 TIME_LIMIT="${TIME_LIMIT:-73:00:00}"
 DRY_RUN="${DRY_RUN:-0}"
 
+case "${PARTITION}" in
+  dgx-b200-mig45|mig45)
+    PARTITION="b200-mig45"
+    ;;
+  dgx-b200-mig90|mig90)
+    PARTITION="b200-mig90"
+    ;;
+esac
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="${REPO_ROOT:-$(cd "${SCRIPT_DIR}/.." && pwd)}"
 JOB_SCRIPT="${SCRIPT_DIR}/job_train_prism_ssl.sh"
