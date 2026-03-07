@@ -324,6 +324,7 @@ def run_training(config: RunConfig) -> dict[str, Any]:
             final_step = step + 1
             pair_patches_this_step = int(patches_a.shape[0] * patches_a.shape[1])
             patch_views_this_step = pair_patches_this_step * 2
+            sample_views_this_step = int(patches_a.shape[0] * 2)
 
             labels = batch["series_label"]
             same = labels[:, None] == labels[None, :]
@@ -395,11 +396,15 @@ def run_training(config: RunConfig) -> dict[str, Any]:
             throughput_effective = accum.update_step(
                 elapsed_wall_s=time.perf_counter() - run_wall_t0,
                 patch_views_this_step=patch_views_this_step,
+                sample_views_this_step=sample_views_this_step,
                 replacement_completed_delta=batch["replacement_completed_count_delta"],
                 replacement_failed_delta=batch["replacement_failed_count_delta"],
                 replacement_wait_ms_delta=batch["replacement_wait_time_ms_delta"],
                 attempted_series_delta=batch["attempted_series_delta"],
                 broken_series_delta=batch["broken_series_delta"],
+                loaded_series_delta=batch["loaded_series_delta"],
+                loaded_with_body_delta=batch["loaded_with_body_delta"],
+                sampled_body_center_views_delta=batch["sampled_body_center_views_delta"],
             )
 
             if final_step % config.train.log_every == 0:
@@ -434,6 +439,8 @@ def run_training(config: RunConfig) -> dict[str, Any]:
                         step_throughput=step_throughput,
                         throughput_effective=throughput_effective,
                         broken_ratio=accum.broken_ratio,
+                        ts_loaded_ratio=accum.loaded_with_body_ratio,
+                        ts_view_ratio=accum.sampled_body_center_view_ratio,
                     ),
                     flush=True,
                 )
@@ -480,6 +487,11 @@ def run_training(config: RunConfig) -> dict[str, Any]:
                     "data/replacement_completed_count": accum.replacement_completed_count,
                     "data/replacement_failed_count": accum.replacement_failed_count,
                     "data/replacement_wait_time_ms_total": accum.replacement_wait_time_ms_total,
+                    "data/loaded_series": accum.loaded_series_count,
+                    "data/loaded_series_with_ts_body": accum.loaded_with_body_series_count,
+                    "data/loaded_series_with_ts_body_ratio": accum.loaded_with_body_ratio,
+                    "data/sampled_body_center_views": accum.sampled_body_center_view_count,
+                    "data/sampled_body_center_view_ratio": accum.sampled_body_center_view_ratio,
                     "train/global_step": final_step,
                 }
                 if run is not None:
@@ -518,6 +530,11 @@ def run_training(config: RunConfig) -> dict[str, Any]:
         result["attempted_series"] = int(accum.attempted_series_count)
         result["broken_series"] = int(accum.broken_series_count)
         result["broken_ratio"] = float(accum.broken_ratio)
+        result["loaded_series"] = int(accum.loaded_series_count)
+        result["loaded_series_with_ts_body"] = int(accum.loaded_with_body_series_count)
+        result["loaded_series_with_ts_body_ratio"] = float(accum.loaded_with_body_ratio)
+        result["sampled_body_center_views"] = int(accum.sampled_body_center_view_count)
+        result["sampled_body_center_view_ratio"] = float(accum.sampled_body_center_view_ratio)
         result["broken_series_log_path"] = str(broken_log_path)
         result["replacement_completed_count"] = int(accum.replacement_completed_count)
         result["replacement_failed_count"] = int(accum.replacement_failed_count)
@@ -537,6 +554,8 @@ def run_training(config: RunConfig) -> dict[str, Any]:
                 run.summary["final_status"] = result["status"]
                 run.summary["final_step"] = result["final_step"]
                 run.summary["broken_ratio"] = result["broken_ratio"]
+                run.summary["loaded_series_with_ts_body_ratio"] = result["loaded_series_with_ts_body_ratio"]
+                run.summary["sampled_body_center_view_ratio"] = result["sampled_body_center_view_ratio"]
                 run.summary["throughput_effective_patches_per_sec"] = result[
                     "throughput_effective_patches_per_sec"
                 ]

@@ -54,6 +54,8 @@ def build_dataset_item(
     replacement_wait_time_ms_delta: float = 0.0,
     attempted_series_delta: int = 0,
     broken_series_delta: int = 0,
+    loaded_series_delta: int = 0,
+    loaded_with_body_delta: int = 0,
     replacement_requested: bool = False,
 ) -> dict[str, Any]:
     """Build one dataset sample dict matching the collate contract."""
@@ -84,5 +86,9 @@ def build_dataset_item(
         "replacement_wait_time_ms_delta": float(replacement_wait_time_ms_delta),
         "attempted_series_delta": int(attempted_series_delta),
         "broken_series_delta": int(broken_series_delta),
+        "loaded_series_delta": int(loaded_series_delta),
+        "loaded_with_body_delta": int(loaded_with_body_delta),
+        "sampled_body_center_a": bool(result_a.get("sampled_body_center", False)),
+        "sampled_body_center_b": bool(result_b.get("sampled_body_center", False)),
         "replacement_requested": bool(replacement_requested),
     }

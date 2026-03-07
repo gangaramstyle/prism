@@ -253,11 +253,20 @@ class NiftiScan:
 
     def sample_prism_center_vox(self, rng: np.random.Generator, patch_vox: np.ndarray | None = None) -> np.ndarray:
         """Sample a valid prism center, preferring TotalSegmentator body voxels when available."""
+        center, _ = self.sample_prism_center_with_source(rng, patch_vox=patch_vox)
+        return center
+
+    def sample_prism_center_with_source(
+        self,
+        rng: np.random.Generator,
+        patch_vox: np.ndarray | None = None,
+    ) -> tuple[np.ndarray, bool]:
+        """Sample a valid prism center and report whether it came from the TS body prior."""
         if len(self.body_center_candidates_vox) > 0:
             idx = int(rng.integers(low=0, high=len(self.body_center_candidates_vox)))
-            return np.asarray(self.body_center_candidates_vox[idx], dtype=np.int64).copy()
+            return np.asarray(self.body_center_candidates_vox[idx], dtype=np.int64).copy(), True
         resolved_patch_vox = self.patch_shape_vox if patch_vox is None else np.asarray(patch_vox, dtype=np.int64)
-        return self._sample_center(rng, resolved_patch_vox)
+        return self._sample_center(rng, resolved_patch_vox), False
 
     def sample_center_near_vox(
         self,
@@ -268,6 +277,24 @@ class NiftiScan:
         max_attempts: int = 32,
     ) -> np.ndarray:
         """Sample a center near an anchor, preferring nearby body voxels when available."""
+        center, _ = self.sample_center_near_with_source(
+            rng,
+            anchor_center_vox,
+            radius_mm=radius_mm,
+            patch_vox=patch_vox,
+            max_attempts=max_attempts,
+        )
+        return center
+
+    def sample_center_near_with_source(
+        self,
+        rng: np.random.Generator,
+        anchor_center_vox: np.ndarray,
+        radius_mm: float,
+        patch_vox: np.ndarray | None = None,
+        max_attempts: int = 32,
+    ) -> tuple[np.ndarray, bool]:
+        """Sample a center near an anchor and report whether it came from the TS body prior."""
         resolved_patch_vox = self.patch_shape_vox if patch_vox is None else np.asarray(patch_vox, dtype=np.int64)
         min_idx, max_idx = self._center_bounds_for_full_patch(resolved_patch_vox)
         anchor = np.asarray(anchor_center_vox, dtype=np.int64).reshape(3)
@@ -280,7 +307,7 @@ class NiftiScan:
             nearby = np.flatnonzero((dist_mm > 1e-3) & (dist_mm <= radius_mm))
             if len(nearby) > 0:
                 idx = int(nearby[int(rng.integers(low=0, high=len(nearby)))])
-                return np.asarray(self.body_center_candidates_vox[idx], dtype=np.int64).copy()
+                return np.asarray(self.body_center_candidates_vox[idx], dtype=np.int64).copy(), True
 
         for _ in range(max(1, int(max_attempts))):
             direction = rng.normal(loc=0.0, scale=1.0, size=3)
@@ -294,8 +321,15 @@ class NiftiScan:
             center = anchor + np.rint(delta_vox).astype(np.int64)
             center = np.clip(center, min_idx, max_idx)
             if np.any(center != anchor):
-                return center
-        return self.sample_prism_center_vox(rng, patch_vox=resolved_patch_vox)
+                return center, False
+        return self.sample_prism_center_with_source(rng, patch_vox=resolved_patch_vox)
+
+    def contains_body_center_vox(self, center_vox: np.ndarray) -> bool:
+        """Check whether a voxel center matches one of the TS body candidates exactly."""
+        if len(self.body_center_candidates_vox) == 0:
+            return False
+        center = np.asarray(center_vox, dtype=np.int32).reshape(1, 3)
+        return bool(np.any(np.all(self.body_center_candidates_vox == center, axis=1)))
 
     def _center_bounds_for_full_patch(self, patch_vox: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         """Return per-axis center bounds that keep a full patch inside the scan."""
@@ -372,6 +406,7 @@ class NiftiScan:
         sampling_radius_mm: float | None = None,
         subset_center_vox: np.ndarray | None = None,
         patch_centers_vox: np.ndarray | None = None,
+        sampled_body_center: bool | None = None,
         target_patch_size: int | None = None,
     ) -> dict[str, Any]:
         resolved_patch_size = int(self.target_patch_size if target_patch_size is None else target_patch_size)
@@ -385,12 +420,17 @@ class NiftiScan:
         sampling_radius_mm = max(sampling_radius_mm, 0.0)
 
         if subset_center_vox is None:
-            prism_center = self.sample_prism_center_vox(rng, patch_vox=patch_vox)
+            prism_center, center_from_body = self.sample_prism_center_with_source(rng, patch_vox=patch_vox)
         else:
             prism_center = np.asarray(subset_center_vox, dtype=np.int64)
             if prism_center.shape != (3,):
                 raise ValueError(f"subset_center_vox must have shape (3,), got {prism_center.shape}")
             prism_center = np.clip(prism_center, min_center_idx, max_center_idx)
+            center_from_body = (
+                bool(sampled_body_center)
+                if sampled_body_center is not None
+                else self.contains_body_center_vox(prism_center)
+            )
 
         if patch_centers_vox is None:
             centers = []
@@ -455,6 +495,7 @@ class NiftiScan:
             "w_max": float(w_max),
             "sampling_radius_mm": float(sampling_radius_mm),
             "body_sampling_source": str(self.body_sampling_source),
+            "sampled_body_center": bool(center_from_body),
         }
 
 

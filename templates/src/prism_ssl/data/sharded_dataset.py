@@ -53,6 +53,8 @@ class _ReplacementEvents:
     wait_ms: float = 0.0
     attempted_delta: int = 0
     broken_delta: int = 0
+    loaded_delta: int = 0
+    loaded_with_body_delta: int = 0
 
 
 class WarmPool:
@@ -101,8 +103,12 @@ class WarmPool:
 
         self.attempted_series_count = 0
         self.broken_series_count = 0
+        self.loaded_series_count = 0
+        self.loaded_with_body_series_count = 0
         self._attempted_delta_pending = 0
         self._broken_delta_pending = 0
+        self._loaded_delta_pending = 0
+        self._loaded_with_body_delta_pending = 0
 
         self._broken_series_names: list[str] = []
         self._broken_series_seen: set[str] = set()
@@ -163,6 +169,20 @@ class WarmPool:
         self._attempted_delta_pending = 0
         self._broken_delta_pending = 0
         return attempted_delta, broken_delta
+
+    def _drain_load_deltas(self) -> tuple[int, int]:
+        loaded_delta = self._loaded_delta_pending
+        loaded_with_body_delta = self._loaded_with_body_delta_pending
+        self._loaded_delta_pending = 0
+        self._loaded_with_body_delta_pending = 0
+        return loaded_delta, loaded_with_body_delta
+
+    def _note_loaded(self, scan: Any) -> None:
+        self.loaded_series_count += 1
+        self._loaded_delta_pending += 1
+        if str(getattr(scan, "body_sampling_source", "")):
+            self.loaded_with_body_series_count += 1
+            self._loaded_with_body_delta_pending += 1
 
     def _slot_scratch_dir(self, slot_idx: int) -> Path | None:
         if self._worker_scratch is None:
@@ -240,6 +260,7 @@ class WarmPool:
         except Exception as exc:
             self._note_broken(record.series_path, exc, stage="initial_load")
             return False
+        self._note_loaded(scan)
 
         self._slots.append(
             {
@@ -332,6 +353,7 @@ class WarmPool:
             slot["replacing"] = False
             slot["replacement_record"] = None
             slot["replacement_scan_id"] = None
+            self._note_loaded(scan)
 
             events.completed += 1
             self.replacement_completed_count += 1
@@ -344,6 +366,9 @@ class WarmPool:
         attempted_delta, broken_delta = self._drain_health_deltas()
         events.attempted_delta = attempted_delta
         events.broken_delta = broken_delta
+        loaded_delta, loaded_with_body_delta = self._drain_load_deltas()
+        events.loaded_delta = loaded_delta
+        events.loaded_with_body_delta = loaded_with_body_delta
         return events
 
     def sample(self, rng: random.Random) -> tuple[int, dict[str, Any], bool] | None:
@@ -423,28 +448,34 @@ class ShardedScanDataset(IterableDataset):
         ) * progress
         return float(local_prob), float(max(radius_mm, 0.0))
 
-    def _sample_pair_center_vox(self, scan: Any, center_a_vox: np.ndarray, seed: int, sample_index: int) -> np.ndarray:
+    def _sample_pair_center_vox(
+        self,
+        scan: Any,
+        center_a_vox: np.ndarray,
+        seed: int,
+        sample_index: int,
+    ) -> tuple[np.ndarray, bool]:
         """Sample paired-view centers with a slow global-to-local curriculum."""
         rng = np.random.default_rng(int(seed))
         center_a = np.asarray(center_a_vox, dtype=np.int64).reshape(3)
         local_prob, local_radius_mm = self._pair_curriculum(sample_index)
 
         if local_prob > 0.0 and float(rng.random()) < local_prob:
-            local_center = scan.sample_center_near_vox(
+            local_center, local_from_body = scan.sample_center_near_with_source(
                 rng,
                 center_a,
                 radius_mm=local_radius_mm,
                 patch_vox=scan.patch_shape_vox,
             )
             if np.any(local_center != center_a):
-                return local_center
+                return local_center, bool(local_from_body)
 
         for _ in range(32):
-            center_b = scan.sample_prism_center_vox(rng, patch_vox=scan.patch_shape_vox)
+            center_b, center_b_from_body = scan.sample_prism_center_with_source(rng, patch_vox=scan.patch_shape_vox)
             if np.any(center_b != center_a):
-                return center_b
+                return center_b, bool(center_b_from_body)
 
-        return scan.sample_center_near_vox(
+        return scan.sample_center_near_with_source(
             rng,
             center_a,
             radius_mm=max(local_radius_mm, self.base_patch_mm * 2.0),
@@ -526,7 +557,7 @@ class ShardedScanDataset(IterableDataset):
                     scan = slot["scan"]
                     if self.pair_views:
                         result_a = scan.train_sample(self.n_patches, seed=sample_seed * 2)
-                        pair_center_b_vox = self._sample_pair_center_vox(
+                        pair_center_b_vox, pair_center_b_from_body = self._sample_pair_center_vox(
                             scan,
                             np.asarray(result_a["prism_center_vox"], dtype=np.int64),
                             seed=sample_seed * 2 + 1,
@@ -536,6 +567,7 @@ class ShardedScanDataset(IterableDataset):
                             self.n_patches,
                             seed=sample_seed * 2 + 3,
                             subset_center_vox=pair_center_b_vox,
+                            sampled_body_center=pair_center_b_from_body,
                         )
                     else:
                         result_a = scan.train_sample(self.n_patches, seed=sample_seed)
@@ -565,6 +597,8 @@ class ShardedScanDataset(IterableDataset):
                     replacement_wait_time_ms_delta=events.wait_ms,
                     attempted_series_delta=events.attempted_delta,
                     broken_series_delta=events.broken_delta,
+                    loaded_series_delta=events.loaded_delta,
+                    loaded_with_body_delta=events.loaded_with_body_delta,
                     replacement_requested=replacement_requested,
                 )
         finally:

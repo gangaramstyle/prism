@@ -40,5 +40,10 @@ def collate_prism_batch(batch: list[dict[str, Any]]) -> dict[str, Any]:
         "replacement_wait_time_ms_delta": float(sum(float(b.get("replacement_wait_time_ms_delta", 0.0)) for b in batch)),
         "attempted_series_delta": int(sum(int(b.get("attempted_series_delta", 0)) for b in batch)),
         "broken_series_delta": int(sum(int(b.get("broken_series_delta", 0)) for b in batch)),
+        "loaded_series_delta": int(sum(int(b.get("loaded_series_delta", 0)) for b in batch)),
+        "loaded_with_body_delta": int(sum(int(b.get("loaded_with_body_delta", 0)) for b in batch)),
+        "sampled_body_center_views_delta": int(
+            sum(int(bool(b.get("sampled_body_center_a", False))) + int(bool(b.get("sampled_body_center_b", False))) for b in batch)
+        ),
     }
     return out
