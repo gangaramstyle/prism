@@ -33,6 +33,7 @@ cleanup_tmp() {
 trap cleanup_tmp EXIT
 
 SUMMARY_PATH="results/train/prism_ssl_${SLURM_JOB_ID}.json"
+CONFIG_PATH="${CONFIG_PATH:-configs/baseline.yaml}"
 CATALOG_PATH="${CATALOG_PATH:-}"
 MODEL_NAME="${MODEL_NAME:-}"
 BATCH_SIZE="${BATCH_SIZE:-}"
@@ -52,7 +53,7 @@ print(f"torch={torch.__version__} cuda_build={torch.version.cuda} gpu={torch.cud
 PY
 
 TRAIN_ARGS=(
-  --config configs/baseline.yaml
+  --config "$CONFIG_PATH"
   --wandb-mode online
   --tmp-run-dir "$TMP_BASE"
   --local-ckpt-dir "$TMP_BASE/checkpoints/<run_id>"
