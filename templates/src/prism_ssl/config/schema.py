@@ -70,7 +70,7 @@ class LossConfig:
 @dataclass
 class TrainConfig:
     batch_size: int = 32
-    max_steps: int = 50_000
+    max_steps: int = 2_000_000
     log_every: int = 100
     lr: float = 1.0e-4
     weight_decay: float = 1.0e-2

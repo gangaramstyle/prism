@@ -36,6 +36,7 @@ SUMMARY_PATH="results/train/prism_ssl_${SLURM_JOB_ID}.json"
 CATALOG_PATH="${CATALOG_PATH:-}"
 MODEL_NAME="${MODEL_NAME:-}"
 BATCH_SIZE="${BATCH_SIZE:-}"
+MAX_STEPS="${MAX_STEPS:-}"
 LR="${LR:-}"
 N_PATCHES="${N_PATCHES:-}"
 WORKERS="${WORKERS:-}"
@@ -66,6 +67,9 @@ if [[ -n "$MODEL_NAME" ]]; then
 fi
 if [[ -n "$BATCH_SIZE" ]]; then
   TRAIN_ARGS+=(--batch-size "$BATCH_SIZE")
+fi
+if [[ -n "$MAX_STEPS" ]]; then
+  TRAIN_ARGS+=(--max-steps "$MAX_STEPS")
 fi
 if [[ -n "$LR" ]]; then
   TRAIN_ARGS+=(--lr "$LR")

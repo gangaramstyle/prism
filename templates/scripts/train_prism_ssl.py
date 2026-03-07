@@ -21,6 +21,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--catalog-path", type=str, default=None)
     p.add_argument("--n-patches", type=int, default=None)
     p.add_argument("--batch-size", type=int, default=None)
+    p.add_argument("--max-steps", type=int, default=None)
     p.add_argument("--lr", type=float, default=None)
     p.add_argument("--workers", type=int, default=None)
     p.add_argument("--warm-pool-size", type=int, default=None)
@@ -83,6 +84,7 @@ def main() -> int:
         "data.catalog_path": args.catalog_path,
         "data.n_patches": args.n_patches,
         "train.batch_size": args.batch_size,
+        "train.max_steps": args.max_steps,
         "train.lr": args.lr,
         "data.workers": args.workers,
         "data.warm_pool_size": args.warm_pool_size,
