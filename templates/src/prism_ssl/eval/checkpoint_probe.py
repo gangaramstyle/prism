@@ -470,6 +470,7 @@ def sample_study4_examples(
             {
                 "view_name": "a",
                 "series_id": record_x["series_id"],
+                "modality": record_x["modality"],
                 "series_path": record_x["series_path"],
                 "series_description": str(row_x.get("series_description", "")),
                 "series_label_text": _series_label_text(row_x),
@@ -480,6 +481,7 @@ def sample_study4_examples(
             {
                 "view_name": "ap",
                 "series_id": record_y["series_id"],
+                "modality": record_y["modality"],
                 "series_path": record_y["series_path"],
                 "series_description": str(row_y.get("series_description", "")),
                 "series_label_text": _series_label_text(row_y),
@@ -490,6 +492,7 @@ def sample_study4_examples(
             {
                 "view_name": "b",
                 "series_id": record_x["series_id"],
+                "modality": record_x["modality"],
                 "series_path": record_x["series_path"],
                 "series_description": str(row_x.get("series_description", "")),
                 "series_label_text": _series_label_text(row_x),
@@ -500,6 +503,7 @@ def sample_study4_examples(
             {
                 "view_name": "bp",
                 "series_id": record_y["series_id"],
+                "modality": record_y["modality"],
                 "series_path": record_y["series_path"],
                 "series_description": str(row_y.get("series_description", "")),
                 "series_label_text": _series_label_text(row_y),
@@ -671,6 +675,7 @@ def build_eval_batch(examples: Sequence[Mapping[str, Any]], *, sample_offset: in
                     "view_name": str(view["view_name"]),
                     "study_id": str(example["study_id"]),
                     "series_id": str(view["series_id"]),
+                    "modality": str(view.get("modality", "")),
                     "series_path": str(view["series_path"]),
                     "series_description": str(view.get("series_description", "")),
                     "series_label_text": str(view.get("series_label_text", "")),
@@ -681,6 +686,8 @@ def build_eval_batch(examples: Sequence[Mapping[str, Any]], *, sample_offset: in
                     "cross_valid": bool(example["cross_valid"]),
                     "cross_mode": str(example["cross_mode"]),
                     "sampled_body_center": bool(result.get("sampled_body_center", False)),
+                    "native_acquisition_plane": str(result.get("native_acquisition_plane", "unknown")),
+                    "native_thin_axis_name": str(result.get("native_thin_axis_name", "")),
                     "prism_center_vox": tuple(int(v) for v in np.asarray(result["prism_center_vox"]).tolist()),
                     "prism_center_pt": tuple(float(v) for v in np.asarray(result["prism_center_pt"]).tolist()),
                 }

@@ -5,6 +5,7 @@ app = marimo.App(width="full")
 
 
 with app.setup:
+    import json
     import os
     import sys
     import time
@@ -36,6 +37,7 @@ with app.setup:
         within_between_cosine_gap,
     )
     from prism_ssl.eval.checkpoint_probe import VIEW_NAMES
+    from prism_ssl.validation import build_eval_batch_from_ct_validation_cache, load_ct_validation_cache
 
     alt.data_transformers.disable_max_rows()
 
@@ -132,20 +134,23 @@ Load a local checkpoint or a W&B run artifact, run deterministic `study4` sampli
 def _(Path, mo, os):
     default_catalog = os.environ.get(
         "CATALOG_PATH",
-        str(Path(__file__).resolve().parents[2] / "pmbb_catalog.csv.gz"),
+        str(Path(__file__).resolve().parents[1] / "data" / "pmbb_catalog.csv.gz"),
     )
+    default_validation_cache = os.environ.get("PRISM_VALIDATION_CACHE", "")
     checkpoint_path = mo.ui.text(label="Checkpoint path (optional)", value=os.environ.get("PRISM_NOTEBOOK_CKPT", ""))
     wandb_run_ref = mo.ui.text(label="W&B run URL (optional)", value=os.environ.get("PRISM_NOTEBOOK_WANDB_RUN", ""))
     wandb_force_refresh = mo.ui.checkbox(label="Refresh W&B artifacts", value=False)
-    catalog_path = mo.ui.text(label="Catalog path", value=default_catalog)
+    catalog_path = mo.ui.text(label="Catalog path (live sampling only)", value=default_catalog)
+    validation_cache_dir = mo.ui.text(label="Validation cache dir (optional)", value=default_validation_cache)
     device = mo.ui.dropdown(options=["auto", "cpu", "cuda"], value="auto", label="Device")
-    n_studies = mo.ui.slider(start=1, stop=128, step=1, value=32, label="Studies")
-    eval_batch_size = mo.ui.slider(start=1, stop=16, step=1, value=4, label="Eval batch size")
+    n_studies = mo.ui.slider(start=1, stop=512, step=1, value=32, label="Studies")
+    eval_batch_size = mo.ui.slider(start=1, stop=32, step=1, value=4, label="Eval batch size")
     seed = mo.ui.number(label="Seed", value=42, step=1)
     include_background_label_0 = mo.ui.checkbox(label="Include anatomy label 0", value=False)
     _source_note = mo.callout(
         "Provide either a local checkpoint path or a W&B run URL. Local paths take priority. "
-        "W&B artifacts are downloaded into session-local /tmp storage and removed when the notebook process exits.",
+        "W&B artifacts are downloaded into session-local /tmp storage and removed when the notebook process exits. "
+        "If a validation cache dir is set, the notebook reuses cached CT patch samples instead of live NIfTI sampling.",
         kind="info",
     )
 
@@ -154,7 +159,8 @@ def _(Path, mo, os):
             mo.md("## Controls"),
             _source_note,
             mo.hstack([checkpoint_path, wandb_run_ref]),
-            mo.hstack([catalog_path, wandb_force_refresh]),
+            mo.hstack([catalog_path, validation_cache_dir]),
+            mo.hstack([wandb_force_refresh]),
             mo.hstack([device, n_studies, eval_batch_size, seed, include_background_label_0]),
         ]
     )
@@ -166,6 +172,7 @@ def _(Path, mo, os):
         include_background_label_0,
         n_studies,
         seed,
+        validation_cache_dir,
         wandb_force_refresh,
         wandb_run_ref,
     )
@@ -347,14 +354,17 @@ def _(checkpoint_source, config, effective_eval_batch_size, effective_n_studies,
 @app.cell
 def _(
     F,
+    Path,
     VIEW_NAMES,
     build_eval_batch,
+    build_eval_batch_from_ct_validation_cache,
     catalog_path,
     config,
     cosine_similarity_matrix,
     effective_eval_batch_size,
     effective_n_studies,
     is_script_mode,
+    load_ct_validation_cache,
     masked_l1_per_view,
     modality_filter,
     model,
@@ -363,57 +373,117 @@ def _(
     seed,
     time,
     torch,
+    validation_cache_dir,
 ):
     mo.stop(
         str(config.data.sample_unit).strip().lower() != "study4",
         mo.callout("This notebook only supports `study4` checkpoints.", kind="warn"),
     )
 
-    _modalities = tuple(m.strip().upper() for m in str(modality_filter.value).split(",") if m.strip())
-    mo.stop(len(_modalities) == 0, mo.callout("Specify at least one modality.", kind="warn"))
+    _requested_modalities = tuple(m.strip().upper() for m in str(modality_filter.value).split(",") if m.strip())
+    _cache_dir_text = str(validation_cache_dir.value).strip()
+    if not _cache_dir_text:
+        mo.stop(len(_requested_modalities) == 0, mo.callout("Specify at least one modality.", kind="warn"))
 
+    _modalities = _requested_modalities
     _sampling_seconds = 0.0
+    _cache_load_seconds = 0.0
     _forward_seconds = 0.0
     _pack_seconds = 0.0
     _finalize_seconds = 0.0
     _target_studies = int(effective_n_studies)
-    _sample_progress_state = {"accepted": 0}
+    _cache = None
+    _examples = None
+    _data_source = "live_sampling"
 
-    _sampling_t0 = time.perf_counter()
-    with mo.status.progress_bar(
-        total=max(_target_studies, 1),
-        title="Sampling studies",
-        subtitle="Loading scans and drawing deterministic study4 views...",
-        completion_title="Sampling complete",
-        show_rate=True,
-        show_eta=True,
-        disabled=bool(is_script_mode),
-    ) as _sample_bar:
-
-        def _on_sampling_progress(event: dict[str, object]) -> None:
-            _accepted = int(event.get("accepted_examples", 0))
-            _visited = int(event.get("visited_studies", 0))
-            _total = int(event.get("total_candidates", 0))
-            _status = str(event.get("status", "running"))
-            _study_id = str(event.get("study_id", ""))
-            _delta = max(0, _accepted - int(_sample_progress_state["accepted"]))
-            _sample_progress_state["accepted"] = _accepted
-            _subtitle = (
-                f"accepted {_accepted}/{_target_studies} | visited {_visited}/{_total} candidates | "
-                f"status={_status}{f' | { _study_id }' if _study_id else ''}"
-            )
-            _sample_bar.update(increment=_delta, subtitle=_subtitle)
-
-        _examples = sample_study4_examples(
-            catalog_path.value,
-            config,
-            n_studies=_target_studies,
-            seed=int(seed.value),
-            modality_filter=_modalities,
-            progress=_on_sampling_progress,
+    if _cache_dir_text:
+        _cache_root = Path(_cache_dir_text).expanduser()
+        mo.stop(
+            not _cache_root.is_dir(),
+            mo.callout(f"Validation cache directory not found: {_cache_root}", kind="danger"),
         )
-    _sampling_seconds = float(time.perf_counter() - _sampling_t0)
-    mo.stop(len(_examples) == 0, mo.callout("No valid study4 examples could be sampled.", kind="danger"))
+        _cache_progress_state = {"percent": 0}
+        _cache_load_t0 = time.perf_counter()
+        with mo.status.progress_bar(
+            total=100,
+            title="Loading validation cache",
+            subtitle="Reading cached CT patch shards from disk...",
+            completion_title="Validation cache loaded",
+            show_rate=False,
+            show_eta=False,
+            disabled=bool(is_script_mode),
+        ) as _cache_bar:
+
+            def _on_cache_progress(event: dict[str, object]) -> None:
+                _stage = str(event.get("stage", "loading"))
+                _status = str(event.get("status", "running"))
+                _n_shards = max(int(event.get("n_shards", 0)), 1)
+                _loaded_shards = int(event.get("loaded_shards", 0))
+                if _stage == "metadata" and _status == "complete":
+                    _target_percent = 10
+                elif _stage == "shards":
+                    _target_percent = 10 + int(round(80.0 * (_loaded_shards / _n_shards)))
+                elif _stage == "finalize":
+                    _target_percent = 100
+                else:
+                    _target_percent = int(_cache_progress_state["percent"])
+                _delta = max(0, _target_percent - int(_cache_progress_state["percent"]))
+                _cache_progress_state["percent"] = _target_percent
+                _subtitle = (
+                    f"stage={_stage} status={_status}"
+                    f"{f' | shards {_loaded_shards}/{_n_shards}' if _stage == 'shards' else ''}"
+                )
+                _cache_bar.update(increment=_delta, subtitle=_subtitle)
+
+            _cache = load_ct_validation_cache(_cache_root, progress=_on_cache_progress)
+        _cache_load_seconds = float(time.perf_counter() - _cache_load_t0)
+        _available_studies = int(_cache["patches_views"].shape[0])
+        _selected_studies = min(_target_studies, _available_studies)
+        mo.stop(_selected_studies <= 0, mo.callout("Validation cache is empty.", kind="danger"))
+        _modalities = (
+            tuple(sorted({str(value).upper() for value in _cache["view_df"]["modality"].to_list()}))
+            if "modality" in _cache["view_df"].columns
+            else ("CT",)
+        ) or ("CT",)
+        _data_source = "validation_cache"
+    else:
+        _sample_progress_state = {"accepted": 0}
+        _sampling_t0 = time.perf_counter()
+        with mo.status.progress_bar(
+            total=max(_target_studies, 1),
+            title="Sampling studies",
+            subtitle="Loading scans and drawing deterministic study4 views...",
+            completion_title="Sampling complete",
+            show_rate=True,
+            show_eta=True,
+            disabled=bool(is_script_mode),
+        ) as _sample_bar:
+
+            def _on_sampling_progress(event: dict[str, object]) -> None:
+                _accepted = int(event.get("accepted_examples", 0))
+                _visited = int(event.get("visited_studies", 0))
+                _total = int(event.get("total_candidates", 0))
+                _status = str(event.get("status", "running"))
+                _study_id = str(event.get("study_id", ""))
+                _delta = max(0, _accepted - int(_sample_progress_state["accepted"]))
+                _sample_progress_state["accepted"] = _accepted
+                _subtitle = (
+                    f"accepted {_accepted}/{_target_studies} | visited {_visited}/{_total} candidates | "
+                    f"status={_status}{f' | { _study_id }' if _study_id else ''}"
+                )
+                _sample_bar.update(increment=_delta, subtitle=_subtitle)
+
+            _examples = sample_study4_examples(
+                catalog_path.value,
+                config,
+                n_studies=_target_studies,
+                seed=int(seed.value),
+                modality_filter=_modalities,
+                progress=_on_sampling_progress,
+            )
+        _sampling_seconds = float(time.perf_counter() - _sampling_t0)
+        mo.stop(len(_examples) == 0, mo.callout("No valid study4 examples could be sampled.", kind="danger"))
+        _selected_studies = int(len(_examples))
 
     _all_view_rows: list[dict[str, object]] = []
     _all_sample_rows: list[dict[str, object]] = []
@@ -422,7 +492,7 @@ def _(
     _supcon_chunks: list[torch.Tensor] = []
     _direction_chunks: list[torch.Tensor] = []
     _model_device = next(model.parameters()).device
-    _num_chunks = (len(_examples) + int(effective_eval_batch_size) - 1) // int(effective_eval_batch_size)
+    _num_chunks = (_selected_studies + int(effective_eval_batch_size) - 1) // int(effective_eval_batch_size)
 
     with mo.status.progress_bar(
         total=max(_num_chunks, 1),
@@ -433,16 +503,20 @@ def _(
         show_eta=True,
         disabled=bool(is_script_mode),
     ) as _eval_bar:
-        for _chunk_index, _start in enumerate(range(0, len(_examples), int(effective_eval_batch_size)), start=1):
-            _chunk = _examples[_start : _start + int(effective_eval_batch_size)]
+        for _chunk_index, _start in enumerate(range(0, _selected_studies, int(effective_eval_batch_size)), start=1):
             _pack_t0 = time.perf_counter()
-            _batch = build_eval_batch(_chunk, sample_offset=_start)
+            _stop = min(_start + int(effective_eval_batch_size), _selected_studies)
+            if _cache is not None:
+                _batch = build_eval_batch_from_ct_validation_cache(_cache, start=_start, stop=_stop)
+            else:
+                _chunk = _examples[_start:_stop]
+                _batch = build_eval_batch(_chunk, sample_offset=_start)
             _pack_seconds += float(time.perf_counter() - _pack_t0)
             _forward_t0 = time.perf_counter()
             with torch.no_grad():
                 _outputs = model.forward_study4(
-                    _batch["patches_views"].to(_model_device),
-                    _batch["positions_views"].to(_model_device),
+                    _batch["patches_views"].to(_model_device, dtype=torch.float32),
+                    _batch["positions_views"].to(_model_device, dtype=torch.float32),
                     _batch["cross_valid"].to(_model_device),
                 )
             _forward_seconds += float(time.perf_counter() - _forward_t0)
@@ -496,7 +570,7 @@ def _(
             _eval_bar.update(
                 increment=1,
                 subtitle=(
-                    f"chunk {_chunk_index}/{_num_chunks} | studies {min(_start + len(_chunk), len(_examples))}/{len(_examples)} | "
+                    f"chunk {_chunk_index}/{_num_chunks} | studies {_stop}/{_selected_studies} | "
                     f"forward {_forward_seconds:.1f}s | pack {_pack_seconds:.1f}s"
                 ),
             )
@@ -509,7 +583,7 @@ def _(
     _sample_df = pl.DataFrame(_all_sample_rows)
     _mim_df = pl.DataFrame(_mim_rows)
     _finalize_seconds = float(time.perf_counter() - _finalize_t0)
-    _total_seconds = float(_sampling_seconds + _forward_seconds + _pack_seconds + _finalize_seconds)
+    _total_seconds = float(_cache_load_seconds + _sampling_seconds + _forward_seconds + _pack_seconds + _finalize_seconds)
 
     probe_state = {
         "examples": _examples,
@@ -521,8 +595,11 @@ def _(
         "direction_embeddings": _direction_embeddings,
         "supcon_similarity": _supcon_similarity,
         "effective_modalities": _modalities,
+        "data_source": _data_source,
+        "cache_summary": dict(_cache["summary"]) if _cache is not None else None,
         "totalseg_resolved_count": int(sum(bool(row["totalseg_resolved"]) for row in _all_view_rows)),
         "performance_rows": [
+            {"stage": "cache_load", "seconds": _cache_load_seconds},
             {"stage": "sampling", "seconds": _sampling_seconds},
             {"stage": "batch_and_metrics_pack", "seconds": _pack_seconds},
             {"stage": "model_forward", "seconds": _forward_seconds},
@@ -536,9 +613,12 @@ def _(
 @app.cell
 def _(mo, probe_state):
     _view_df = probe_state["view_df"]
-    _perf_df = pl.DataFrame(probe_state["performance_rows"]).with_columns(
-        pl.col("seconds").cast(pl.Float64).round(2)
+    _perf_df = (
+        pl.DataFrame(probe_state["performance_rows"])
+        .filter(pl.col("seconds") > 0)
+        .with_columns(pl.col("seconds").cast(pl.Float64).round(2))
     )
+    _cache_summary = probe_state["cache_summary"] or {}
     _eval_summary = pl.DataFrame(
         [
             {
@@ -546,6 +626,9 @@ def _(mo, probe_state):
                 "views": int(_view_df.height),
                 "totalseg_resolved": f"{int(probe_state['totalseg_resolved_count'])}/{int(_view_df.height)}",
                 "modalities": ",".join(probe_state["effective_modalities"]),
+                "data_source": str(probe_state["data_source"]),
+                "cache_dir": str(_cache_summary.get("cache_dir", "")),
+                "cache_studies_total": int(_cache_summary.get("n_studies", 0)) if _cache_summary else 0,
             }
         ]
     )
