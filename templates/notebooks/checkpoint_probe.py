@@ -7,6 +7,7 @@ app = marimo.App(width="full")
 with app.setup:
     import os
     import sys
+    import time
     from collections import Counter
     from pathlib import Path
 
@@ -353,12 +354,14 @@ def _(
     cosine_similarity_matrix,
     effective_eval_batch_size,
     effective_n_studies,
+    is_script_mode,
     masked_l1_per_view,
     modality_filter,
     model,
     mo,
     sample_study4_examples,
     seed,
+    time,
     torch,
 ):
     mo.stop(
@@ -369,13 +372,47 @@ def _(
     _modalities = tuple(m.strip().upper() for m in str(modality_filter.value).split(",") if m.strip())
     mo.stop(len(_modalities) == 0, mo.callout("Specify at least one modality.", kind="warn"))
 
-    _examples = sample_study4_examples(
-        catalog_path.value,
-        config,
-        n_studies=int(effective_n_studies),
-        seed=int(seed.value),
-        modality_filter=_modalities,
-    )
+    _sampling_seconds = 0.0
+    _forward_seconds = 0.0
+    _pack_seconds = 0.0
+    _finalize_seconds = 0.0
+    _target_studies = int(effective_n_studies)
+    _sample_progress_state = {"accepted": 0}
+
+    _sampling_t0 = time.perf_counter()
+    with mo.status.progress_bar(
+        total=max(_target_studies, 1),
+        title="Sampling studies",
+        subtitle="Loading scans and drawing deterministic study4 views...",
+        completion_title="Sampling complete",
+        show_rate=True,
+        show_eta=True,
+        disabled=bool(is_script_mode),
+    ) as _sample_bar:
+
+        def _on_sampling_progress(event: dict[str, object]) -> None:
+            _accepted = int(event.get("accepted_examples", 0))
+            _visited = int(event.get("visited_studies", 0))
+            _total = int(event.get("total_candidates", 0))
+            _status = str(event.get("status", "running"))
+            _study_id = str(event.get("study_id", ""))
+            _delta = max(0, _accepted - int(_sample_progress_state["accepted"]))
+            _sample_progress_state["accepted"] = _accepted
+            _subtitle = (
+                f"accepted {_accepted}/{_target_studies} | visited {_visited}/{_total} candidates | "
+                f"status={_status}{f' | { _study_id }' if _study_id else ''}"
+            )
+            _sample_bar.update(increment=_delta, subtitle=_subtitle)
+
+        _examples = sample_study4_examples(
+            catalog_path.value,
+            config,
+            n_studies=_target_studies,
+            seed=int(seed.value),
+            modality_filter=_modalities,
+            progress=_on_sampling_progress,
+        )
+    _sampling_seconds = float(time.perf_counter() - _sampling_t0)
     mo.stop(len(_examples) == 0, mo.callout("No valid study4 examples could be sampled.", kind="danger"))
 
     _all_view_rows: list[dict[str, object]] = []
@@ -385,68 +422,94 @@ def _(
     _supcon_chunks: list[torch.Tensor] = []
     _direction_chunks: list[torch.Tensor] = []
     _model_device = next(model.parameters()).device
+    _num_chunks = (len(_examples) + int(effective_eval_batch_size) - 1) // int(effective_eval_batch_size)
 
-    for _start in range(0, len(_examples), int(effective_eval_batch_size)):
-        _chunk = _examples[_start : _start + int(effective_eval_batch_size)]
-        _batch = build_eval_batch(_chunk, sample_offset=_start)
-        with torch.no_grad():
-            _outputs = model.forward_study4(
-                _batch["patches_views"].to(_model_device),
-                _batch["positions_views"].to(_model_device),
-                _batch["cross_valid"].to(_model_device),
+    with mo.status.progress_bar(
+        total=max(_num_chunks, 1),
+        title="Running checkpoint eval",
+        subtitle="Building batches and forwarding through the model...",
+        completion_title="Checkpoint eval complete",
+        show_rate=True,
+        show_eta=True,
+        disabled=bool(is_script_mode),
+    ) as _eval_bar:
+        for _chunk_index, _start in enumerate(range(0, len(_examples), int(effective_eval_batch_size)), start=1):
+            _chunk = _examples[_start : _start + int(effective_eval_batch_size)]
+            _pack_t0 = time.perf_counter()
+            _batch = build_eval_batch(_chunk, sample_offset=_start)
+            _pack_seconds += float(time.perf_counter() - _pack_t0)
+            _forward_t0 = time.perf_counter()
+            with torch.no_grad():
+                _outputs = model.forward_study4(
+                    _batch["patches_views"].to(_model_device),
+                    _batch["positions_views"].to(_model_device),
+                    _batch["cross_valid"].to(_model_device),
+                )
+            _forward_seconds += float(time.perf_counter() - _forward_t0)
+
+            if _outputs.proj_views is None or _outputs.direction_cls_views is None:
+                raise ValueError("study4 forward pass did not return the expected view embeddings")
+
+            _pack_t1 = time.perf_counter()
+            _supcon_chunks.append(_outputs.proj_views.detach().cpu().reshape(-1, _outputs.proj_views.shape[-1]))
+            _direction_chunks.append(
+                F.normalize(
+                    _outputs.direction_cls_views.detach().cpu().reshape(-1, _outputs.direction_cls_views.shape[-1]),
+                    dim=-1,
+                )
+            )
+            _all_view_rows.extend(_batch["view_rows"])
+            _all_sample_rows.extend(_batch["sample_rows"])
+
+            _l1_bundle = masked_l1_per_view(_outputs, _batch["cross_valid"])
+            _self_l1 = _l1_bundle["self"].detach().cpu().numpy()
+            _register_l1 = _l1_bundle["register"].detach().cpu().numpy()
+            _cross_l1 = _l1_bundle["cross"].detach().cpu().numpy()
+            _cross_valid_mask = _l1_bundle["cross_valid_mask"].detach().cpu().numpy()
+
+            for _local_sample_idx in range(_self_l1.shape[0]):
+                for _view_idx, _view_name in enumerate(VIEW_NAMES):
+                    _row = _batch["view_rows"][_local_sample_idx * len(VIEW_NAMES) + _view_idx]
+                    _mim_rows.append(
+                        {
+                            **_row,
+                            "self_l1": float(_self_l1[_local_sample_idx, _view_idx]),
+                            "register_l1": float(_register_l1[_local_sample_idx, _view_idx]),
+                            "cross_l1": float(_cross_l1[_local_sample_idx, _view_idx]),
+                            "cross_valid_for_view": bool(_cross_valid_mask[_local_sample_idx, _view_idx]),
+                        }
+                    )
+                    _reconstruction_rows.append(
+                        {
+                            **_row,
+                            "self_l1": float(_self_l1[_local_sample_idx, _view_idx]),
+                            "register_l1": float(_register_l1[_local_sample_idx, _view_idx]),
+                            "cross_l1": float(_cross_l1[_local_sample_idx, _view_idx]),
+                            "cross_valid_for_view": bool(_cross_valid_mask[_local_sample_idx, _view_idx]),
+                            "target_patches": _outputs.mim_self_targets[_view_idx][_local_sample_idx].detach().cpu().numpy(),
+                            "pred_self": _outputs.mim_self_preds[_view_idx][_local_sample_idx].detach().cpu().numpy(),
+                            "pred_register": _outputs.mim_register_preds[_view_idx][_local_sample_idx].detach().cpu().numpy(),
+                            "pred_cross": _outputs.mim_cross_preds[_view_idx][_local_sample_idx].detach().cpu().numpy(),
+                        }
+                    )
+            _pack_seconds += float(time.perf_counter() - _pack_t1)
+            _eval_bar.update(
+                increment=1,
+                subtitle=(
+                    f"chunk {_chunk_index}/{_num_chunks} | studies {min(_start + len(_chunk), len(_examples))}/{len(_examples)} | "
+                    f"forward {_forward_seconds:.1f}s | pack {_pack_seconds:.1f}s"
+                ),
             )
 
-        if _outputs.proj_views is None or _outputs.direction_cls_views is None:
-            raise ValueError("study4 forward pass did not return the expected view embeddings")
-
-        _supcon_chunks.append(_outputs.proj_views.detach().cpu().reshape(-1, _outputs.proj_views.shape[-1]))
-        _direction_chunks.append(
-            F.normalize(
-                _outputs.direction_cls_views.detach().cpu().reshape(-1, _outputs.direction_cls_views.shape[-1]),
-                dim=-1,
-            )
-        )
-        _all_view_rows.extend(_batch["view_rows"])
-        _all_sample_rows.extend(_batch["sample_rows"])
-
-        _l1_bundle = masked_l1_per_view(_outputs, _batch["cross_valid"])
-        _self_l1 = _l1_bundle["self"].detach().cpu().numpy()
-        _register_l1 = _l1_bundle["register"].detach().cpu().numpy()
-        _cross_l1 = _l1_bundle["cross"].detach().cpu().numpy()
-        _cross_valid_mask = _l1_bundle["cross_valid_mask"].detach().cpu().numpy()
-
-        for _local_sample_idx in range(_self_l1.shape[0]):
-            for _view_idx, _view_name in enumerate(VIEW_NAMES):
-                _row = _batch["view_rows"][_local_sample_idx * len(VIEW_NAMES) + _view_idx]
-                _mim_rows.append(
-                    {
-                        **_row,
-                        "self_l1": float(_self_l1[_local_sample_idx, _view_idx]),
-                        "register_l1": float(_register_l1[_local_sample_idx, _view_idx]),
-                        "cross_l1": float(_cross_l1[_local_sample_idx, _view_idx]),
-                        "cross_valid_for_view": bool(_cross_valid_mask[_local_sample_idx, _view_idx]),
-                    }
-                )
-                _reconstruction_rows.append(
-                    {
-                        **_row,
-                        "self_l1": float(_self_l1[_local_sample_idx, _view_idx]),
-                        "register_l1": float(_register_l1[_local_sample_idx, _view_idx]),
-                        "cross_l1": float(_cross_l1[_local_sample_idx, _view_idx]),
-                        "cross_valid_for_view": bool(_cross_valid_mask[_local_sample_idx, _view_idx]),
-                        "target_patches": _outputs.mim_self_targets[_view_idx][_local_sample_idx].detach().cpu().numpy(),
-                        "pred_self": _outputs.mim_self_preds[_view_idx][_local_sample_idx].detach().cpu().numpy(),
-                        "pred_register": _outputs.mim_register_preds[_view_idx][_local_sample_idx].detach().cpu().numpy(),
-                        "pred_cross": _outputs.mim_cross_preds[_view_idx][_local_sample_idx].detach().cpu().numpy(),
-                    }
-                )
-
+    _finalize_t0 = time.perf_counter()
     _supcon_embeddings = torch.cat(_supcon_chunks, dim=0)
     _direction_embeddings = torch.cat(_direction_chunks, dim=0)
     _supcon_similarity = cosine_similarity_matrix(_supcon_embeddings).detach().cpu().numpy()
     _view_df = pl.DataFrame(_all_view_rows)
     _sample_df = pl.DataFrame(_all_sample_rows)
     _mim_df = pl.DataFrame(_mim_rows)
+    _finalize_seconds = float(time.perf_counter() - _finalize_t0)
+    _total_seconds = float(_sampling_seconds + _forward_seconds + _pack_seconds + _finalize_seconds)
 
     probe_state = {
         "examples": _examples,
@@ -459,6 +522,13 @@ def _(
         "supcon_similarity": _supcon_similarity,
         "effective_modalities": _modalities,
         "totalseg_resolved_count": int(sum(bool(row["totalseg_resolved"]) for row in _all_view_rows)),
+        "performance_rows": [
+            {"stage": "sampling", "seconds": _sampling_seconds},
+            {"stage": "batch_and_metrics_pack", "seconds": _pack_seconds},
+            {"stage": "model_forward", "seconds": _forward_seconds},
+            {"stage": "finalize_similarity_tables", "seconds": _finalize_seconds},
+            {"stage": "total", "seconds": _total_seconds},
+        ],
     }
     return (probe_state,)
 
@@ -466,6 +536,9 @@ def _(
 @app.cell
 def _(mo, probe_state):
     _view_df = probe_state["view_df"]
+    _perf_df = pl.DataFrame(probe_state["performance_rows"]).with_columns(
+        pl.col("seconds").cast(pl.Float64).round(2)
+    )
     _eval_summary = pl.DataFrame(
         [
             {
@@ -476,7 +549,7 @@ def _(mo, probe_state):
             }
         ]
     )
-    mo.vstack([mo.md("## Evaluation Summary"), _eval_summary])
+    mo.vstack([mo.md("## Evaluation Summary"), _eval_summary, _perf_df])
     return
 
 

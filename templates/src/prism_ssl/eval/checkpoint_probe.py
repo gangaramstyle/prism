@@ -8,7 +8,7 @@ from pathlib import Path
 import re
 import shutil
 import tempfile
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 from urllib.parse import urlparse
 
 import nibabel as nib
@@ -353,6 +353,7 @@ def sample_study4_examples(
     n_studies: int,
     seed: int,
     modality_filter: tuple[str, ...] | None = None,
+    progress: Callable[[dict[str, Any]], None] | None = None,
 ) -> list[dict[str, Any]]:
     """Sample deterministic same-study examples with training-like 4-view logic."""
     sample_unit = str(config.data.sample_unit).strip().lower()
@@ -371,9 +372,23 @@ def sample_study4_examples(
 
     ordered_studies = sorted(groups, key=lambda study_id: stable_int_hash(f"{seed}|{study_id}"))
     examples: list[dict[str, Any]] = []
+    if progress is not None:
+        progress(
+            {
+                "event": "start",
+                "visited_studies": 0,
+                "accepted_examples": 0,
+                "target_examples": int(n_studies),
+                "total_candidates": int(len(ordered_studies)),
+                "study_id": "",
+                "status": "starting",
+            }
+        )
+    visited_studies = 0
     for study_order, study_id in enumerate(ordered_studies):
         if len(examples) >= int(n_studies):
             break
+        visited_studies = int(study_order + 1)
 
         row_x, row_y, fallback_mode = _select_series_pair(groups[study_id], seed=seed, study_id=study_id)
         record_x = _row_to_scan_record(row_x)
@@ -395,6 +410,18 @@ def sample_study4_examples(
                     use_totalseg_body_centers=bool(config.data.use_totalseg_body_centers),
                 )
         except Exception:
+            if progress is not None:
+                progress(
+                    {
+                        "event": "study",
+                        "visited_studies": visited_studies,
+                        "accepted_examples": int(len(examples)),
+                        "target_examples": int(n_studies),
+                        "total_candidates": int(len(ordered_studies)),
+                        "study_id": str(study_id),
+                        "status": "load_failed",
+                    }
+                )
             continue
 
         study_seed = stable_int_hash(f"{seed}|{study_id}") % 2_147_483_647
@@ -493,6 +520,30 @@ def sample_study4_examples(
                 "cross_valid": bool(cross_valid),
                 "cross_mode": str(cross_mode),
                 "views": views,
+            }
+        )
+        if progress is not None:
+            progress(
+                {
+                    "event": "study",
+                    "visited_studies": visited_studies,
+                    "accepted_examples": int(len(examples)),
+                    "target_examples": int(n_studies),
+                    "total_candidates": int(len(ordered_studies)),
+                    "study_id": str(study_id),
+                    "status": "accepted",
+                }
+            )
+    if progress is not None:
+        progress(
+            {
+                "event": "done",
+                "visited_studies": visited_studies,
+                "accepted_examples": int(len(examples)),
+                "target_examples": int(n_studies),
+                "total_candidates": int(len(ordered_studies)),
+                "study_id": "",
+                "status": "complete",
             }
         )
     return examples
