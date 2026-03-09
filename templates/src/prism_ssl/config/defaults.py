@@ -63,6 +63,13 @@ def load_run_config(config_path: str) -> RunConfig:
     )
 
 
+def load_run_config_from_flat(flat_cfg: dict[str, Any]) -> RunConfig:
+    """Rebuild a typed config from flattened dotted-path values."""
+    config = RunConfig()
+    apply_overrides(config, flat_cfg)
+    return config
+
+
 def _cast_like(value: Any, current: Any) -> Any:
     if value is None:
         return current

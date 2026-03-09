@@ -31,12 +31,12 @@ def build_scan_id(row: dict[str, Any]) -> str:
     return f"{pmbb_id}_{digest}"
 
 
-def _series_id_from_row(row: dict[str, Any]) -> str:
+def series_id_from_row(row: dict[str, Any]) -> str:
     series_path = str(row.get("series_path", ""))
     return f"series_{stable_int_hash(series_path) & 0xFFFFFFFF:08x}"
 
 
-def _study_id_from_row(row: dict[str, Any]) -> str:
+def study_id_from_row(row: dict[str, Any]) -> str:
     series_path = Path(str(row.get("series_path", "")))
     study_path = str(series_path.parent)
     return f"study_{stable_int_hash(study_path) & 0xFFFFFFFF:08x}"
@@ -75,8 +75,8 @@ def sample_scan_candidates(
         records.append(
             ScanRecord(
                 scan_id=scan_id,
-                series_id=_series_id_from_row(row),
-                study_id=_study_id_from_row(row),
+                series_id=series_id_from_row(row),
+                study_id=study_id_from_row(row),
                 modality=str(row.get("modality", "CT")).upper(),
                 series_path=str(row["series_path"]),
                 nifti_path="",  # resolved lazily by dataset workers

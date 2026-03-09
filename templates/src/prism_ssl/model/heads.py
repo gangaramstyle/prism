@@ -23,6 +23,8 @@ class PrismModelOutput:
     distance_logits_x: torch.Tensor | None = None
     distance_logits_y: torch.Tensor | None = None
     proj_views: torch.Tensor | None = None
+    direction_cls_views: torch.Tensor | None = None
+    supcon_cls_views: torch.Tensor | None = None
     mim_self_preds: tuple[torch.Tensor, ...] = ()
     mim_self_targets: tuple[torch.Tensor, ...] = ()
     mim_register_preds: tuple[torch.Tensor, ...] = ()
@@ -448,6 +450,8 @@ class PrismSSLModel(nn.Module):
             distance_logits_x=distance_logits_x,
             distance_logits_y=distance_logits_y,
             proj_views=proj_views,
+            direction_cls_views=direction_cls_views,
+            supcon_cls_views=supcon_cls_views,
             mim_self_preds=tuple(self_preds),
             mim_self_targets=tuple(self_targets),
             mim_register_preds=tuple(register_preds),

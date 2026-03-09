@@ -1,6 +1,6 @@
 """Data package exports."""
 
-from prism_ssl.data.catalog import build_scan_id, load_catalog, sample_scan_candidates
+from prism_ssl.data.catalog import build_scan_id, load_catalog, sample_scan_candidates, series_id_from_row, study_id_from_row
 from prism_ssl.data.collate import collate_prism_batch
 from prism_ssl.data.preflight import (
     NiftiLoadError,
@@ -21,6 +21,8 @@ __all__ = [
     "build_scan_id",
     "load_catalog",
     "sample_scan_candidates",
+    "series_id_from_row",
+    "study_id_from_row",
     "collate_prism_batch",
     "NiftiLoadError",
     "NiftiResolutionError",
