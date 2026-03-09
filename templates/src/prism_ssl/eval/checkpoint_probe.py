@@ -2,8 +2,14 @@
 
 from __future__ import annotations
 
+import atexit
+import os
 from pathlib import Path
+import re
+import shutil
+import tempfile
 from typing import Any, Mapping, Sequence
+from urllib.parse import urlparse
 
 import nibabel as nib
 import numpy as np
@@ -21,6 +27,15 @@ from prism_ssl.utils.hashing import stable_int_hash
 
 VIEW_NAMES: tuple[str, ...] = ("a", "ap", "b", "bp")
 _TOTALSEG_CACHE: dict[str, np.ndarray | None] = {}
+_WANDB_ARTIFACT_LIST_CACHE: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+_WANDB_CHECKPOINT_CACHE: dict[str, Path] = {}
+_SESSION_TMP_DIR = Path(
+    tempfile.mkdtemp(
+        prefix="prism_ssl_checkpoint_probe_",
+        dir=os.environ.get("TMPDIR", tempfile.gettempdir()),
+    )
+)
+atexit.register(lambda: shutil.rmtree(_SESSION_TMP_DIR, ignore_errors=True))
 
 
 def _resolve_device(device: str | torch.device) -> torch.device:
@@ -30,6 +45,166 @@ def _resolve_device(device: str | torch.device) -> torch.device:
     if key in {"", "auto"}:
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
     return torch.device(key)
+
+
+def _ensure_wandb_tmp_env() -> None:
+    for key, relative in (
+        ("WANDB_DIR", "wandb"),
+        ("WANDB_CACHE_DIR", "wandb_cache"),
+        ("WANDB_ARTIFACT_DIR", "wandb_artifacts"),
+        ("TMPDIR", "tmp"),
+    ):
+        os.environ.setdefault(key, str(_SESSION_TMP_DIR / relative))
+        Path(os.environ[key]).mkdir(parents=True, exist_ok=True)
+
+
+def _load_wandb_module() -> Any:
+    _ensure_wandb_tmp_env()
+    try:
+        import wandb  # type: ignore
+    except Exception as exc:  # pragma: no cover - exercised via caller-facing error paths
+        raise RuntimeError("wandb package is required for W&B checkpoint loading") from exc
+    return wandb
+
+
+def parse_wandb_run_ref(run_ref: str) -> tuple[str, str, str]:
+    """Parse a W&B run URL or entity/project/run_id reference."""
+    text = str(run_ref).strip()
+    if not text:
+        raise ValueError("W&B run reference is empty")
+
+    if "://" in text:
+        parsed = urlparse(text)
+        parts = [part for part in parsed.path.split("/") if part]
+    else:
+        parts = [part for part in text.split("/") if part]
+
+    if len(parts) < 3:
+        raise ValueError(f"Could not parse W&B run reference: {text}")
+
+    if len(parts) >= 4 and parts[-2] == "runs":
+        entity, project, run_id = parts[-4], parts[-3], parts[-1]
+    else:
+        entity, project, run_id = parts[-3], parts[-2], parts[-1]
+
+    run_id = run_id.strip()
+    if not entity or not project or not run_id:
+        raise ValueError(f"Could not parse W&B run reference: {text}")
+    return entity, project, run_id
+
+
+def _artifact_version_number(version: str) -> int:
+    match = re.fullmatch(r"v(\d+)", str(version).strip())
+    return int(match.group(1)) if match is not None else -1
+
+
+def _artifact_step_from_aliases(aliases: Sequence[str]) -> int | None:
+    steps = []
+    for alias in aliases:
+        match = re.fullmatch(r"step-(\d+)", str(alias).strip())
+        if match is not None:
+            steps.append(int(match.group(1)))
+    if not steps:
+        return None
+    return max(steps)
+
+
+def _artifact_display_name(name: str, version: str, step: int | None) -> str:
+    if step is not None:
+        return f"step-{step} | {name}"
+    if version:
+        return f"{version} | {name}"
+    return name
+
+
+def list_wandb_run_model_artifacts(
+    run_ref: str,
+    *,
+    timeout: int = 60,
+    force_refresh: bool = False,
+) -> list[dict[str, Any]]:
+    """List model artifacts logged by a W&B run, newest checkpoint first."""
+    entity, project, run_id = parse_wandb_run_ref(run_ref)
+    cache_key = (entity, project, run_id)
+    if not force_refresh and cache_key in _WANDB_ARTIFACT_LIST_CACHE:
+        return [dict(row) for row in _WANDB_ARTIFACT_LIST_CACHE[cache_key]]
+
+    wandb = _load_wandb_module()
+    api = wandb.Api(timeout=int(timeout))
+    run = api.run(f"{entity}/{project}/{run_id}")
+
+    artifacts: list[dict[str, Any]] = []
+    for artifact in run.logged_artifacts():
+        if str(getattr(artifact, "type", "")) != "model":
+            continue
+        name = str(getattr(artifact, "name", ""))
+        version = str(getattr(artifact, "version", ""))
+        aliases = [str(alias) for alias in list(getattr(artifact, "aliases", []) or [])]
+        step = _artifact_step_from_aliases(aliases)
+        artifacts.append(
+            {
+                "entity": entity,
+                "project": project,
+                "run_id": run_id,
+                "artifact_name": name,
+                "artifact_ref": f"{entity}/{project}/{name}",
+                "version": version,
+                "aliases": aliases,
+                "step": step,
+                "display_name": _artifact_display_name(name, version, step),
+            }
+        )
+
+    artifacts.sort(
+        key=lambda item: (
+            item["step"] is None,
+            -(int(item["step"]) if item["step"] is not None else -1),
+            -_artifact_version_number(str(item["version"])),
+            str(item["artifact_name"]),
+        )
+    )
+    _WANDB_ARTIFACT_LIST_CACHE[cache_key] = [dict(row) for row in artifacts]
+    return [dict(row) for row in artifacts]
+
+
+def download_wandb_run_checkpoint(
+    run_ref: str,
+    artifact_ref: str,
+    *,
+    timeout: int = 60,
+    force_refresh: bool = False,
+) -> Path:
+    """Download a W&B model artifact checkpoint into a session-local tmp dir."""
+    entity, project, run_id = parse_wandb_run_ref(run_ref)
+    full_artifact_ref = str(artifact_ref).strip()
+    if not full_artifact_ref:
+        raise ValueError("artifact_ref must be a non-empty W&B artifact reference")
+    if "/" not in full_artifact_ref:
+        full_artifact_ref = f"{entity}/{project}/{full_artifact_ref}"
+
+    cache_key = f"{run_id}|{full_artifact_ref}"
+    cached = _WANDB_CHECKPOINT_CACHE.get(cache_key)
+    if not force_refresh and cached is not None and cached.is_file():
+        return cached
+
+    wandb = _load_wandb_module()
+    api = wandb.Api(timeout=int(timeout))
+    artifact = api.artifact(full_artifact_ref, type="model")
+
+    safe_name = full_artifact_ref.replace("/", "__").replace(":", "__")
+    download_root = _SESSION_TMP_DIR / "downloads" / run_id / safe_name
+    if force_refresh and download_root.exists():
+        shutil.rmtree(download_root, ignore_errors=True)
+    download_root.mkdir(parents=True, exist_ok=True)
+
+    artifact_dir = Path(artifact.download(root=str(download_root)))
+    candidates = sorted(artifact_dir.rglob("*.ckpt"))
+    if not candidates:
+        raise FileNotFoundError(f"No .ckpt files were found in W&B artifact {full_artifact_ref}")
+
+    ckpt_path = candidates[0].resolve()
+    _WANDB_CHECKPOINT_CACHE[cache_key] = ckpt_path
+    return ckpt_path
 
 
 def load_checkpoint_payload(checkpoint_path: str | Path, device: str | torch.device = "cpu") -> dict[str, Any]:
@@ -589,6 +764,9 @@ __all__ = [
     "VIEW_NAMES",
     "load_checkpoint_payload",
     "build_model_from_checkpoint",
+    "parse_wandb_run_ref",
+    "list_wandb_run_model_artifacts",
+    "download_wandb_run_checkpoint",
     "sample_study4_examples",
     "build_eval_batch",
     "dominant_totalseg_label_for_view",

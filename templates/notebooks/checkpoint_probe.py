@@ -25,6 +25,8 @@ with app.setup:
         build_eval_batch,
         build_model_from_checkpoint,
         cosine_similarity_matrix,
+        download_wandb_run_checkpoint,
+        list_wandb_run_model_artifacts,
         load_checkpoint_payload,
         masked_l1_per_view,
         nearest_neighbor_purity,
@@ -115,7 +117,7 @@ def _():
         """
 # Prism SSL Study4 Checkpoint Probe
 
-Load a local checkpoint, run deterministic `study4` sampling, and inspect:
+Load a local checkpoint or a W&B run artifact, run deterministic `study4` sampling, and inspect:
 - SupCon clustering by series label
 - Anatomy/view CLS clustering by dominant TotalSegmentator label ID
 - Masked-patch reconstruction quality for self/register/cross paths
@@ -131,18 +133,27 @@ def _(Path, mo, os):
         "CATALOG_PATH",
         str(Path(__file__).resolve().parents[2] / "pmbb_catalog.csv.gz"),
     )
-    checkpoint_path = mo.ui.text(label="Checkpoint path", value=os.environ.get("PRISM_NOTEBOOK_CKPT", ""))
+    checkpoint_path = mo.ui.text(label="Checkpoint path (optional)", value=os.environ.get("PRISM_NOTEBOOK_CKPT", ""))
+    wandb_run_ref = mo.ui.text(label="W&B run URL (optional)", value=os.environ.get("PRISM_NOTEBOOK_WANDB_RUN", ""))
+    wandb_force_refresh = mo.ui.checkbox(label="Refresh W&B artifacts", value=False)
     catalog_path = mo.ui.text(label="Catalog path", value=default_catalog)
     device = mo.ui.dropdown(options=["auto", "cpu", "cuda"], value="auto", label="Device")
     n_studies = mo.ui.slider(start=1, stop=128, step=1, value=32, label="Studies")
     eval_batch_size = mo.ui.slider(start=1, stop=16, step=1, value=4, label="Eval batch size")
     seed = mo.ui.number(label="Seed", value=42, step=1)
     include_background_label_0 = mo.ui.checkbox(label="Include anatomy label 0", value=False)
+    _source_note = mo.callout(
+        "Provide either a local checkpoint path or a W&B run URL. Local paths take priority. "
+        "W&B artifacts are downloaded into session-local /tmp storage and removed when the notebook process exits.",
+        kind="info",
+    )
 
     mo.vstack(
         [
             mo.md("## Controls"),
-            mo.hstack([checkpoint_path, catalog_path]),
+            _source_note,
+            mo.hstack([checkpoint_path, wandb_run_ref]),
+            mo.hstack([catalog_path, wandb_force_refresh]),
             mo.hstack([device, n_studies, eval_batch_size, seed, include_background_label_0]),
         ]
     )
@@ -154,31 +165,132 @@ def _(Path, mo, os):
         include_background_label_0,
         n_studies,
         seed,
+        wandb_force_refresh,
+        wandb_run_ref,
     )
 
 
 @app.cell
-def _(Path, checkpoint_path, load_checkpoint_payload, load_run_config_from_flat):
-    checkpoint_hint = None
-    hinted_config = None
+def _(checkpoint_path, list_wandb_run_model_artifacts, wandb_force_refresh, wandb_run_ref):
+    wandb_artifacts = []
+    wandb_artifact_error = None
     _ckpt_text = str(checkpoint_path.value).strip()
-    if _ckpt_text:
-        _hint_path = Path(_ckpt_text).expanduser()
-        if _hint_path.is_file():
-            _hint_payload = load_checkpoint_payload(_hint_path, device="cpu")
-            _flat_cfg = _hint_payload.get("config")
-            if isinstance(_flat_cfg, dict):
-                hinted_config = load_run_config_from_flat(_flat_cfg)
-        else:
-            checkpoint_hint = f"Checkpoint not found: {_hint_path}"
-    return checkpoint_hint, hinted_config
+    _run_text = str(wandb_run_ref.value).strip()
+    if not _ckpt_text and _run_text:
+        try:
+            wandb_artifacts = list_wandb_run_model_artifacts(
+                _run_text,
+                force_refresh=bool(wandb_force_refresh.value),
+            )
+        except Exception as exc:
+            wandb_artifact_error = str(exc)
+    return wandb_artifact_error, wandb_artifacts
 
 
 @app.cell
-def _(checkpoint_hint, hinted_config, mo):
+def _(checkpoint_path, mo, pl, wandb_artifact_error, wandb_artifacts, wandb_run_ref):
+    artifact_label_to_ref = {}
+    wandb_artifact_picker = None
+    _ckpt_text = str(checkpoint_path.value).strip()
+    _run_text = str(wandb_run_ref.value).strip()
+    if _ckpt_text:
+        _artifact_ui = mo.md("")
+    elif wandb_artifact_error:
+        _artifact_ui = mo.callout(wandb_artifact_error, kind="danger")
+    elif not _run_text:
+        _artifact_ui = mo.md("")
+    elif len(wandb_artifacts) == 0:
+        _artifact_ui = mo.callout("No model artifacts were found for this run.", kind="warn")
+    else:
+        _artifact_labels = [str(item["display_name"]) for item in wandb_artifacts]
+        artifact_label_to_ref = {
+            str(item["display_name"]): str(item["artifact_ref"]) for item in wandb_artifacts
+        }
+        wandb_artifact_picker = mo.ui.dropdown(
+            options=_artifact_labels,
+            value=_artifact_labels[0],
+            label="W&B checkpoint",
+        )
+        _artifact_df = pl.DataFrame(
+            [
+                {
+                    "checkpoint": str(item["display_name"]),
+                    "version": str(item["version"]),
+                    "aliases": ",".join(str(alias) for alias in item["aliases"]),
+                    "artifact_ref": str(item["artifact_ref"]),
+                }
+                for item in wandb_artifacts
+            ]
+        )
+        _artifact_ui = mo.vstack([mo.md("## W&B Checkpoints"), wandb_artifact_picker, _artifact_df])
+    _artifact_ui
+    return artifact_label_to_ref, wandb_artifact_picker
+
+
+@app.cell
+def _(
+    Path,
+    artifact_label_to_ref,
+    checkpoint_path,
+    download_wandb_run_checkpoint,
+    mo,
+    wandb_artifact_picker,
+    wandb_force_refresh,
+    wandb_run_ref,
+):
+    _ckpt_text = str(checkpoint_path.value).strip()
+    if _ckpt_text:
+        resolved_checkpoint_path = Path(_ckpt_text).expanduser()
+        mo.stop(not resolved_checkpoint_path.is_file(), mo.callout(f"Checkpoint not found: {resolved_checkpoint_path}", kind="danger"))
+        checkpoint_source = {
+            "source": "local",
+            "run_ref": "",
+            "artifact_ref": "",
+            "label": str(resolved_checkpoint_path),
+        }
+    else:
+        _run_text = str(wandb_run_ref.value).strip()
+        mo.stop(not _run_text, mo.callout("Provide a local checkpoint path or a W&B run URL.", kind="warn"))
+        mo.stop(
+            wandb_artifact_picker is None or str(wandb_artifact_picker.value).strip() not in artifact_label_to_ref,
+            mo.callout("Select a W&B checkpoint artifact to continue.", kind="warn"),
+        )
+        _artifact_label = str(wandb_artifact_picker.value)
+        _artifact_ref = artifact_label_to_ref[_artifact_label]
+        resolved_checkpoint_path = download_wandb_run_checkpoint(
+            _run_text,
+            _artifact_ref,
+            force_refresh=bool(wandb_force_refresh.value),
+        )
+        checkpoint_source = {
+            "source": "wandb_artifact",
+            "run_ref": _run_text,
+            "artifact_ref": _artifact_ref,
+            "label": _artifact_label,
+        }
+    return checkpoint_source, resolved_checkpoint_path
+
+
+@app.cell
+def _(load_checkpoint_payload, load_run_config_from_flat, resolved_checkpoint_path):
+    hinted_config = None
+    _hint_payload = load_checkpoint_payload(resolved_checkpoint_path, device="cpu")
+    _flat_cfg = _hint_payload.get("config")
+    if isinstance(_flat_cfg, dict):
+        hinted_config = load_run_config_from_flat(_flat_cfg)
+    return (hinted_config,)
+
+
+@app.cell
+def _(checkpoint_source, hinted_config, mo):
     _default_modalities = ",".join(hinted_config.data.modality_filter) if hinted_config is not None else "CT,MR"
     modality_filter = mo.ui.text(label="Modality filter", value=_default_modalities)
-    _note = mo.callout(checkpoint_hint, kind="warn") if checkpoint_hint else mo.md("")
+    _source_text = (
+        f"Using local checkpoint `{checkpoint_source['label']}`."
+        if checkpoint_source["source"] == "local"
+        else f"Using W&B artifact `{checkpoint_source['label']}` from `{checkpoint_source['run_ref']}`."
+    )
+    _note = mo.callout(_source_text, kind="info")
     mo.vstack([mo.hstack([modality_filter]), _note])
     return (modality_filter,)
 
@@ -191,23 +303,22 @@ def _(eval_batch_size, is_script_mode, n_studies):
 
 
 @app.cell
-def _(Path, build_model_from_checkpoint, checkpoint_path, device, mo):
-    _ckpt_text = str(checkpoint_path.value).strip()
-    mo.stop(not _ckpt_text, mo.callout("Provide a local checkpoint path to begin.", kind="warn"))
-    _ckpt_path = Path(_ckpt_text).expanduser()
-    mo.stop(not _ckpt_path.is_file(), mo.callout(f"Checkpoint not found: {_ckpt_path}", kind="danger"))
-
-    model, config, payload, resolved_device = build_model_from_checkpoint(_ckpt_path, device=device.value)
+def _(build_model_from_checkpoint, device, resolved_checkpoint_path):
+    model, config, payload, resolved_device = build_model_from_checkpoint(resolved_checkpoint_path, device=device.value)
     return config, model, payload, resolved_device
 
 
 @app.cell
-def _(config, effective_eval_batch_size, effective_n_studies, mo, payload, resolved_device):
+def _(checkpoint_source, config, effective_eval_batch_size, effective_n_studies, mo, payload, resolved_checkpoint_path, resolved_device):
     _sample_unit = str(config.data.sample_unit).strip().lower()
     _ckpt_summary = pl.DataFrame(
         [
             {
                 "step": int(payload.get("step", 0)),
+                "checkpoint_source": str(checkpoint_source["source"]),
+                "checkpoint_label": str(checkpoint_source["label"]),
+                "artifact_ref": str(checkpoint_source["artifact_ref"]),
+                "resolved_checkpoint_path": str(resolved_checkpoint_path),
                 "sample_unit": _sample_unit,
                 "resolved_device": str(resolved_device),
                 "d_model": int(config.model.d_model),

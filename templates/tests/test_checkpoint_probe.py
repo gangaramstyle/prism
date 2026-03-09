@@ -6,8 +6,16 @@ import nibabel as nib
 import numpy as np
 import torch
 
+import prism_ssl.eval.checkpoint_probe as checkpoint_probe
 from prism_ssl.config import load_run_config_from_flat
-from prism_ssl.eval.checkpoint_probe import _TOTALSEG_CACHE, dominant_totalseg_label_for_view, masked_l1_per_view
+from prism_ssl.eval.checkpoint_probe import (
+    _TOTALSEG_CACHE,
+    dominant_totalseg_label_for_view,
+    download_wandb_run_checkpoint,
+    list_wandb_run_model_artifacts,
+    masked_l1_per_view,
+    parse_wandb_run_ref,
+)
 from prism_ssl.model.heads import PrismModelOutput
 
 
@@ -31,6 +39,99 @@ def test_load_run_config_from_flat_restores_study4_fields() -> None:
     assert cfg.model.proj_dim == 48
     assert cfg.loss.w_mim_register_target == 0.7
     assert cfg.loss.w_mim_cross_target == 0.4
+
+
+def test_parse_wandb_run_ref_accepts_url_and_triplet() -> None:
+    assert parse_wandb_run_ref("https://wandb.ai/vineeth-gangaram-penn/nvreason-prism-ssl/runs/v9ng7jz6?nw=x") == (
+        "vineeth-gangaram-penn",
+        "nvreason-prism-ssl",
+        "v9ng7jz6",
+    )
+    assert parse_wandb_run_ref("vineeth-gangaram-penn/nvreason-prism-ssl/v9ng7jz6") == (
+        "vineeth-gangaram-penn",
+        "nvreason-prism-ssl",
+        "v9ng7jz6",
+    )
+
+
+def test_wandb_artifact_listing_and_download_use_session_tmp(monkeypatch, tmp_path: Path) -> None:
+    class _FakeLoggedArtifact:
+        def __init__(self, name: str, artifact_type: str, version: str, aliases: list[str]) -> None:
+            self.name = name
+            self.type = artifact_type
+            self.version = version
+            self.aliases = aliases
+
+    class _FakeRun:
+        def logged_artifacts(self) -> list[_FakeLoggedArtifact]:
+            return [
+                _FakeLoggedArtifact("prism-ssl-ckpt:v77", "model", "v77", ["step-259921"]),
+                _FakeLoggedArtifact("ignore-me:v1", "dataset", "v1", []),
+                _FakeLoggedArtifact("prism-ssl-ckpt:v80", "model", "v80", ["step-392994"]),
+                _FakeLoggedArtifact("prism-ssl-ckpt:v74", "model", "v74", ["step-128309"]),
+            ]
+
+    class _FakeArtifact:
+        def __init__(self, artifact_ref: str) -> None:
+            self.artifact_ref = artifact_ref
+
+        def download(self, root: str) -> str:
+            artifact_dir = Path(root) / "artifact_payload"
+            artifact_dir.mkdir(parents=True, exist_ok=True)
+            (artifact_dir / "step_392994.ckpt").touch()
+            return str(artifact_dir)
+
+    class _FakeApi:
+        def __init__(self) -> None:
+            self.run_calls: list[str] = []
+            self.artifact_calls: list[tuple[str, str]] = []
+
+        def run(self, path: str) -> _FakeRun:
+            self.run_calls.append(path)
+            return _FakeRun()
+
+        def artifact(self, ref: str, type: str) -> _FakeArtifact:
+            self.artifact_calls.append((ref, type))
+            return _FakeArtifact(ref)
+
+    class _FakeWandb:
+        def __init__(self, api: _FakeApi) -> None:
+            self._api = api
+
+        def Api(self, timeout: int) -> _FakeApi:  # noqa: N802
+            assert timeout == 60
+            return self._api
+
+    api = _FakeApi()
+    session_tmp = tmp_path / "session_tmp"
+    checkpoint_probe._WANDB_ARTIFACT_LIST_CACHE.clear()
+    checkpoint_probe._WANDB_CHECKPOINT_CACHE.clear()
+    monkeypatch.setattr(checkpoint_probe, "_SESSION_TMP_DIR", session_tmp)
+    monkeypatch.setattr(checkpoint_probe, "_load_wandb_module", lambda: _FakeWandb(api))
+
+    artifacts = list_wandb_run_model_artifacts("vineeth-gangaram-penn/nvreason-prism-ssl/v9ng7jz6")
+    cached_artifacts = list_wandb_run_model_artifacts("vineeth-gangaram-penn/nvreason-prism-ssl/v9ng7jz6")
+    ckpt_path = download_wandb_run_checkpoint(
+        "vineeth-gangaram-penn/nvreason-prism-ssl/v9ng7jz6",
+        artifacts[0]["artifact_ref"],
+    )
+    cached_ckpt_path = download_wandb_run_checkpoint(
+        "vineeth-gangaram-penn/nvreason-prism-ssl/v9ng7jz6",
+        artifacts[0]["artifact_ref"],
+    )
+
+    assert [item["step"] for item in artifacts] == [392994, 259921, 128309]
+    assert [item["artifact_ref"] for item in artifacts] == [
+        "vineeth-gangaram-penn/nvreason-prism-ssl/prism-ssl-ckpt:v80",
+        "vineeth-gangaram-penn/nvreason-prism-ssl/prism-ssl-ckpt:v77",
+        "vineeth-gangaram-penn/nvreason-prism-ssl/prism-ssl-ckpt:v74",
+    ]
+    assert artifacts == cached_artifacts
+    assert api.run_calls == ["vineeth-gangaram-penn/nvreason-prism-ssl/v9ng7jz6"]
+    assert api.artifact_calls == [("vineeth-gangaram-penn/nvreason-prism-ssl/prism-ssl-ckpt:v80", "model")]
+    assert ckpt_path == cached_ckpt_path
+    assert ckpt_path.is_file()
+    assert str(ckpt_path).startswith(str(session_tmp))
 
 
 def test_dominant_totalseg_label_for_view_votes_and_falls_back(tmp_path: Path) -> None:
