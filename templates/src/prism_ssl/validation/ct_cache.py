@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import gc
 import json
 import math
 import time
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
+import numpy as np
 import polars as pl
 import torch
 
@@ -152,6 +154,51 @@ def _enrich_view_rows(rows: Sequence[Mapping[str, Any]], *, shard_index: int) ->
     return enriched
 
 
+def _compact_view_result_for_cache(result: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "normalized_patches": np.asarray(result["normalized_patches"], dtype=np.float16),
+        "relative_patch_centers_pt": np.asarray(result["relative_patch_centers_pt"], dtype=np.float32),
+        "patch_centers_vox": np.asarray(result["patch_centers_vox"], dtype=np.int32),
+        "prism_center_pt": np.asarray(result["prism_center_pt"], dtype=np.float32),
+        "prism_center_vox": np.asarray(result["prism_center_vox"], dtype=np.int32),
+        "native_thin_axis_name": str(result.get("native_thin_axis_name", "")),
+        "native_acquisition_plane": str(result.get("native_acquisition_plane", "unknown")),
+        "sampled_body_center": bool(result.get("sampled_body_center", False)),
+        "wc": float(result["wc"]),
+        "ww": float(result["ww"]),
+    }
+
+
+def _compact_example_for_cache(example: Mapping[str, Any]) -> dict[str, Any]:
+    compact_views: list[dict[str, Any]] = []
+    for view in example["views"]:
+        compact_views.append(
+            {
+                "view_name": str(view["view_name"]),
+                "series_id": str(view["series_id"]),
+                "modality": str(view.get("modality", "CT")),
+                "series_path": str(view["series_path"]),
+                "series_description": str(view.get("series_description", "")),
+                "series_label_text": str(view.get("series_label_text", "")),
+                "resolved_nifti_path": str(view.get("resolved_nifti_path", "")),
+                "totalseg_path": str(view.get("totalseg_path", "")),
+                "result": _compact_view_result_for_cache(view["result"]),
+            }
+        )
+    return {
+        "study_id": str(example["study_id"]),
+        "series_id_x": str(example["series_id_x"]),
+        "series_id_y": str(example["series_id_y"]),
+        "series_path_x": str(example["series_path_x"]),
+        "series_path_y": str(example["series_path_y"]),
+        "series_description_x": str(example.get("series_description_x", "")),
+        "series_description_y": str(example.get("series_description_y", "")),
+        "cross_valid": bool(example["cross_valid"]),
+        "cross_mode": str(example["cross_mode"]),
+        "views": compact_views,
+    }
+
+
 def build_ct_validation_cache(
     catalog: str | Path | pl.DataFrame,
     config: RunConfig,
@@ -242,6 +289,8 @@ def build_ct_validation_cache(
                     "bytes_written": int(total_bytes_written),
                 }
             )
+        del batch, shard_payload
+        gc.collect()
 
     for example in iter_study4_examples(
         catalog,
@@ -251,13 +300,16 @@ def build_ct_validation_cache(
         modality_filter=("CT",),
         progress=(lambda payload: progress({"stage": "sampling", **payload}) if progress is not None else None),
     ):
-        current_chunk.append(example)
+        current_chunk.append(_compact_example_for_cache(example))
         if len(current_chunk) >= shard_width:
             _flush_chunk(current_chunk, shard_index=len(shard_paths), sample_offset=written_studies)
             current_chunk = []
+            gc.collect()
 
     if current_chunk:
         _flush_chunk(current_chunk, shard_index=len(shard_paths), sample_offset=written_studies)
+        current_chunk = []
+        gc.collect()
 
     if written_studies == 0:
         raise RuntimeError("No CT study4 examples could be sampled for validation cache")
