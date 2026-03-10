@@ -65,7 +65,13 @@ with app.setup:
             "p75": float(np.percentile(arr, 75)),
         }
 
-    def patch_grid(patches: np.ndarray, max_patches: int = 32, cols: int = 8) -> Image.Image:
+    def patch_grid(
+        patches: np.ndarray,
+        max_patches: int = 32,
+        cols: int = 8,
+        *,
+        auto_contrast: bool = False,
+    ) -> Image.Image:
         arr = np.asarray(patches, dtype=np.float32)
         if arr.ndim == 4 and arr.shape[-1] == 1:
             arr = arr[..., 0]
@@ -80,10 +86,21 @@ with app.setup:
             arr = np.concatenate([arr, np.zeros((pad, arr.shape[1], arr.shape[2]), dtype=arr.dtype)], axis=0)
         row_imgs = [np.concatenate(arr[r * cols : (r + 1) * cols], axis=1) for r in range(rows)]
         grid = np.concatenate(row_imgs, axis=0)
-        grid[0, 0] = -1.0
-        if grid.shape[1] > 1:
-            grid[0, 1] = 1.0
-        gray = np.clip((grid + 1.0) * 0.5 * 255.0, 0, 255).astype(np.uint8)
+        if auto_contrast:
+            low = float(np.percentile(grid, 1.0))
+            high = float(np.percentile(grid, 99.0))
+            if not np.isfinite(low) or not np.isfinite(high) or high <= low + 1e-6:
+                low = float(np.min(grid))
+                high = float(np.max(grid))
+            if high <= low + 1e-6:
+                gray = np.full(grid.shape, 127, dtype=np.uint8)
+            else:
+                gray = np.clip((grid - low) / (high - low) * 255.0, 0, 255).astype(np.uint8)
+        else:
+            gray = np.clip((grid + 1.0) * 0.5 * 255.0, 0, 255).astype(np.uint8)
+        gray[0, 0] = 0
+        if gray.shape[1] > 1:
+            gray[0, 1] = 255
         return Image.fromarray(gray).resize((gray.shape[1] * 4, gray.shape[0] * 4), Image.NEAREST)
 
     def metric_display(value: float | None) -> str:
@@ -1253,13 +1270,13 @@ def _(
                         mo.vstack(
                             [
                                 mo.md(f"Anchor patches: `{_record['anchor_label']}`"),
-                                mo.image(patch_grid(_anchor_patches), width=420),
+                                mo.image(patch_grid(_anchor_patches, auto_contrast=True), width=420),
                             ]
                         ),
                         mo.vstack(
                             [
                                 mo.md(f"Target patches: `{_record['target_label']}`"),
-                                mo.image(patch_grid(_target_patches), width=420),
+                                mo.image(patch_grid(_target_patches, auto_contrast=True), width=420),
                             ]
                         ),
                     ]
