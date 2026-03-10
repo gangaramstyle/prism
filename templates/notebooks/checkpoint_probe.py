@@ -93,6 +93,38 @@ with app.setup:
             return "n/a"
         return f"{value:.3f}"
 
+    def lookup_view_patches(
+        probe_state: Mapping[str, object],
+        *,
+        sample_index: int,
+        view_index: int,
+    ) -> np.ndarray:
+        patches_views_source = probe_state.get("patches_views_source")
+        if patches_views_source is not None:
+            tensor = patches_views_source[int(sample_index), int(view_index)]
+            return tensor.detach().cpu().numpy()
+
+        examples = probe_state.get("examples")
+        if examples is not None:
+            result = examples[int(sample_index)]["views"][int(view_index)]["result"]
+            return np.asarray(result["normalized_patches"], dtype=np.float32)
+
+        raise KeyError("No patch source is available for the requested view")
+
+    def dataframe_records(value: object) -> list[dict[str, object]]:
+        if value is None:
+            return []
+        if hasattr(value, "to_dicts"):
+            return list(value.to_dicts())
+        if hasattr(value, "to_dict"):
+            try:
+                return list(value.to_dict(orient="records"))
+            except TypeError:
+                pass
+        if isinstance(value, list):
+            return [dict(item) for item in value]
+        return []
+
     def _series_display_text(row: Mapping[str, object]) -> str:
         description = str(row.get("series_description", "") or "").strip()
         if description:
@@ -640,12 +672,7 @@ def _(
                 raise ValueError("study4 forward pass did not return the expected position-decoder outputs")
 
             _pack_t1 = time.perf_counter()
-            _direction_chunks.append(
-                F.normalize(
-                    _outputs.direction_cls_views.detach().cpu().reshape(-1, _outputs.direction_cls_views.shape[-1]),
-                    dim=-1,
-                )
-            )
+            _direction_chunks.append(_outputs.direction_cls_views.detach().cpu().reshape(-1, _outputs.direction_cls_views.shape[-1]))
             _all_view_rows.extend(_batch["view_rows"])
             _all_sample_rows.extend(_batch["sample_rows"])
             _all_pair_rows.extend(build_relative_position_pair_rows(_batch, _outputs))
@@ -706,7 +733,8 @@ def _(
         "position_pair_df": _position_pair_df,
         "mim_df": _mim_df,
         "reconstruction_rows": _reconstruction_rows,
-        "direction_embeddings": _direction_embeddings,
+        "direction_embeddings_raw": _direction_embeddings,
+        "patches_views_source": _cache["patches_views"] if _cache is not None else None,
         "effective_modalities": _modalities,
         "data_source": _data_source,
         "cache_summary": dict(_cache["summary"]) if _cache is not None else None,
@@ -817,6 +845,12 @@ def _(alt, metric_display, mo, pl, probe_state):
             pl.col("front_back_accuracy").round(3),
             pl.col("top_bottom_accuracy").round(3),
         ]
+    ).rename(
+        {
+            "left_right_accuracy": "lr_accuracy",
+            "front_back_accuracy": "ap_accuracy",
+            "top_bottom_accuracy": "si_accuracy",
+        }
     )
     _scan_rows_table = mo.ui.table(
         _series_table.to_dicts(),
@@ -933,14 +967,39 @@ def _(alt, metric_display, mo, pl, probe_state):
 
 
 @app.cell
-def _(alt, mo, pl, position_pair_df, position_scan_picker, position_series_summary):
+def _(
+    _axis_prediction,
+    _axis_truth,
+    _scan_label,
+    alt,
+    mo,
+    np,
+    pl,
+    position_scan_picker,
+    position_series_summary,
+    probe_state,
+    torch,
+    model,
+):
     _selected_scan = str(position_scan_picker.value)
     _selected_summary = position_series_summary.filter(pl.col("scan_label") == _selected_scan)
-    _selected_pairs = position_pair_df.filter(pl.col("scan_label") == _selected_scan).sort(
-        ["pair_accuracy", "sample_index", "pair_name"],
-        descending=[False, False, False],
+    _view_scan_df = probe_state["view_df"].with_row_index("view_row_index").with_columns(
+        pl.Series("scan_label", [_scan_label(_row) for _row in probe_state["view_df"].to_dicts()])
     )
-    mo.stop(_selected_pairs.height == 0, mo.callout(f"No sampled pairs found for `{_selected_scan}`.", kind="warn"))
+    _selected_positions = _view_scan_df.filter(pl.col("scan_label") == _selected_scan).sort(
+        ["sample_index", "view_index"],
+        descending=[False, False],
+    )
+    mo.stop(_selected_positions.height < 2, mo.callout(f"Need at least two sampled positions for `{_selected_scan}`.", kind="warn"))
+    _selected_positions = _selected_positions.with_row_index("position_index", offset=0).with_columns(
+        pl.Series(
+            "position_label",
+            [
+                f"s{int(sample_index)}:{str(view_name)}"
+                for sample_index, view_name in zip(_selected_positions["sample_index"], _selected_positions["view_name"])
+            ],
+        )
+    )
 
     _summary_table = _selected_summary.select(
         [
@@ -969,176 +1028,252 @@ def _(alt, mo, pl, position_pair_df, position_scan_picker, position_series_summa
             pl.col("mean_pair_distance_mm").round(1),
         ]
     )
+    _indices = _selected_positions["view_row_index"].to_list()
+    _raw_embeddings = probe_state["direction_embeddings_raw"][_indices].to(dtype=torch.float32)
+    _positions_mm = np.asarray(_selected_positions["prism_center_pt"].to_list(), dtype=np.float32)
+    _n_positions = int(_selected_positions.height)
+    _device = next(model.parameters()).device
+    with torch.no_grad():
+        _emb = _raw_embeddings.to(_device)
+        _left = _emb[:, None, :].expand(_n_positions, _n_positions, -1)
+        _right = _emb[None, :, :].expand(_n_positions, _n_positions, -1)
+        _pair_logits = model.distance_head(torch.cat([_left, _right], dim=-1).reshape(_n_positions * _n_positions, -1))
+        _pair_probs = torch.sigmoid(_pair_logits[:, :3]).reshape(_n_positions, _n_positions, 3).detach().cpu().numpy()
 
-    def _projection_chart(
-        pair_df: pl.DataFrame,
-        *,
-        title: str,
-        x_start: str,
-        x_end: str,
-        y_start: str,
-        y_end: str,
-        x_mid: str,
-        y_mid: str,
-        x_title: str,
-        y_title: str,
-    ):
-        _fields = [
-            "sample_index",
-            "pair_name",
-            "pair_accuracy",
-            "series_description_display",
-            "anchor_view_name",
-            "target_view_name",
-            "delta_r_mm",
-            "delta_a_mm",
-            "delta_s_mm",
-            "left_right_truth",
-            "left_right_pred",
-            "left_right_correct",
-            "front_back_truth",
-            "front_back_pred",
-            "front_back_correct",
-            "top_bottom_truth",
-            "top_bottom_pred",
-            "top_bottom_correct",
-            x_start,
-            x_end,
-            y_start,
-            y_end,
-            x_mid,
-            y_mid,
-        ]
-        _data = pair_df.select(_fields).to_dicts()
-        _base = alt.Chart(alt.Data(values=_data))
-        _rules = _base.mark_rule(strokeWidth=4, opacity=0.8).encode(
-            x=alt.X(f"{x_start}:Q", title=x_title),
-            x2=alt.X2(f"{x_end}:Q"),
-            y=alt.Y(f"{y_start}:Q", title=y_title),
-            y2=alt.Y2(f"{y_end}:Q"),
-            color=alt.Color(
-                "pair_accuracy:Q",
-                title="pair accuracy",
-                scale=alt.Scale(domain=[0.0, 1.0], range=["#b2182b", "#fddbc7", "#1a9850"]),
-            ),
-            tooltip=[
-                alt.Tooltip("sample_index:Q", title="sample"),
-                alt.Tooltip("pair_name:N", title="pair"),
-                alt.Tooltip("pair_accuracy:Q", format=".3f"),
-                alt.Tooltip("anchor_view_name:N", title="anchor"),
-                alt.Tooltip("target_view_name:N", title="target"),
-                alt.Tooltip("delta_r_mm:Q", title="delta R", format=".1f"),
-                alt.Tooltip("delta_a_mm:Q", title="delta A", format=".1f"),
-                alt.Tooltip("delta_s_mm:Q", title="delta S", format=".1f"),
-                alt.Tooltip("left_right_truth:N", title="L/R truth"),
-                alt.Tooltip("left_right_pred:N", title="L/R pred"),
-                alt.Tooltip("left_right_correct:N", title="L/R ok"),
-                alt.Tooltip("front_back_truth:N", title="F/B truth"),
-                alt.Tooltip("front_back_pred:N", title="F/B pred"),
-                alt.Tooltip("front_back_correct:N", title="F/B ok"),
-                alt.Tooltip("top_bottom_truth:N", title="T/B truth"),
-                alt.Tooltip("top_bottom_pred:N", title="T/B pred"),
-                alt.Tooltip("top_bottom_correct:N", title="T/B ok"),
-            ],
-        )
-        _midpoints = _base.mark_circle(size=70, opacity=0.9, stroke="black", strokeWidth=0.3).encode(
-            x=alt.X(f"{x_mid}:Q", title=x_title),
-            y=alt.Y(f"{y_mid}:Q", title=y_title),
-            color=alt.Color(
-                "pair_accuracy:Q",
-                title="pair accuracy",
-                scale=alt.Scale(domain=[0.0, 1.0], range=["#b2182b", "#fddbc7", "#1a9850"]),
-            ),
-            tooltip=[
-                alt.Tooltip("sample_index:Q", title="sample"),
-                alt.Tooltip("pair_name:N", title="pair"),
-                alt.Tooltip("pair_accuracy:Q", format=".3f"),
-            ],
-        )
-        return alt.layer(_rules, _midpoints).properties(title=title, height=280)
+    _matrix_rows: list[dict[str, object]] = []
+    for _anchor_idx in range(_n_positions):
+        _anchor_row = _selected_positions.row(_anchor_idx, named=True)
+        for _target_idx in range(_n_positions):
+            _target_row = _selected_positions.row(_target_idx, named=True)
+            _delta = _positions_mm[_target_idx] - _positions_mm[_anchor_idx]
+            _axis_specs = (
+                ("lr", "left", "right", 0),
+                ("ap", "posterior", "anterior", 1),
+                ("si", "inferior", "superior", 2),
+            )
+            _correct_values: list[float] = []
+            _row: dict[str, object] = {
+                "anchor_position_index": int(_anchor_idx),
+                "target_position_index": int(_target_idx),
+                "anchor_label": str(_anchor_row["position_label"]),
+                "target_label": str(_target_row["position_label"]),
+                "anchor_sample_index": int(_anchor_row["sample_index"]),
+                "target_sample_index": int(_target_row["sample_index"]),
+                "anchor_view_index": int(_anchor_row["view_index"]),
+                "target_view_index": int(_target_row["view_index"]),
+                "anchor_view_name": str(_anchor_row["view_name"]),
+                "target_view_name": str(_target_row["view_name"]),
+                "delta_r_mm": float(_delta[0]),
+                "delta_a_mm": float(_delta[1]),
+                "delta_s_mm": float(_delta[2]),
+            }
+            for _axis_name, _negative_label, _positive_label, _axis_idx in _axis_specs:
+                _truth_label, _valid, _truth_positive = _axis_truth(
+                    float(_delta[_axis_idx]),
+                    negative_label=_negative_label,
+                    positive_label=_positive_label,
+                )
+                _pred_label, _pred_positive, _confidence = _axis_prediction(
+                    float(_pair_probs[_anchor_idx, _target_idx, _axis_idx]),
+                    negative_label=_negative_label,
+                    positive_label=_positive_label,
+                )
+                _is_correct = bool(_pred_positive == _truth_positive) if _valid else None
+                _correct_values.append(float(_is_correct)) if _valid else None
+                _row[f"{_axis_name}_truth"] = _truth_label
+                _row[f"{_axis_name}_pred"] = _pred_label
+                _row[f"{_axis_name}_correct"] = _is_correct
+                _row[f"{_axis_name}_valid"] = bool(_valid)
+                _row[f"{_axis_name}_accuracy"] = float(_is_correct) if _valid else None
+                _row[f"{_axis_name}_confidence"] = float(_confidence)
+            _row["total_accuracy"] = float(sum(_correct_values) / len(_correct_values)) if _correct_values else None
+            _matrix_rows.append(_row)
 
-    _axial_chart = _projection_chart(
-        _selected_pairs,
-        title="Axial projection (right/left vs front/back)",
-        x_start="anchor_r_mm",
-        x_end="target_r_mm",
-        y_start="anchor_a_mm",
-        y_end="target_a_mm",
-        x_mid="mid_r_mm",
-        y_mid="mid_a_mm",
-        x_title="R/L position (mm)",
-        y_title="F/B position (mm)",
-    )
-    _coronal_chart = _projection_chart(
-        _selected_pairs,
-        title="Coronal projection (right/left vs top/bottom)",
-        x_start="anchor_r_mm",
-        x_end="target_r_mm",
-        y_start="anchor_s_mm",
-        y_end="target_s_mm",
-        x_mid="mid_r_mm",
-        y_mid="mid_s_mm",
-        x_title="R/L position (mm)",
-        y_title="T/B position (mm)",
-    )
-    _sagittal_chart = _projection_chart(
-        _selected_pairs,
-        title="Sagittal projection (front/back vs top/bottom)",
-        x_start="anchor_a_mm",
-        x_end="target_a_mm",
-        y_start="anchor_s_mm",
-        y_end="target_s_mm",
-        x_mid="mid_a_mm",
-        y_mid="mid_s_mm",
-        x_title="F/B position (mm)",
-        y_title="T/B position (mm)",
-    )
-    _worst_selected_pairs = _selected_pairs.select(
+    position_matrix_df = pl.DataFrame(_matrix_rows)
+
+    def _heatmap_widget(value_column: str, title: str, color_title: str):
+        _chart = (
+            alt.Chart(position_matrix_df.to_pandas())
+            .mark_rect()
+            .encode(
+                x=alt.X("target_position_index:O", title="target position"),
+                y=alt.Y("anchor_position_index:O", title="anchor position"),
+                color=alt.Color(
+                    f"{value_column}:Q",
+                    title=color_title,
+                    scale=alt.Scale(domain=[0.0, 1.0], range=["#b2182b", "#fddbc7", "#1a9850"]),
+                ),
+                tooltip=[
+                    alt.Tooltip("anchor_label:N", title="anchor"),
+                    alt.Tooltip("target_label:N", title="target"),
+                    alt.Tooltip("total_accuracy:Q", title="total", format=".3f"),
+                    alt.Tooltip("lr_accuracy:Q", title="LR", format=".3f"),
+                    alt.Tooltip("ap_accuracy:Q", title="AP", format=".3f"),
+                    alt.Tooltip("si_accuracy:Q", title="SI", format=".3f"),
+                    alt.Tooltip("lr_truth:N", title="LR truth"),
+                    alt.Tooltip("lr_pred:N", title="LR pred"),
+                    alt.Tooltip("ap_truth:N", title="AP truth"),
+                    alt.Tooltip("ap_pred:N", title="AP pred"),
+                    alt.Tooltip("si_truth:N", title="SI truth"),
+                    alt.Tooltip("si_pred:N", title="SI pred"),
+                ],
+            )
+            .properties(title=title, height=260, width=260)
+        )
+        return mo.ui.altair_chart(_chart, chart_selection="point", legend_selection=False)
+
+    total_heatmap = _heatmap_widget("total_accuracy", "Total", "accuracy")
+    lr_heatmap = _heatmap_widget("lr_accuracy", "LR", "LR accuracy")
+    ap_heatmap = _heatmap_widget("ap_accuracy", "AP", "AP accuracy")
+    si_heatmap = _heatmap_widget("si_accuracy", "SI", "SI accuracy")
+    _worst_selected_pairs = position_matrix_df.filter(
+        pl.col("anchor_position_index") != pl.col("target_position_index")
+    ).sort(
+        ["total_accuracy", "anchor_position_index", "target_position_index"],
+        descending=[False, False, False],
+        nulls_last=True,
+    ).select(
         [
-            "sample_index",
-            "pair_name",
-            "pair_accuracy",
-            "left_right_truth",
-            "left_right_pred",
-            "left_right_correct",
-            "front_back_truth",
-            "front_back_pred",
-            "front_back_correct",
-            "top_bottom_truth",
-            "top_bottom_pred",
-            "top_bottom_correct",
+            "anchor_label",
+            "target_label",
+            "total_accuracy",
+            "lr_truth",
+            "lr_pred",
+            "lr_correct",
+            "ap_truth",
+            "ap_pred",
+            "ap_correct",
+            "si_truth",
+            "si_pred",
+            "si_correct",
             "delta_r_mm",
             "delta_a_mm",
             "delta_s_mm",
-            "pair_distance_mm",
         ]
     ).with_columns(
         [
-            pl.col("pair_accuracy").round(3),
+            pl.col("total_accuracy").round(3),
             pl.col("delta_r_mm").round(1),
             pl.col("delta_a_mm").round(1),
             pl.col("delta_s_mm").round(1),
-            pl.col("pair_distance_mm").round(1),
         ]
     ).head(24)
+    _detail_note = mo.callout(
+        f"`{_selected_scan}` has {_n_positions} sampled positions in the current evaluation set. "
+        "Each heatmap cell compares one anchor position (row) to one target position (column) using the trained distance head.",
+        kind="info",
+    )
 
     mo.vstack(
         [
             mo.md("## Relative Position Details"),
             _summary_table,
-            mo.ui.altair_chart(_axial_chart),
-            mo.ui.altair_chart(_coronal_chart),
-            mo.ui.altair_chart(_sagittal_chart),
+            _detail_note,
+            mo.hstack([total_heatmap, lr_heatmap]),
+            mo.hstack([ap_heatmap, si_heatmap]),
             mo.md("### Worst pairs for the selected scan"),
             _worst_selected_pairs,
         ]
     )
+    return ap_heatmap, lr_heatmap, position_matrix_df, si_heatmap, total_heatmap
+
+
+@app.cell
+def _(
+    dataframe_records,
+    lookup_view_patches,
+    metric_display,
+    mo,
+    patch_grid,
+    probe_state,
+    ap_heatmap,
+    lr_heatmap,
+    position_matrix_df,
+    si_heatmap,
+    total_heatmap,
+):
+    _selected_records = []
+    for _widget in (total_heatmap, lr_heatmap, ap_heatmap, si_heatmap):
+        _selected_records = dataframe_records(_widget.value)
+        if _selected_records:
+            break
+
+    if not _selected_records:
+        _ui = mo.callout("Click a heatmap cell to inspect the two sampled positions behind that decoder comparison.", kind="info")
+    else:
+        _record = _selected_records[0]
+        _anchor_patches = lookup_view_patches(
+            probe_state,
+            sample_index=int(_record["anchor_sample_index"]),
+            view_index=int(_record["anchor_view_index"]),
+        )
+        _target_patches = lookup_view_patches(
+            probe_state,
+            sample_index=int(_record["target_sample_index"]),
+            view_index=int(_record["target_view_index"]),
+        )
+        _metrics = pl.DataFrame(
+            [
+                {"axis": "total", "truth": "-", "pred": "-", "correct": "-", "accuracy": metric_display(float(_record["total_accuracy"]))},
+                {
+                    "axis": "LR",
+                    "truth": str(_record["lr_truth"]),
+                    "pred": str(_record["lr_pred"]),
+                    "correct": str(_record["lr_correct"]),
+                    "accuracy": metric_display(float(_record["lr_accuracy"])) if _record["lr_accuracy"] is not None else "n/a",
+                },
+                {
+                    "axis": "AP",
+                    "truth": str(_record["ap_truth"]),
+                    "pred": str(_record["ap_pred"]),
+                    "correct": str(_record["ap_correct"]),
+                    "accuracy": metric_display(float(_record["ap_accuracy"])) if _record["ap_accuracy"] is not None else "n/a",
+                },
+                {
+                    "axis": "SI",
+                    "truth": str(_record["si_truth"]),
+                    "pred": str(_record["si_pred"]),
+                    "correct": str(_record["si_correct"]),
+                    "accuracy": metric_display(float(_record["si_accuracy"])) if _record["si_accuracy"] is not None else "n/a",
+                },
+            ]
+        )
+        _ui = mo.vstack(
+            [
+                mo.md("## Selected Position Comparison"),
+                mo.md(
+                    f"Anchor `{_record['anchor_label']}` vs target `{_record['target_label']}` "
+                    f"(delta R={float(_record['delta_r_mm']):.1f} mm, "
+                    f"delta A={float(_record['delta_a_mm']):.1f} mm, "
+                    f"delta S={float(_record['delta_s_mm']):.1f} mm)"
+                ),
+                _metrics,
+                mo.hstack(
+                    [
+                        mo.vstack(
+                            [
+                                mo.md(f"Anchor patches: `{_record['anchor_label']}`"),
+                                mo.image(patch_grid(_anchor_patches), width=420),
+                            ]
+                        ),
+                        mo.vstack(
+                            [
+                                mo.md(f"Target patches: `{_record['target_label']}`"),
+                                mo.image(patch_grid(_target_patches), width=420),
+                            ]
+                        ),
+                    ]
+                ),
+            ]
+        )
+    _ui
     return
 
 
 @app.cell
 def _(
     alt,
+    F,
     include_background_label_0,
     metric_display,
     mo,
@@ -1148,7 +1283,7 @@ def _(
     within_between_cosine_gap,
 ):
     _view_df = probe_state["view_df"]
-    _direction_embeddings = probe_state["direction_embeddings"]
+    _direction_embeddings = F.normalize(probe_state["direction_embeddings_raw"], dim=-1)
     _coords, _explained = pca_project(_direction_embeddings)
     _anatomy_labels = _view_df["anatomy_label"].to_list()
     _ignore_labels = None if include_background_label_0.value else {0}
