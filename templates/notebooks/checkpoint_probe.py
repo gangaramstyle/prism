@@ -5,14 +5,12 @@ app = marimo.App(width="full")
 
 
 with app.setup:
-    import hashlib
-    import json
     import os
     import sys
     import time
     from collections import Counter
     from pathlib import Path
-    from typing import Sequence
+    from typing import Mapping
 
     import altair as alt
     import marimo as mo
@@ -21,7 +19,6 @@ with app.setup:
     import torch
     import torch.nn.functional as F
     from PIL import Image
-    from sklearn.svm import SVC
 
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -29,7 +26,6 @@ with app.setup:
     from prism_ssl.eval import (
         build_eval_batch,
         build_model_from_checkpoint,
-        cosine_similarity_matrix,
         download_wandb_run_checkpoint,
         list_wandb_run_model_artifacts,
         load_checkpoint_payload,
@@ -48,29 +44,6 @@ with app.setup:
     )
 
     alt.data_transformers.disable_max_rows()
-
-    def bucket_top_labels(values: list[object], top_k: int) -> list[str]:
-        counts = Counter(values)
-        keep = {
-            label
-            for label, _count in sorted(counts.items(), key=lambda item: (-item[1], str(item[0])))[: max(int(top_k), 0)]
-        }
-        return [str(value) if value in keep else "other" for value in values]
-
-    def similarity_frame(matrix: np.ndarray, view_keys: list[str]) -> pl.DataFrame:
-        sim = np.asarray(matrix, dtype=np.float32)
-        coords = np.indices(sim.shape)
-        flat_x = coords[1].reshape(-1).astype(np.int64)
-        flat_y = coords[0].reshape(-1).astype(np.int64)
-        return pl.DataFrame(
-            {
-                "x_idx": flat_x,
-                "y_idx": flat_y,
-                "x_key": [view_keys[idx] for idx in flat_x.tolist()],
-                "y_key": [view_keys[idx] for idx in flat_y.tolist()],
-                "similarity": sim.reshape(-1),
-            }
-        )
 
     def summarize_distribution(name: str, values: np.ndarray) -> dict[str, object]:
         arr = np.asarray(values, dtype=np.float32)
@@ -120,345 +93,136 @@ with app.setup:
             return "n/a"
         return f"{value:.3f}"
 
-    def _stable_sort_key(text: str, seed: int) -> int:
-        payload = f"{int(seed)}::{text}".encode("utf-8")
-        return int(hashlib.sha256(payload).hexdigest()[:16], 16)
+    def _series_display_text(row: Mapping[str, object]) -> str:
+        description = str(row.get("series_description", "") or "").strip()
+        if description:
+            return description
+        label = str(row.get("series_label_text", "") or "").strip()
+        if label:
+            return label
+        series_path = str(row.get("series_path", "") or "").strip()
+        return Path(series_path).name or "unknown"
 
-    def deterministic_study_split(
-        study_ids: Sequence[str],
-        *,
-        seed: int,
-        test_fraction: float = 0.2,
-    ) -> tuple[set[str], set[str]]:
-        unique = sorted({str(study_id) for study_id in study_ids}, key=lambda study_id: _stable_sort_key(study_id, seed))
-        if len(unique) < 2:
-            return set(unique), set()
-        n_test = int(round(len(unique) * float(test_fraction)))
-        n_test = min(max(n_test, 1), len(unique) - 1)
-        test_ids = set(unique[:n_test])
-        train_ids = set(unique[n_test:])
-        return train_ids, test_ids
+    def _scan_label(row: Mapping[str, object]) -> str:
+        description = _series_display_text(row)
+        study_id = str(row.get("study_id", "") or "").strip()
+        series_id = str(row.get("series_id", "") or "").strip()
+        series_suffix = series_id.split("_")[-1] if series_id else "unknown"
+        return " | ".join(part for part in [description, study_id, series_suffix] if part)
 
-    def binary_auc_score(y_true: np.ndarray, y_score: np.ndarray) -> float:
-        truth = np.asarray(y_true, dtype=np.int64).reshape(-1)
-        scores = np.asarray(y_score, dtype=np.float32).reshape(-1)
-        pos = scores[truth == 1]
-        neg = scores[truth == 0]
-        if pos.size == 0 or neg.size == 0:
-            return float("nan")
-        greater = (pos[:, None] > neg[None, :]).mean()
-        ties = (pos[:, None] == neg[None, :]).mean()
-        return float(greater + 0.5 * ties)
+    def _axis_truth(delta_mm: float, *, negative_label: str, positive_label: str, threshold_mm: float = 1.0) -> tuple[str, bool, int]:
+        delta_value = float(delta_mm)
+        if abs(delta_value) < float(threshold_mm):
+            return "ambiguous", False, 0
+        is_positive = int(delta_value > 0.0)
+        return (positive_label if is_positive else negative_label), True, is_positive
 
-    def _binary_probe_metrics(
-        *,
-        y_train_int: np.ndarray,
-        y_test_int: np.ndarray,
-        train_pred: np.ndarray,
-        test_pred: np.ndarray,
-        test_probs: np.ndarray,
-    ) -> dict[str, float]:
-        train_acc = float(np.mean(train_pred == y_train_int))
-        test_acc = float(np.mean(test_pred == y_test_int))
-        train_tpr = float(np.mean(train_pred[y_train_int == 1] == 1))
-        train_tnr = float(np.mean(train_pred[y_train_int == 0] == 0))
-        test_tpr = float(np.mean(test_pred[y_test_int == 1] == 1))
-        test_tnr = float(np.mean(test_pred[y_test_int == 0] == 0))
-        return {
-            "train_accuracy": train_acc,
-            "test_accuracy": test_acc,
-            "train_balanced_accuracy": float(0.5 * (train_tpr + train_tnr)),
-            "test_balanced_accuracy": float(0.5 * (test_tpr + test_tnr)),
-            "test_auc": binary_auc_score(y_test_int, test_probs),
-        }
+    def _axis_prediction(prob_positive: float, *, negative_label: str, positive_label: str) -> tuple[str, int, float]:
+        prob_value = float(prob_positive)
+        pred_positive = int(prob_value >= 0.5)
+        confidence = prob_value if pred_positive == 1 else 1.0 - prob_value
+        return (positive_label if pred_positive == 1 else negative_label), pred_positive, float(confidence)
 
-    def prepare_binary_probe_inputs(
-        embeddings: torch.Tensor,
-        labels: Sequence[str],
-        study_ids: Sequence[str],
-    ) -> dict[str, object]:
-        labels_arr = np.asarray([str(label) for label in labels], dtype=object)
-        study_arr = np.asarray([str(study_id) for study_id in study_ids], dtype=object)
-        keep_mask = np.isin(labels_arr, ["red", "blue"])
-        keep_indices = np.flatnonzero(keep_mask)
-        if keep_indices.size < 8:
-            return {"status": "too_few_points", "eligible_points": int(keep_indices.size)}
-        x = F.normalize(embeddings.detach().cpu()[keep_mask].to(dtype=torch.float32), dim=-1).numpy()
-        y = np.asarray([1 if label == "blue" else 0 for label in labels_arr[keep_mask]], dtype=np.int64)
-        study_subset = study_arr[keep_mask]
-        return {
-            "status": "ok",
-            "eligible_points": int(keep_indices.size),
-            "eligible_indices": keep_indices.tolist(),
-            "x": x,
-            "y": y,
-            "study_ids": study_subset,
-        }
+    def build_relative_position_pair_rows(
+        batch: Mapping[str, object],
+        outputs,
+    ) -> list[dict[str, object]]:
+        if outputs.distance_logits_x is None or outputs.distance_logits_y is None:
+            raise ValueError("study4 forward pass did not return relative-position logits")
 
-    def find_valid_binary_study_split(
-        y: np.ndarray,
-        study_ids: Sequence[str],
-        *,
-        seed: int,
-        test_fraction: float = 0.2,
-        max_attempts: int = 32,
-    ) -> dict[str, object]:
-        study_subset = [str(study_id) for study_id in study_ids]
-        last_train_mask = np.zeros(len(study_subset), dtype=bool)
-        last_test_mask = np.zeros(len(study_subset), dtype=bool)
-        for attempt in range(int(max_attempts)):
-            train_studies, test_studies = deterministic_study_split(
-                study_subset,
-                seed=int(seed) + attempt,
-                test_fraction=test_fraction,
+        probs_x = torch.sigmoid(outputs.distance_logits_x[:, :3].detach().cpu().to(dtype=torch.float32)).numpy()
+        probs_y = torch.sigmoid(outputs.distance_logits_y[:, :3].detach().cpu().to(dtype=torch.float32)).numpy()
+        deltas_x = batch["center_delta_mm_x"].detach().cpu().to(dtype=torch.float32).numpy()
+        deltas_y = batch["center_delta_mm_y"].detach().cpu().to(dtype=torch.float32).numpy()
+        sample_rows = list(batch["sample_rows"])
+        view_rows = list(batch["view_rows"])
+
+        axis_specs = (
+            ("left_right", "left", "right", 0),
+            ("front_back", "back", "front", 1),
+            ("top_bottom", "bottom", "top", 2),
+        )
+
+        pair_rows: list[dict[str, object]] = []
+        for local_index, sample_row in enumerate(sample_rows):
+            sample_view_rows = view_rows[local_index * 4 : (local_index + 1) * 4]
+            if len(sample_view_rows) != 4:
+                raise ValueError(
+                    f"Expected 4 view rows per sample, got {len(sample_view_rows)} for sample_index={sample_row['sample_index']}"
+                )
+
+            pair_specs = (
+                ("x", sample_view_rows[0], sample_view_rows[2], probs_x[local_index], deltas_x[local_index]),
+                ("y", sample_view_rows[1], sample_view_rows[3], probs_y[local_index], deltas_y[local_index]),
             )
-            if not train_studies or not test_studies:
-                continue
-            train_mask = np.asarray([study_id in train_studies for study_id in study_subset], dtype=bool)
-            test_mask = np.asarray([study_id in test_studies for study_id in study_subset], dtype=bool)
-            last_train_mask = train_mask
-            last_test_mask = test_mask
-            if train_mask.sum() == 0 or test_mask.sum() == 0:
-                continue
-            y_train = y[train_mask]
-            y_test = y[test_mask]
-            if np.unique(y_train).size < 2 or np.unique(y_test).size < 2:
-                continue
-            return {
-                "status": "ok",
-                "attempt": int(attempt),
-                "train_mask": train_mask,
-                "test_mask": test_mask,
-                "train_studies": train_studies,
-                "test_studies": test_studies,
-            }
-        return {
-            "status": "single_class_split",
-            "train_points": int(last_train_mask.sum()),
-            "test_points": int(last_test_mask.sum()),
-        }
 
-    def fit_binary_linear_probe(
-        embeddings: torch.Tensor,
-        labels: Sequence[str],
-        study_ids: Sequence[str],
-        *,
-        seed: int,
-        test_fraction: float = 0.2,
-        epochs: int = 400,
-        lr: float = 0.05,
-        weight_decay: float = 1e-4,
-    ) -> dict[str, object]:
-        prepared = prepare_binary_probe_inputs(embeddings, labels, study_ids)
-        if prepared["status"] != "ok":
-            return prepared
-        split = find_valid_binary_study_split(
-            prepared["y"],
-            prepared["study_ids"],
-            seed=seed,
-            test_fraction=test_fraction,
-        )
-        if split["status"] != "ok":
-            return {
-                "status": str(split["status"]),
-                "eligible_points": int(prepared["eligible_points"]),
-                "train_points": int(split.get("train_points", 0)),
-                "test_points": int(split.get("test_points", 0)),
-            }
+            for pair_name, anchor_view, target_view, axis_probs, axis_deltas in pair_specs:
+                anchor_pt = np.asarray(anchor_view["prism_center_pt"], dtype=np.float32)
+                target_pt = np.asarray(target_view["prism_center_pt"], dtype=np.float32)
+                midpoint = 0.5 * (anchor_pt + target_pt)
+                series_id = str(anchor_view["series_id"])
+                base_row: dict[str, object] = {
+                    "pair_key": f"{int(sample_row['sample_index'])}:{pair_name}",
+                    "pair_name": str(pair_name),
+                    "sample_index": int(sample_row["sample_index"]),
+                    "study_sample_index": int(sample_row.get("study_sample_index", 0)),
+                    "study_id": str(sample_row["study_id"]),
+                    "series_id": series_id,
+                    "scan_label": _scan_label(anchor_view),
+                    "series_description_display": _series_display_text(anchor_view),
+                    "series_path": str(anchor_view.get("series_path", "")),
+                    "series_family": infer_series_family(anchor_view),
+                    "contrast_bucket": infer_contrast_bucket(anchor_view),
+                    "native_acquisition_plane": str(anchor_view.get("native_acquisition_plane", "unknown")),
+                    "cross_valid": bool(sample_row.get("cross_valid", False)),
+                    "cross_mode": str(sample_row.get("cross_mode", "")),
+                    "anchor_view_name": str(anchor_view["view_name"]),
+                    "target_view_name": str(target_view["view_name"]),
+                    "anchor_r_mm": float(anchor_pt[0]),
+                    "anchor_a_mm": float(anchor_pt[1]),
+                    "anchor_s_mm": float(anchor_pt[2]),
+                    "target_r_mm": float(target_pt[0]),
+                    "target_a_mm": float(target_pt[1]),
+                    "target_s_mm": float(target_pt[2]),
+                    "mid_r_mm": float(midpoint[0]),
+                    "mid_a_mm": float(midpoint[1]),
+                    "mid_s_mm": float(midpoint[2]),
+                    "delta_r_mm": float(axis_deltas[0]),
+                    "delta_a_mm": float(axis_deltas[1]),
+                    "delta_s_mm": float(axis_deltas[2]),
+                    "pair_distance_mm": float(np.linalg.norm(np.asarray(axis_deltas[:3], dtype=np.float32))),
+                }
 
-        torch.manual_seed(int(seed))
-        x = torch.from_numpy(np.asarray(prepared["x"], dtype=np.float32))
-        y = np.asarray(prepared["y"], dtype=np.float32)
-        train_mask = np.asarray(split["train_mask"], dtype=bool)
-        test_mask = np.asarray(split["test_mask"], dtype=bool)
-        y_train = y[train_mask]
-        y_test = y[test_mask]
-        model = torch.nn.Linear(int(x.shape[1]), 1)
-        optimizer = torch.optim.AdamW(model.parameters(), lr=float(lr), weight_decay=float(weight_decay))
-        pos_count = max(float(y_train.sum()), 1.0)
-        neg_count = max(float(y_train.shape[0] - y_train.sum()), 1.0)
-        loss_fn = torch.nn.BCEWithLogitsLoss(pos_weight=torch.tensor(neg_count / pos_count, dtype=torch.float32))
+                valid_axes = 0
+                correct_axes = 0
+                for axis_name, negative_label, positive_label, axis_index in axis_specs:
+                    truth_label, is_valid, truth_positive = _axis_truth(
+                        float(axis_deltas[axis_index]),
+                        negative_label=negative_label,
+                        positive_label=positive_label,
+                    )
+                    pred_label, pred_positive, confidence = _axis_prediction(
+                        float(axis_probs[axis_index]),
+                        negative_label=negative_label,
+                        positive_label=positive_label,
+                    )
+                    is_correct = bool(pred_positive == truth_positive) if is_valid else None
+                    if is_valid:
+                        valid_axes += 1
+                        correct_axes += int(bool(is_correct))
+                    base_row[f"{axis_name}_truth"] = truth_label
+                    base_row[f"{axis_name}_pred"] = pred_label
+                    base_row[f"{axis_name}_valid"] = bool(is_valid)
+                    base_row[f"{axis_name}_correct"] = is_correct
+                    base_row[f"{axis_name}_prob_positive"] = float(axis_probs[axis_index])
+                    base_row[f"{axis_name}_confidence"] = float(confidence)
 
-        x_train = x[train_mask]
-        t_train = torch.tensor(y_train, dtype=torch.float32)
-        for _epoch in range(int(epochs)):
-            optimizer.zero_grad(set_to_none=True)
-            logits = model(x_train).squeeze(-1)
-            loss = loss_fn(logits, t_train)
-            loss.backward()
-            optimizer.step()
+                base_row["n_valid_axes"] = int(valid_axes)
+                base_row["n_incorrect_axes"] = int(valid_axes - correct_axes) if valid_axes > 0 else None
+                base_row["pair_accuracy"] = float(correct_axes / valid_axes) if valid_axes > 0 else None
+                pair_rows.append(base_row)
 
-        with torch.no_grad():
-            train_probs = torch.sigmoid(model(x_train).squeeze(-1)).cpu().numpy()
-            test_probs = torch.sigmoid(model(x[test_mask]).squeeze(-1)).cpu().numpy()
-
-        train_pred = (train_probs >= 0.5).astype(np.int64)
-        test_pred = (test_probs >= 0.5).astype(np.int64)
-        y_train_int = y_train.astype(np.int64)
-        y_test_int = y_test.astype(np.int64)
-        metrics = _binary_probe_metrics(
-            y_train_int=y_train_int,
-            y_test_int=y_test_int,
-            train_pred=train_pred,
-            test_pred=test_pred,
-            test_probs=test_probs,
-        )
-        return {
-            "status": "ok",
-            "eligible_points": int(prepared["eligible_points"]),
-            "eligible_indices": list(prepared["eligible_indices"]),
-            "train_mask": train_mask.tolist(),
-            "test_mask": test_mask.tolist(),
-            "train_points": int(train_mask.sum()),
-            "test_points": int(test_mask.sum()),
-            "train_studies": int(len(split["train_studies"])),
-            "test_studies": int(len(split["test_studies"])),
-            "test_prob_blue": test_probs.tolist(),
-            "test_true_blue": y_test_int.tolist(),
-            "test_pred_blue": test_pred.tolist(),
-            "test_study_ids": np.asarray(prepared["study_ids"], dtype=object)[test_mask].tolist(),
-            "weight_norm": float(model.weight.detach().norm().cpu().item()),
-            "bias": float(model.bias.detach().cpu().item()),
-            **metrics,
-        }
-
-    def fit_binary_rbf_svm_probe(
-        embeddings: torch.Tensor,
-        labels: Sequence[str],
-        study_ids: Sequence[str],
-        *,
-        seed: int,
-        test_fraction: float = 0.2,
-        c: float = 1.0,
-    ) -> dict[str, object]:
-        prepared = prepare_binary_probe_inputs(embeddings, labels, study_ids)
-        if prepared["status"] != "ok":
-            return prepared
-        split = find_valid_binary_study_split(
-            prepared["y"],
-            prepared["study_ids"],
-            seed=seed,
-            test_fraction=test_fraction,
-        )
-        if split["status"] != "ok":
-            return {
-                "status": str(split["status"]),
-                "eligible_points": int(prepared["eligible_points"]),
-                "train_points": int(split.get("train_points", 0)),
-                "test_points": int(split.get("test_points", 0)),
-            }
-
-        x = np.asarray(prepared["x"], dtype=np.float32)
-        y = np.asarray(prepared["y"], dtype=np.int64)
-        train_mask = np.asarray(split["train_mask"], dtype=bool)
-        test_mask = np.asarray(split["test_mask"], dtype=bool)
-        y_train = y[train_mask]
-        y_test = y[test_mask]
-
-        model = SVC(kernel="rbf", C=float(c), gamma="scale", class_weight="balanced", probability=True, random_state=int(seed))
-        model.fit(x[train_mask], y_train)
-        train_probs = model.predict_proba(x[train_mask])[:, 1]
-        test_probs = model.predict_proba(x[test_mask])[:, 1]
-        train_pred = model.predict(x[train_mask]).astype(np.int64)
-        test_pred = model.predict(x[test_mask]).astype(np.int64)
-        metrics = _binary_probe_metrics(
-            y_train_int=y_train,
-            y_test_int=y_test,
-            train_pred=train_pred,
-            test_pred=test_pred,
-            test_probs=test_probs,
-        )
-        return {
-            "status": "ok",
-            "eligible_points": int(prepared["eligible_points"]),
-            "eligible_indices": list(prepared["eligible_indices"]),
-            "train_mask": train_mask.tolist(),
-            "test_mask": test_mask.tolist(),
-            "train_points": int(train_mask.sum()),
-            "test_points": int(test_mask.sum()),
-            "train_studies": int(len(split["train_studies"])),
-            "test_studies": int(len(split["test_studies"])),
-            "test_prob_blue": test_probs.tolist(),
-            "test_true_blue": y_test.tolist(),
-            "test_pred_blue": test_pred.tolist(),
-            "test_study_ids": np.asarray(prepared["study_ids"], dtype=object)[test_mask].tolist(),
-            "support_vectors": int(model.n_support_.sum()),
-            "gamma": str(model.gamma),
-            **metrics,
-        }
-
-    def _normalize_group_part(value: object, *, fallback: str) -> str:
-        text = str(value or "").strip()
-        return text if text else fallback
-
-    def prepare_supcon_view_df(view_df: pl.DataFrame) -> pl.DataFrame:
-        series_labels = []
-        series_description_display = []
-        series_families = []
-        contrast_buckets = []
-        acquisition_planes = []
-        family_plane = []
-        family_contrast = []
-        family_plane_contrast = []
-        for row in view_df.to_dicts():
-            description_display = _normalize_group_part(
-                row.get("series_description"),
-                fallback=_normalize_group_part(
-                    row.get("series_label_text"),
-                    fallback=infer_series_family(row),
-                ),
-            )
-            series_label = _normalize_group_part(
-                row.get("series_label_text") or row.get("series_description"),
-                fallback=infer_series_family(row),
-            )
-            series_family = _normalize_group_part(row.get("series_family"), fallback=infer_series_family(row))
-            contrast_bucket = _normalize_group_part(row.get("contrast_bucket"), fallback=infer_contrast_bucket(row))
-            acquisition_plane = _normalize_group_part(
-                row.get("native_acquisition_plane"),
-                fallback="unknown_plane",
-            )
-            series_labels.append(series_label)
-            series_description_display.append(description_display)
-            series_families.append(series_family)
-            contrast_buckets.append(contrast_bucket)
-            acquisition_planes.append(acquisition_plane)
-            family_plane.append(f"{series_family} | {acquisition_plane}")
-            family_contrast.append(f"{series_family} | {contrast_bucket}")
-            family_plane_contrast.append(f"{series_family} | {acquisition_plane} | {contrast_bucket}")
-
-        return view_df.with_columns(
-            [
-                pl.Series("series_label_text", series_labels),
-                pl.Series("series_description_display", series_description_display),
-                pl.Series("series_family", series_families),
-                pl.Series("contrast_bucket", contrast_buckets),
-                pl.Series("native_acquisition_plane", acquisition_planes),
-                pl.Series("series_family_plane", family_plane),
-                pl.Series("series_family_contrast", family_contrast),
-                pl.Series("series_family_plane_contrast", family_plane_contrast),
-            ]
-        )
-
-    def supcon_selection_labels(
-        view_df: pl.DataFrame,
-        *,
-        red_descriptions: set[str],
-        blue_descriptions: set[str],
-    ) -> list[str]:
-        selection_labels: list[str] = []
-        for series_description in view_df["series_description_display"].to_list():
-            in_red = series_description in red_descriptions
-            in_blue = series_description in blue_descriptions
-            if in_red and in_blue:
-                selection_labels.append("both")
-            elif in_red:
-                selection_labels.append("red")
-            elif in_blue:
-                selection_labels.append("blue")
-            else:
-                selection_labels.append("other")
-        return selection_labels
+        return pair_rows
 
 
 @app.cell
@@ -469,7 +233,7 @@ def _():
 # Prism SSL Study4 Checkpoint Probe
 
 Load a local checkpoint or a W&B run artifact, run deterministic `study4` sampling, and inspect:
-- SupCon clustering by series label
+- Trained relative-position decoder accuracy for left/right, front/back, and top/bottom
 - Anatomy/view CLS clustering by dominant TotalSegmentator label ID
 - Masked-patch reconstruction quality for self/register/cross paths
 """
@@ -706,9 +470,9 @@ def _(
     VIEW_NAMES,
     build_eval_batch,
     build_eval_batch_from_ct_validation_cache,
+    build_relative_position_pair_rows,
     catalog_path,
     config,
-    cosine_similarity_matrix,
     effective_eval_batch_size,
     effective_n_studies,
     is_script_mode,
@@ -835,9 +599,9 @@ def _(
 
     _all_view_rows: list[dict[str, object]] = []
     _all_sample_rows: list[dict[str, object]] = []
+    _all_pair_rows: list[dict[str, object]] = []
     _reconstruction_rows: list[dict[str, object]] = []
     _mim_rows: list[dict[str, object]] = []
-    _supcon_chunks: list[torch.Tensor] = []
     _direction_chunks: list[torch.Tensor] = []
     _model_device = next(model.parameters()).device
     _num_chunks = (_selected_studies + int(effective_eval_batch_size) - 1) // int(effective_eval_batch_size)
@@ -869,11 +633,14 @@ def _(
                 )
             _forward_seconds += float(time.perf_counter() - _forward_t0)
 
-            if _outputs.proj_views is None or _outputs.direction_cls_views is None:
-                raise ValueError("study4 forward pass did not return the expected view embeddings")
+            if (
+                _outputs.distance_logits_x is None
+                or _outputs.distance_logits_y is None
+                or _outputs.direction_cls_views is None
+            ):
+                raise ValueError("study4 forward pass did not return the expected position-decoder outputs")
 
             _pack_t1 = time.perf_counter()
-            _supcon_chunks.append(_outputs.proj_views.detach().cpu().reshape(-1, _outputs.proj_views.shape[-1]))
             _direction_chunks.append(
                 F.normalize(
                     _outputs.direction_cls_views.detach().cpu().reshape(-1, _outputs.direction_cls_views.shape[-1]),
@@ -882,6 +649,7 @@ def _(
             )
             _all_view_rows.extend(_batch["view_rows"])
             _all_sample_rows.extend(_batch["sample_rows"])
+            _all_pair_rows.extend(build_relative_position_pair_rows(_batch, _outputs))
 
             _l1_bundle = masked_l1_per_view(_outputs, _batch["cross_valid"])
             _self_l1 = _l1_bundle["self"].detach().cpu().numpy()
@@ -924,10 +692,10 @@ def _(
             )
 
     _finalize_t0 = time.perf_counter()
-    _supcon_embeddings = torch.cat(_supcon_chunks, dim=0)
     _direction_embeddings = torch.cat(_direction_chunks, dim=0)
     _view_df = pl.DataFrame(_all_view_rows)
     _sample_df = pl.DataFrame(_all_sample_rows)
+    _position_pair_df = pl.DataFrame(_all_pair_rows)
     _mim_df = pl.DataFrame(_mim_rows)
     _finalize_seconds = float(time.perf_counter() - _finalize_t0)
     _total_seconds = float(_cache_load_seconds + _sampling_seconds + _forward_seconds + _pack_seconds + _finalize_seconds)
@@ -936,9 +704,9 @@ def _(
         "examples": _examples,
         "view_df": _view_df,
         "sample_df": _sample_df,
+        "position_pair_df": _position_pair_df,
         "mim_df": _mim_df,
         "reconstruction_rows": _reconstruction_rows,
-        "supcon_embeddings": _supcon_embeddings,
         "direction_embeddings": _direction_embeddings,
         "effective_modalities": _modalities,
         "data_source": _data_source,
@@ -949,7 +717,7 @@ def _(
             {"stage": "sampling", "seconds": _sampling_seconds},
             {"stage": "batch_and_metrics_pack", "seconds": _pack_seconds},
             {"stage": "model_forward", "seconds": _forward_seconds},
-            {"stage": "finalize_similarity_tables", "seconds": _finalize_seconds},
+            {"stage": "finalize_probe_state", "seconds": _finalize_seconds},
             {"stage": "total", "seconds": _total_seconds},
         ],
     }
@@ -989,231 +757,381 @@ def _(mo, probe_state):
 
 
 @app.cell
-def _(
-    mo,
-    pl,
-    prepare_supcon_view_df,
-    probe_state,
-):
-    _view_df = prepare_supcon_view_df(probe_state["view_df"])
-    _series_summary_df = (
-        _view_df.group_by(
+def _(alt, metric_display, mo, pl, probe_state):
+    position_pair_df = probe_state["position_pair_df"].filter(pl.col("n_valid_axes") > 0)
+    mo.stop(
+        position_pair_df.height == 0,
+        mo.callout("The trained relative-position decoder did not produce any valid left/right, front/back, or top/bottom targets.", kind="warn"),
+    )
+
+    position_series_summary = (
+        position_pair_df.group_by(
             [
+                "scan_label",
+                "series_id",
+                "study_id",
                 "series_description_display",
                 "series_family",
                 "native_acquisition_plane",
                 "contrast_bucket",
-                "series_label_text",
+                "series_path",
             ]
         )
         .agg(
             [
-                pl.len().alias("view_count"),
+                pl.len().alias("pair_count"),
                 pl.col("sample_index").n_unique().alias("sample_count"),
+                pl.col("pair_accuracy").mean().alias("mean_relative_accuracy"),
+                pl.col("pair_accuracy").median().alias("median_relative_accuracy"),
+                pl.col("pair_accuracy").min().alias("worst_relative_accuracy"),
+                pl.col("left_right_correct").cast(pl.Float64).mean().alias("left_right_accuracy"),
+                pl.col("front_back_correct").cast(pl.Float64).mean().alias("front_back_accuracy"),
+                pl.col("top_bottom_correct").cast(pl.Float64).mean().alias("top_bottom_accuracy"),
+                pl.col("pair_distance_mm").mean().alias("mean_pair_distance_mm"),
             ]
         )
-        .sort(["sample_count", "view_count", "series_description_display"], descending=[True, True, False])
+        .sort(
+            ["mean_relative_accuracy", "worst_relative_accuracy", "scan_label"],
+            descending=[False, False, False],
+        )
     )
-    _series_rows = _series_summary_df.to_dicts()
-    red_series_table = mo.ui.table(
-        _series_rows,
-        selection="multi",
-        pagination=True,
-        page_size=12,
-        wrapped_columns=["series_description_display", "series_family", "series_label_text"],
-        show_download=False,
-        max_height=420,
-        label="Red series",
-    )
-    blue_series_table = mo.ui.table(
-        _series_rows,
-        selection="multi",
-        pagination=True,
-        page_size=12,
-        wrapped_columns=["series_description_display", "series_family", "series_label_text"],
-        show_download=False,
-        max_height=420,
-        label="Blue series",
-    )
-    mo.vstack(
+    _series_ranked = position_series_summary.with_row_index("scan_rank", offset=1)
+    _series_table = position_series_summary.select(
         [
-            mo.md("## SupCon Series Selection"),
-            red_series_table,
-            blue_series_table,
+            "scan_label",
+            "series_family",
+            "native_acquisition_plane",
+            "contrast_bucket",
+            "pair_count",
+            "sample_count",
+            "mean_relative_accuracy",
+            "worst_relative_accuracy",
+            "left_right_accuracy",
+            "front_back_accuracy",
+            "top_bottom_accuracy",
+        ]
+    ).with_columns(
+        [
+            pl.col("mean_relative_accuracy").round(3),
+            pl.col("worst_relative_accuracy").round(3),
+            pl.col("left_right_accuracy").round(3),
+            pl.col("front_back_accuracy").round(3),
+            pl.col("top_bottom_accuracy").round(3),
         ]
     )
-    return blue_series_table, red_series_table
-
-
-@app.cell
-def _(
-    alt,
-    cosine_similarity_matrix,
-    metric_display,
-    mo,
-    nearest_neighbor_purity,
-    pca_project,
-    pl,
-    prepare_supcon_view_df,
-    probe_state,
-    red_series_table,
-    blue_series_table,
-    similarity_frame,
-    supcon_selection_labels,
-    within_between_cosine_gap,
-):
-    _view_df = prepare_supcon_view_df(probe_state["view_df"])
-    _supcon_embeddings = probe_state["supcon_embeddings"]
-    _coords, _explained = pca_project(_supcon_embeddings)
-    _red_descriptions = {
-        str(_row["series_description_display"])
-        for _row in (red_series_table.value or [])
-    }
-    _blue_descriptions = {
-        str(_row["series_description_display"])
-        for _row in (blue_series_table.value or [])
-    }
-
-    _selection_labels = supcon_selection_labels(
-        _view_df,
-        red_descriptions=_red_descriptions,
-        blue_descriptions=_blue_descriptions,
+    _scan_rows_table = mo.ui.table(
+        _series_table.to_dicts(),
+        pagination=True,
+        page_size=12,
+        wrapped_columns=["scan_label", "series_family"],
+        show_download=False,
+        max_height=420,
+        label="Scan summary (worst to best)",
+    )
+    _scan_options = position_series_summary["scan_label"].to_list()
+    position_scan_picker = mo.ui.dropdown(
+        options=_scan_options,
+        value=_scan_options[0],
+        label="Inspect scan",
     )
 
-    _supcon_df = _view_df.with_columns(
+    _overall_metrics = pl.DataFrame(
         [
-            pl.Series("pc1", _coords[:, 0]),
-            pl.Series("pc2", _coords[:, 1]),
-            pl.Series("selection_bucket", _selection_labels),
-            pl.Series(
-                "view_key",
-                [f"s{sample_idx}:{view_name}" for sample_idx, view_name in zip(_view_df["sample_index"], _view_df["view_name"])],
+            {"metric": "unique_scans", "value": str(int(position_series_summary.height))},
+            {"metric": "evaluated_pairs", "value": str(int(position_pair_df.height))},
+            {"metric": "unique_studies", "value": str(int(position_pair_df["study_id"].n_unique()))},
+            {"metric": "mean_relative_accuracy", "value": metric_display(float(position_pair_df["pair_accuracy"].mean()))},
+            {
+                "metric": "left_right_accuracy",
+                "value": metric_display(float(position_pair_df["left_right_correct"].drop_nulls().cast(pl.Float64).mean())),
+            },
+            {
+                "metric": "front_back_accuracy",
+                "value": metric_display(float(position_pair_df["front_back_correct"].drop_nulls().cast(pl.Float64).mean())),
+            },
+            {
+                "metric": "top_bottom_accuracy",
+                "value": metric_display(float(position_pair_df["top_bottom_correct"].drop_nulls().cast(pl.Float64).mean())),
+            },
+        ]
+    )
+    _worst_pairs = (
+        position_pair_df.sort(
+            ["pair_accuracy", "pair_distance_mm", "scan_label", "sample_index"],
+            descending=[False, True, False, False],
+        )
+        .select(
+            [
+                "scan_label",
+                "sample_index",
+                "pair_name",
+                "pair_accuracy",
+                "left_right_truth",
+                "left_right_pred",
+                "left_right_correct",
+                "front_back_truth",
+                "front_back_pred",
+                "front_back_correct",
+                "top_bottom_truth",
+                "top_bottom_pred",
+                "top_bottom_correct",
+                "pair_distance_mm",
+            ]
+        )
+        .with_columns(
+            [
+                pl.col("pair_accuracy").round(3),
+                pl.col("pair_distance_mm").round(1),
+            ]
+        )
+        .head(40)
+    )
+    _chart = (
+        alt.Chart(alt.Data(values=_series_ranked.to_dicts()))
+        .mark_circle(size=80, opacity=0.85)
+        .encode(
+            x=alt.X("scan_rank:Q", title="scan rank (worst to best)"),
+            y=alt.Y("mean_relative_accuracy:Q", title="mean relative-position accuracy", scale=alt.Scale(domain=[0.0, 1.0])),
+            color=alt.Color(
+                "worst_relative_accuracy:Q",
+                title="worst pair accuracy",
+                scale=alt.Scale(domain=[0.0, 1.0], range=["#b2182b", "#fddbc7", "#1a9850"]),
             ),
-        ]
+            tooltip=[
+                alt.Tooltip("scan_label:N", title="scan"),
+                alt.Tooltip("series_family:N", title="series family"),
+                alt.Tooltip("native_acquisition_plane:N", title="plane"),
+                alt.Tooltip("contrast_bucket:N", title="contrast"),
+                alt.Tooltip("pair_count:Q", title="pairs"),
+                alt.Tooltip("sample_count:Q", title="samples"),
+                alt.Tooltip("mean_relative_accuracy:Q", format=".3f"),
+                alt.Tooltip("worst_relative_accuracy:Q", format=".3f"),
+                alt.Tooltip("left_right_accuracy:Q", format=".3f"),
+                alt.Tooltip("front_back_accuracy:Q", format=".3f"),
+                alt.Tooltip("top_bottom_accuracy:Q", format=".3f"),
+            ],
+        )
+        .properties(title="Scan-level relative-position accuracy", height=340)
     )
-    _purity = nearest_neighbor_purity(_supcon_embeddings, _selection_labels, ignore_labels={"other"})
-    _gap = within_between_cosine_gap(_supcon_embeddings, _selection_labels, ignore_labels={"other"})
-    _red_point_count = int(sum(_label == "red" for _label in _selection_labels))
-    _blue_point_count = int(sum(_label == "blue" for _label in _selection_labels))
-    _both_point_count = int(sum(_label == "both" for _label in _selection_labels))
-    _total_point_count = int(len(_selection_labels))
-    _selected_view_indices = [idx for idx, label in enumerate(_selection_labels) if label != "other"]
-    _selected_view_df = _supcon_df.filter(pl.col("selection_bucket") != "other")
-
-    if not _selected_view_indices:
-        _scatter_ui = mo.callout(
-            "SupCon PCA requires at least one explicitly selected series from the red or blue tables.",
-            kind="warn",
-        )
-    else:
-        _scatter = (
-            alt.Chart(
-                alt.Data(
-                    values=_selected_view_df.select(
-                        [
-                            "sample_index",
-                            "view_name",
-                            "selection_bucket",
-                            "series_description_display",
-                            "series_label_text",
-                            "series_family",
-                            "native_acquisition_plane",
-                            "contrast_bucket",
-                            "series_description",
-                            "study_id",
-                            "series_path",
-                            "pc1",
-                            "pc2",
-                        ]
-                    ).to_dicts()
-                )
-            )
-            .mark_circle(size=90, opacity=0.85)
-            .encode(
-                x=alt.X("pc1:Q", title=f"PC1 ({_explained[0] * 100:.1f}%)"),
-                y=alt.Y("pc2:Q", title=f"PC2 ({_explained[1] * 100:.1f}%)"),
-                color=alt.Color(
-                    "selection_bucket:N",
-                    title="Selection",
-                    scale=alt.Scale(
-                        domain=["red", "blue", "both"],
-                        range=["#d73027", "#2166ac", "#762a83"],
-                    ),
-                ),
-                tooltip=[
-                    alt.Tooltip("sample_index:Q", title="sample"),
-                    alt.Tooltip("view_name:N", title="view"),
-                    alt.Tooltip("selection_bucket:N", title="selection"),
-                    alt.Tooltip("series_description_display:N", title="series description"),
-                    alt.Tooltip("series_label_text:N", title="series label"),
-                    alt.Tooltip("series_family:N", title="series family"),
-                    alt.Tooltip("native_acquisition_plane:N", title="plane"),
-                    alt.Tooltip("contrast_bucket:N", title="contrast"),
-                    alt.Tooltip("series_description:N", title="series description"),
-                    alt.Tooltip("study_id:N", title="study_id"),
-                    alt.Tooltip("series_path:N", title="series_path"),
-                ],
-            )
-            .properties(title="SupCon PCA (selected only)", height=360)
-        )
-        _scatter_ui = mo.ui.altair_chart(_scatter)
-
-    _heatmap_max_views = 256
-    _heatmap_ui = None
-    if not _selected_view_indices:
-        _heatmap_ui = mo.callout(
-            "SupCon heatmap requires at least one explicitly selected series from the red or blue tables.",
-            kind="warn",
-        )
-    elif _selected_view_df.height <= _heatmap_max_views:
-        _selected_similarity = (
-            cosine_similarity_matrix(_supcon_embeddings[_selected_view_indices]).detach().cpu().numpy()
-        )
-        _sim_df = similarity_frame(_selected_similarity, _selected_view_df["view_key"].to_list())
-        _heatmap = (
-            alt.Chart(alt.Data(values=_sim_df.to_dicts()))
-            .mark_rect()
-            .encode(
-                x=alt.X("x_idx:O", title="view index"),
-                y=alt.Y("y_idx:O", title="view index"),
-                color=alt.Color("similarity:Q", scale=alt.Scale(domain=[-1.0, 1.0], scheme="redblue"), title="cosine"),
-                tooltip=[
-                    alt.Tooltip("x_key:N", title="x"),
-                    alt.Tooltip("y_key:N", title="y"),
-                    alt.Tooltip("similarity:Q", format=".3f"),
-                ],
-            )
-            .properties(title="SupCon cosine similarity (selected only)", height=420, width=420)
-        )
-        _heatmap_ui = mo.ui.altair_chart(_heatmap)
-    else:
-        _heatmap_ui = mo.callout(
-            f"SupCon heatmap skipped for {_selected_view_df.height} selected views. "
-            f"The selected-view heatmap is still quadratic in view count and exceeds marimo's payload limit above about {_heatmap_max_views} views.",
-            kind="warn",
-        )
-
-    _metrics = pl.DataFrame(
+    _note = mo.callout(
+        "This section uses the trained distance head directly on the `(a,b)` and `(ap,bp)` pairs. "
+        "Accuracy is computed only on axes where the true center delta magnitude is at least 1 mm.",
+        kind="info",
+    )
+    mo.vstack(
         [
-            {"metric": "total_points_loaded", "value": str(_total_point_count)},
-            {"metric": "red_series_selected", "value": str(len(_red_descriptions))},
-            {"metric": "blue_series_selected", "value": str(len(_blue_descriptions))},
-            {"metric": "red_points", "value": str(_red_point_count)},
-            {"metric": "blue_points", "value": str(_blue_point_count)},
-            {"metric": "overlap_points", "value": str(_both_point_count)},
-            {"metric": "scatter_points_selected", "value": str(int(_selected_view_df.height))},
-            {"metric": "heatmap_points_selected", "value": str(int(_selected_view_df.height))},
-            {"metric": "nearest_neighbor_purity", "value": metric_display(_purity)},
-            {"metric": "within_between_cosine_gap", "value": metric_display(_gap)},
+            mo.md("## Relative Position Decoder"),
+            _note,
+            _overall_metrics,
+            mo.ui.altair_chart(_chart),
+            _scan_rows_table,
+            mo.md("### Worst sampled pairs"),
+            _worst_pairs,
+            position_scan_picker,
         ]
     )
+    return position_pair_df, position_scan_picker, position_series_summary
+
+
+@app.cell
+def _(alt, mo, pl, position_pair_df, position_scan_picker, position_series_summary):
+    _selected_scan = str(position_scan_picker.value)
+    _selected_summary = position_series_summary.filter(pl.col("scan_label") == _selected_scan)
+    _selected_pairs = position_pair_df.filter(pl.col("scan_label") == _selected_scan).sort(
+        ["pair_accuracy", "sample_index", "pair_name"],
+        descending=[False, False, False],
+    )
+    mo.stop(_selected_pairs.height == 0, mo.callout(f"No sampled pairs found for `{_selected_scan}`.", kind="warn"))
+
+    _summary_table = _selected_summary.select(
+        [
+            "scan_label",
+            "series_family",
+            "native_acquisition_plane",
+            "contrast_bucket",
+            "pair_count",
+            "sample_count",
+            "mean_relative_accuracy",
+            "median_relative_accuracy",
+            "worst_relative_accuracy",
+            "left_right_accuracy",
+            "front_back_accuracy",
+            "top_bottom_accuracy",
+            "mean_pair_distance_mm",
+        ]
+    ).with_columns(
+        [
+            pl.col("mean_relative_accuracy").round(3),
+            pl.col("median_relative_accuracy").round(3),
+            pl.col("worst_relative_accuracy").round(3),
+            pl.col("left_right_accuracy").round(3),
+            pl.col("front_back_accuracy").round(3),
+            pl.col("top_bottom_accuracy").round(3),
+            pl.col("mean_pair_distance_mm").round(1),
+        ]
+    )
+
+    def _projection_chart(
+        pair_df: pl.DataFrame,
+        *,
+        title: str,
+        x_start: str,
+        x_end: str,
+        y_start: str,
+        y_end: str,
+        x_mid: str,
+        y_mid: str,
+        x_title: str,
+        y_title: str,
+    ):
+        _fields = [
+            "sample_index",
+            "pair_name",
+            "pair_accuracy",
+            "series_description_display",
+            "anchor_view_name",
+            "target_view_name",
+            "delta_r_mm",
+            "delta_a_mm",
+            "delta_s_mm",
+            "left_right_truth",
+            "left_right_pred",
+            "left_right_correct",
+            "front_back_truth",
+            "front_back_pred",
+            "front_back_correct",
+            "top_bottom_truth",
+            "top_bottom_pred",
+            "top_bottom_correct",
+            x_start,
+            x_end,
+            y_start,
+            y_end,
+            x_mid,
+            y_mid,
+        ]
+        _data = pair_df.select(_fields).to_dicts()
+        _base = alt.Chart(alt.Data(values=_data))
+        _rules = _base.mark_rule(strokeWidth=4, opacity=0.8).encode(
+            x=alt.X(f"{x_start}:Q", title=x_title),
+            x2=alt.X2(f"{x_end}:Q"),
+            y=alt.Y(f"{y_start}:Q", title=y_title),
+            y2=alt.Y2(f"{y_end}:Q"),
+            color=alt.Color(
+                "pair_accuracy:Q",
+                title="pair accuracy",
+                scale=alt.Scale(domain=[0.0, 1.0], range=["#b2182b", "#fddbc7", "#1a9850"]),
+            ),
+            tooltip=[
+                alt.Tooltip("sample_index:Q", title="sample"),
+                alt.Tooltip("pair_name:N", title="pair"),
+                alt.Tooltip("pair_accuracy:Q", format=".3f"),
+                alt.Tooltip("anchor_view_name:N", title="anchor"),
+                alt.Tooltip("target_view_name:N", title="target"),
+                alt.Tooltip("delta_r_mm:Q", title="delta R", format=".1f"),
+                alt.Tooltip("delta_a_mm:Q", title="delta A", format=".1f"),
+                alt.Tooltip("delta_s_mm:Q", title="delta S", format=".1f"),
+                alt.Tooltip("left_right_truth:N", title="L/R truth"),
+                alt.Tooltip("left_right_pred:N", title="L/R pred"),
+                alt.Tooltip("left_right_correct:N", title="L/R ok"),
+                alt.Tooltip("front_back_truth:N", title="F/B truth"),
+                alt.Tooltip("front_back_pred:N", title="F/B pred"),
+                alt.Tooltip("front_back_correct:N", title="F/B ok"),
+                alt.Tooltip("top_bottom_truth:N", title="T/B truth"),
+                alt.Tooltip("top_bottom_pred:N", title="T/B pred"),
+                alt.Tooltip("top_bottom_correct:N", title="T/B ok"),
+            ],
+        )
+        _midpoints = _base.mark_circle(size=70, opacity=0.9, stroke="black", strokeWidth=0.3).encode(
+            x=alt.X(f"{x_mid}:Q", title=x_title),
+            y=alt.Y(f"{y_mid}:Q", title=y_title),
+            color=alt.Color(
+                "pair_accuracy:Q",
+                title="pair accuracy",
+                scale=alt.Scale(domain=[0.0, 1.0], range=["#b2182b", "#fddbc7", "#1a9850"]),
+            ),
+            tooltip=[
+                alt.Tooltip("sample_index:Q", title="sample"),
+                alt.Tooltip("pair_name:N", title="pair"),
+                alt.Tooltip("pair_accuracy:Q", format=".3f"),
+            ],
+        )
+        return alt.layer(_rules, _midpoints).properties(title=title, height=280)
+
+    _axial_chart = _projection_chart(
+        _selected_pairs,
+        title="Axial projection (right/left vs front/back)",
+        x_start="anchor_r_mm",
+        x_end="target_r_mm",
+        y_start="anchor_a_mm",
+        y_end="target_a_mm",
+        x_mid="mid_r_mm",
+        y_mid="mid_a_mm",
+        x_title="R/L position (mm)",
+        y_title="F/B position (mm)",
+    )
+    _coronal_chart = _projection_chart(
+        _selected_pairs,
+        title="Coronal projection (right/left vs top/bottom)",
+        x_start="anchor_r_mm",
+        x_end="target_r_mm",
+        y_start="anchor_s_mm",
+        y_end="target_s_mm",
+        x_mid="mid_r_mm",
+        y_mid="mid_s_mm",
+        x_title="R/L position (mm)",
+        y_title="T/B position (mm)",
+    )
+    _sagittal_chart = _projection_chart(
+        _selected_pairs,
+        title="Sagittal projection (front/back vs top/bottom)",
+        x_start="anchor_a_mm",
+        x_end="target_a_mm",
+        y_start="anchor_s_mm",
+        y_end="target_s_mm",
+        x_mid="mid_a_mm",
+        y_mid="mid_s_mm",
+        x_title="F/B position (mm)",
+        y_title="T/B position (mm)",
+    )
+    _worst_selected_pairs = _selected_pairs.select(
+        [
+            "sample_index",
+            "pair_name",
+            "pair_accuracy",
+            "left_right_truth",
+            "left_right_pred",
+            "left_right_correct",
+            "front_back_truth",
+            "front_back_pred",
+            "front_back_correct",
+            "top_bottom_truth",
+            "top_bottom_pred",
+            "top_bottom_correct",
+            "delta_r_mm",
+            "delta_a_mm",
+            "delta_s_mm",
+            "pair_distance_mm",
+        ]
+    ).with_columns(
+        [
+            pl.col("pair_accuracy").round(3),
+            pl.col("delta_r_mm").round(1),
+            pl.col("delta_a_mm").round(1),
+            pl.col("delta_s_mm").round(1),
+            pl.col("pair_distance_mm").round(1),
+        ]
+    ).head(24)
 
     mo.vstack(
         [
-            mo.md("## SupCon Clustering"),
-            _metrics,
-            _scatter_ui,
-            _heatmap_ui,
+            mo.md("## Relative Position Details"),
+            _summary_table,
+            mo.ui.altair_chart(_axial_chart),
+            mo.ui.altair_chart(_coronal_chart),
+            mo.ui.altair_chart(_sagittal_chart),
+            mo.md("### Worst pairs for the selected scan"),
+            _worst_selected_pairs,
         ]
     )
     return
@@ -1222,127 +1140,6 @@ def _(
 @app.cell
 def _(
     alt,
-    fit_binary_linear_probe,
-    fit_binary_rbf_svm_probe,
-    metric_display,
-    mo,
-    np,
-    pl,
-    prepare_supcon_view_df,
-    probe_state,
-    red_series_table,
-    blue_series_table,
-    seed,
-    supcon_selection_labels,
-):
-    _view_df = prepare_supcon_view_df(probe_state["view_df"])
-    _red_descriptions = {str(_row["series_description_display"]) for _row in (red_series_table.value or [])}
-    _blue_descriptions = {str(_row["series_description_display"]) for _row in (blue_series_table.value or [])}
-    _selection_labels = supcon_selection_labels(
-        _view_df,
-        red_descriptions=_red_descriptions,
-        blue_descriptions=_blue_descriptions,
-    )
-    _linear_probe = fit_binary_linear_probe(
-        probe_state["supcon_embeddings"],
-        _selection_labels,
-        _view_df["study_id"].to_list(),
-        seed=int(seed.value),
-    )
-    _rbf_probe = fit_binary_rbf_svm_probe(
-        probe_state["supcon_embeddings"],
-        _selection_labels,
-        _view_df["study_id"].to_list(),
-        seed=int(seed.value),
-    )
-
-    def _probe_panel(title: str, result: dict[str, object], extra_metrics: list[tuple[str, object]] | None = None):
-        if result["status"] != "ok":
-            _body = pl.DataFrame([{"status": str(result["status"]), **{k: v for k, v in result.items() if k != "status"}}])
-            return mo.vstack(
-                [
-                    mo.md(f"### {title}"),
-                    mo.callout(f"{title} could not run on the current red/blue selection.", kind="warn"),
-                    _body,
-                ]
-            )
-
-        _metrics_rows = [
-            {"metric": "eligible_points", "value": str(result["eligible_points"])},
-            {"metric": "train_points", "value": str(result["train_points"])},
-            {"metric": "test_points", "value": str(result["test_points"])},
-            {"metric": "train_studies", "value": str(result["train_studies"])},
-            {"metric": "test_studies", "value": str(result["test_studies"])},
-            {"metric": "train_accuracy", "value": metric_display(float(result["train_accuracy"]))},
-            {"metric": "test_accuracy", "value": metric_display(float(result["test_accuracy"]))},
-            {"metric": "train_balanced_accuracy", "value": metric_display(float(result["train_balanced_accuracy"]))},
-            {"metric": "test_balanced_accuracy", "value": metric_display(float(result["test_balanced_accuracy"]))},
-            {"metric": "test_auc", "value": metric_display(float(result["test_auc"]))},
-        ]
-        if extra_metrics:
-            for key, value in extra_metrics:
-                _metrics_rows.append({"metric": key, "value": str(value) if isinstance(value, str) else metric_display(float(value))})
-        _metrics = pl.DataFrame(_metrics_rows)
-
-        _test_indices = np.asarray(result["eligible_indices"], dtype=np.int64)[np.asarray(result["test_mask"], dtype=bool)]
-        _test_df = (
-            _view_df.with_row_index("_row_idx")
-            .filter(pl.col("_row_idx").is_in(_test_indices.tolist()))
-            .drop("_row_idx")
-            .with_columns(
-                [
-                    pl.Series("true_label", ["blue" if int(v) == 1 else "red" for v in result["test_true_blue"]]),
-                    pl.Series("predicted_label", ["blue" if int(v) == 1 else "red" for v in result["test_pred_blue"]]),
-                    pl.Series("prob_blue", [float(v) for v in result["test_prob_blue"]]),
-                ]
-            )
-        )
-        _hist = (
-            alt.Chart(
-                alt.Data(
-                    values=_test_df.select(
-                        ["true_label", "predicted_label", "prob_blue", "study_id", "series_description_display", "view_name"]
-                    ).to_dicts()
-                )
-            )
-            .mark_bar(opacity=0.7)
-            .encode(
-                x=alt.X("prob_blue:Q", bin=alt.Bin(maxbins=20), title="Predicted P(blue)"),
-                y=alt.Y("count():Q", title="test views"),
-                color=alt.Color("true_label:N", scale=alt.Scale(domain=["red", "blue"], range=["#d73027", "#2166ac"])),
-                tooltip=[
-                    alt.Tooltip("true_label:N", title="true"),
-                    alt.Tooltip("predicted_label:N", title="pred"),
-                    alt.Tooltip("study_id:N", title="study_id"),
-                    alt.Tooltip("series_description_display:N", title="series"),
-                    alt.Tooltip("view_name:N", title="view"),
-                    alt.Tooltip("prob_blue:Q", format=".3f"),
-                ],
-            )
-            .properties(title=f"{title} test-score histogram", height=280)
-        )
-        return mo.vstack([mo.md(f"### {title}"), _metrics, mo.ui.altair_chart(_hist)])
-
-    _linear_panel = _probe_panel(
-        "Linear Probe",
-        _linear_probe,
-        extra_metrics=[("weight_norm", _linear_probe.get("weight_norm", float("nan")))],
-    )
-    _rbf_panel = _probe_panel(
-        "RBF SVM Probe",
-        _rbf_probe,
-        extra_metrics=[
-            ("support_vectors", _rbf_probe.get("support_vectors", float("nan"))),
-        ],
-    )
-    mo.vstack([mo.md("## SupCon Probes"), _linear_panel, _rbf_panel])
-    return
-
-
-@app.cell
-def _(
-    alt,
-    bucket_top_labels,
     include_background_label_0,
     metric_display,
     mo,
