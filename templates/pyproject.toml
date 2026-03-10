@@ -17,6 +17,7 @@ dependencies = [
   "marimo>=0.11",
   "altair>=5.0",
   "pyyaml>=6.0",
+  "scikit-learn>=1.5",
 ]
 
 [project.optional-dependencies]

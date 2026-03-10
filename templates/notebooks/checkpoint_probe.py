@@ -21,6 +21,7 @@ with app.setup:
     import torch
     import torch.nn.functional as F
     from PIL import Image
+    from sklearn.svm import SVC
 
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -149,6 +150,94 @@ with app.setup:
         ties = (pos[:, None] == neg[None, :]).mean()
         return float(greater + 0.5 * ties)
 
+    def _binary_probe_metrics(
+        *,
+        y_train_int: np.ndarray,
+        y_test_int: np.ndarray,
+        train_pred: np.ndarray,
+        test_pred: np.ndarray,
+        test_probs: np.ndarray,
+    ) -> dict[str, float]:
+        train_acc = float(np.mean(train_pred == y_train_int))
+        test_acc = float(np.mean(test_pred == y_test_int))
+        train_tpr = float(np.mean(train_pred[y_train_int == 1] == 1))
+        train_tnr = float(np.mean(train_pred[y_train_int == 0] == 0))
+        test_tpr = float(np.mean(test_pred[y_test_int == 1] == 1))
+        test_tnr = float(np.mean(test_pred[y_test_int == 0] == 0))
+        return {
+            "train_accuracy": train_acc,
+            "test_accuracy": test_acc,
+            "train_balanced_accuracy": float(0.5 * (train_tpr + train_tnr)),
+            "test_balanced_accuracy": float(0.5 * (test_tpr + test_tnr)),
+            "test_auc": binary_auc_score(y_test_int, test_probs),
+        }
+
+    def prepare_binary_probe_inputs(
+        embeddings: torch.Tensor,
+        labels: Sequence[str],
+        study_ids: Sequence[str],
+    ) -> dict[str, object]:
+        labels_arr = np.asarray([str(label) for label in labels], dtype=object)
+        study_arr = np.asarray([str(study_id) for study_id in study_ids], dtype=object)
+        keep_mask = np.isin(labels_arr, ["red", "blue"])
+        keep_indices = np.flatnonzero(keep_mask)
+        if keep_indices.size < 8:
+            return {"status": "too_few_points", "eligible_points": int(keep_indices.size)}
+        x = F.normalize(embeddings.detach().cpu()[keep_mask].to(dtype=torch.float32), dim=-1).numpy()
+        y = np.asarray([1 if label == "blue" else 0 for label in labels_arr[keep_mask]], dtype=np.int64)
+        study_subset = study_arr[keep_mask]
+        return {
+            "status": "ok",
+            "eligible_points": int(keep_indices.size),
+            "eligible_indices": keep_indices.tolist(),
+            "x": x,
+            "y": y,
+            "study_ids": study_subset,
+        }
+
+    def find_valid_binary_study_split(
+        y: np.ndarray,
+        study_ids: Sequence[str],
+        *,
+        seed: int,
+        test_fraction: float = 0.2,
+        max_attempts: int = 32,
+    ) -> dict[str, object]:
+        study_subset = [str(study_id) for study_id in study_ids]
+        last_train_mask = np.zeros(len(study_subset), dtype=bool)
+        last_test_mask = np.zeros(len(study_subset), dtype=bool)
+        for attempt in range(int(max_attempts)):
+            train_studies, test_studies = deterministic_study_split(
+                study_subset,
+                seed=int(seed) + attempt,
+                test_fraction=test_fraction,
+            )
+            if not train_studies or not test_studies:
+                continue
+            train_mask = np.asarray([study_id in train_studies for study_id in study_subset], dtype=bool)
+            test_mask = np.asarray([study_id in test_studies for study_id in study_subset], dtype=bool)
+            last_train_mask = train_mask
+            last_test_mask = test_mask
+            if train_mask.sum() == 0 or test_mask.sum() == 0:
+                continue
+            y_train = y[train_mask]
+            y_test = y[test_mask]
+            if np.unique(y_train).size < 2 or np.unique(y_test).size < 2:
+                continue
+            return {
+                "status": "ok",
+                "attempt": int(attempt),
+                "train_mask": train_mask,
+                "test_mask": test_mask,
+                "train_studies": train_studies,
+                "test_studies": test_studies,
+            }
+        return {
+            "status": "single_class_split",
+            "train_points": int(last_train_mask.sum()),
+            "test_points": int(last_test_mask.sum()),
+        }
+
     def fit_binary_linear_probe(
         embeddings: torch.Tensor,
         labels: Sequence[str],
@@ -160,37 +249,30 @@ with app.setup:
         lr: float = 0.05,
         weight_decay: float = 1e-4,
     ) -> dict[str, object]:
-        labels_arr = np.asarray([str(label) for label in labels], dtype=object)
-        study_arr = np.asarray([str(study_id) for study_id in study_ids], dtype=object)
-        keep_mask = np.isin(labels_arr, ["red", "blue"])
-        keep_indices = np.flatnonzero(keep_mask)
-        if keep_indices.size < 8:
-            return {"status": "too_few_points", "eligible_points": int(keep_indices.size)}
-
-        x = embeddings.detach().cpu()[keep_mask].to(dtype=torch.float32)
-        x = F.normalize(x, dim=-1)
-        y = np.asarray([1 if label == "blue" else 0 for label in labels_arr[keep_mask]], dtype=np.float32)
-        study_subset = study_arr[keep_mask]
-        train_studies, test_studies = deterministic_study_split(study_subset.tolist(), seed=seed, test_fraction=test_fraction)
-        if not train_studies or not test_studies:
-            return {"status": "insufficient_studies", "eligible_points": int(keep_indices.size)}
-
-        train_mask = np.asarray([study_id in train_studies for study_id in study_subset], dtype=bool)
-        test_mask = np.asarray([study_id in test_studies for study_id in study_subset], dtype=bool)
-        if train_mask.sum() == 0 or test_mask.sum() == 0:
-            return {"status": "empty_split", "eligible_points": int(keep_indices.size)}
-
-        y_train = y[train_mask]
-        y_test = y[test_mask]
-        if np.unique(y_train).size < 2 or np.unique(y_test).size < 2:
+        prepared = prepare_binary_probe_inputs(embeddings, labels, study_ids)
+        if prepared["status"] != "ok":
+            return prepared
+        split = find_valid_binary_study_split(
+            prepared["y"],
+            prepared["study_ids"],
+            seed=seed,
+            test_fraction=test_fraction,
+        )
+        if split["status"] != "ok":
             return {
-                "status": "single_class_split",
-                "eligible_points": int(keep_indices.size),
-                "train_points": int(train_mask.sum()),
-                "test_points": int(test_mask.sum()),
+                "status": str(split["status"]),
+                "eligible_points": int(prepared["eligible_points"]),
+                "train_points": int(split.get("train_points", 0)),
+                "test_points": int(split.get("test_points", 0)),
             }
 
         torch.manual_seed(int(seed))
+        x = torch.from_numpy(np.asarray(prepared["x"], dtype=np.float32))
+        y = np.asarray(prepared["y"], dtype=np.float32)
+        train_mask = np.asarray(split["train_mask"], dtype=bool)
+        test_mask = np.asarray(split["test_mask"], dtype=bool)
+        y_train = y[train_mask]
+        y_test = y[test_mask]
         model = torch.nn.Linear(int(x.shape[1]), 1)
         optimizer = torch.optim.AdamW(model.parameters(), lr=float(lr), weight_decay=float(weight_decay))
         pos_count = max(float(y_train.sum()), 1.0)
@@ -214,34 +296,95 @@ with app.setup:
         test_pred = (test_probs >= 0.5).astype(np.int64)
         y_train_int = y_train.astype(np.int64)
         y_test_int = y_test.astype(np.int64)
-        train_acc = float(np.mean(train_pred == y_train_int))
-        test_acc = float(np.mean(test_pred == y_test_int))
-        train_tpr = float(np.mean(train_pred[y_train_int == 1] == 1))
-        train_tnr = float(np.mean(train_pred[y_train_int == 0] == 0))
-        test_tpr = float(np.mean(test_pred[y_test_int == 1] == 1))
-        test_tnr = float(np.mean(test_pred[y_test_int == 0] == 0))
-
+        metrics = _binary_probe_metrics(
+            y_train_int=y_train_int,
+            y_test_int=y_test_int,
+            train_pred=train_pred,
+            test_pred=test_pred,
+            test_probs=test_probs,
+        )
         return {
             "status": "ok",
-            "eligible_points": int(keep_indices.size),
-            "eligible_indices": keep_indices.tolist(),
+            "eligible_points": int(prepared["eligible_points"]),
+            "eligible_indices": list(prepared["eligible_indices"]),
             "train_mask": train_mask.tolist(),
             "test_mask": test_mask.tolist(),
             "train_points": int(train_mask.sum()),
             "test_points": int(test_mask.sum()),
-            "train_studies": int(len(train_studies)),
-            "test_studies": int(len(test_studies)),
-            "train_accuracy": train_acc,
-            "test_accuracy": test_acc,
-            "train_balanced_accuracy": float(0.5 * (train_tpr + train_tnr)),
-            "test_balanced_accuracy": float(0.5 * (test_tpr + test_tnr)),
-            "test_auc": binary_auc_score(y_test_int, test_probs),
+            "train_studies": int(len(split["train_studies"])),
+            "test_studies": int(len(split["test_studies"])),
             "test_prob_blue": test_probs.tolist(),
             "test_true_blue": y_test_int.tolist(),
             "test_pred_blue": test_pred.tolist(),
-            "test_study_ids": study_subset[test_mask].tolist(),
+            "test_study_ids": np.asarray(prepared["study_ids"], dtype=object)[test_mask].tolist(),
             "weight_norm": float(model.weight.detach().norm().cpu().item()),
             "bias": float(model.bias.detach().cpu().item()),
+            **metrics,
+        }
+
+    def fit_binary_rbf_svm_probe(
+        embeddings: torch.Tensor,
+        labels: Sequence[str],
+        study_ids: Sequence[str],
+        *,
+        seed: int,
+        test_fraction: float = 0.2,
+        c: float = 1.0,
+    ) -> dict[str, object]:
+        prepared = prepare_binary_probe_inputs(embeddings, labels, study_ids)
+        if prepared["status"] != "ok":
+            return prepared
+        split = find_valid_binary_study_split(
+            prepared["y"],
+            prepared["study_ids"],
+            seed=seed,
+            test_fraction=test_fraction,
+        )
+        if split["status"] != "ok":
+            return {
+                "status": str(split["status"]),
+                "eligible_points": int(prepared["eligible_points"]),
+                "train_points": int(split.get("train_points", 0)),
+                "test_points": int(split.get("test_points", 0)),
+            }
+
+        x = np.asarray(prepared["x"], dtype=np.float32)
+        y = np.asarray(prepared["y"], dtype=np.int64)
+        train_mask = np.asarray(split["train_mask"], dtype=bool)
+        test_mask = np.asarray(split["test_mask"], dtype=bool)
+        y_train = y[train_mask]
+        y_test = y[test_mask]
+
+        model = SVC(kernel="rbf", C=float(c), gamma="scale", class_weight="balanced", probability=True, random_state=int(seed))
+        model.fit(x[train_mask], y_train)
+        train_probs = model.predict_proba(x[train_mask])[:, 1]
+        test_probs = model.predict_proba(x[test_mask])[:, 1]
+        train_pred = model.predict(x[train_mask]).astype(np.int64)
+        test_pred = model.predict(x[test_mask]).astype(np.int64)
+        metrics = _binary_probe_metrics(
+            y_train_int=y_train,
+            y_test_int=y_test,
+            train_pred=train_pred,
+            test_pred=test_pred,
+            test_probs=test_probs,
+        )
+        return {
+            "status": "ok",
+            "eligible_points": int(prepared["eligible_points"]),
+            "eligible_indices": list(prepared["eligible_indices"]),
+            "train_mask": train_mask.tolist(),
+            "test_mask": test_mask.tolist(),
+            "train_points": int(train_mask.sum()),
+            "test_points": int(test_mask.sum()),
+            "train_studies": int(len(split["train_studies"])),
+            "test_studies": int(len(split["test_studies"])),
+            "test_prob_blue": test_probs.tolist(),
+            "test_true_blue": y_test.tolist(),
+            "test_pred_blue": test_pred.tolist(),
+            "test_study_ids": np.asarray(prepared["study_ids"], dtype=object)[test_mask].tolist(),
+            "support_vectors": int(model.n_support_.sum()),
+            "gamma": str(model.gamma),
+            **metrics,
         }
 
     def _normalize_group_part(value: object, *, fallback: str) -> str:
@@ -1065,6 +1208,7 @@ def _(
 def _(
     alt,
     fit_binary_linear_probe,
+    fit_binary_rbf_svm_probe,
     metric_display,
     mo,
     np,
@@ -1084,48 +1228,57 @@ def _(
         red_descriptions=_red_descriptions,
         blue_descriptions=_blue_descriptions,
     )
-    _probe = fit_binary_linear_probe(
+    _linear_probe = fit_binary_linear_probe(
+        probe_state["supcon_embeddings"],
+        _selection_labels,
+        _view_df["study_id"].to_list(),
+        seed=int(seed.value),
+    )
+    _rbf_probe = fit_binary_rbf_svm_probe(
         probe_state["supcon_embeddings"],
         _selection_labels,
         _view_df["study_id"].to_list(),
         seed=int(seed.value),
     )
 
-    if _probe["status"] != "ok":
-        _body = pl.DataFrame([{"status": str(_probe["status"]), **{k: v for k, v in _probe.items() if k != "status"}}])
-        _probe_ui = mo.vstack(
-            [
-                mo.md("## SupCon Linear Probe"),
-                mo.callout("Linear probe could not run on the current red/blue selection.", kind="warn"),
-                _body,
-            ]
-        )
-    else:
-        _metrics = pl.DataFrame(
-            [
-                {"metric": "eligible_points", "value": str(_probe["eligible_points"])},
-                {"metric": "train_points", "value": str(_probe["train_points"])},
-                {"metric": "test_points", "value": str(_probe["test_points"])},
-                {"metric": "train_studies", "value": str(_probe["train_studies"])},
-                {"metric": "test_studies", "value": str(_probe["test_studies"])},
-                {"metric": "train_accuracy", "value": metric_display(float(_probe["train_accuracy"]))},
-                {"metric": "test_accuracy", "value": metric_display(float(_probe["test_accuracy"]))},
-                {"metric": "train_balanced_accuracy", "value": metric_display(float(_probe["train_balanced_accuracy"]))},
-                {"metric": "test_balanced_accuracy", "value": metric_display(float(_probe["test_balanced_accuracy"]))},
-                {"metric": "test_auc", "value": metric_display(float(_probe["test_auc"]))},
-                {"metric": "weight_norm", "value": metric_display(float(_probe["weight_norm"]))},
-            ]
-        )
-        _test_indices = np.asarray(_probe["eligible_indices"], dtype=np.int64)[np.asarray(_probe["test_mask"], dtype=bool)]
+    def _probe_panel(title: str, result: dict[str, object], extra_metrics: list[tuple[str, object]] | None = None):
+        if result["status"] != "ok":
+            _body = pl.DataFrame([{"status": str(result["status"]), **{k: v for k, v in result.items() if k != "status"}}])
+            return mo.vstack(
+                [
+                    mo.md(f"### {title}"),
+                    mo.callout(f"{title} could not run on the current red/blue selection.", kind="warn"),
+                    _body,
+                ]
+            )
+
+        _metrics_rows = [
+            {"metric": "eligible_points", "value": str(result["eligible_points"])},
+            {"metric": "train_points", "value": str(result["train_points"])},
+            {"metric": "test_points", "value": str(result["test_points"])},
+            {"metric": "train_studies", "value": str(result["train_studies"])},
+            {"metric": "test_studies", "value": str(result["test_studies"])},
+            {"metric": "train_accuracy", "value": metric_display(float(result["train_accuracy"]))},
+            {"metric": "test_accuracy", "value": metric_display(float(result["test_accuracy"]))},
+            {"metric": "train_balanced_accuracy", "value": metric_display(float(result["train_balanced_accuracy"]))},
+            {"metric": "test_balanced_accuracy", "value": metric_display(float(result["test_balanced_accuracy"]))},
+            {"metric": "test_auc", "value": metric_display(float(result["test_auc"]))},
+        ]
+        if extra_metrics:
+            for key, value in extra_metrics:
+                _metrics_rows.append({"metric": key, "value": str(value) if isinstance(value, str) else metric_display(float(value))})
+        _metrics = pl.DataFrame(_metrics_rows)
+
+        _test_indices = np.asarray(result["eligible_indices"], dtype=np.int64)[np.asarray(result["test_mask"], dtype=bool)]
         _test_df = (
             _view_df.with_row_index("_row_idx")
             .filter(pl.col("_row_idx").is_in(_test_indices.tolist()))
             .drop("_row_idx")
             .with_columns(
                 [
-                    pl.Series("true_label", ["blue" if int(v) == 1 else "red" for v in _probe["test_true_blue"]]),
-                    pl.Series("predicted_label", ["blue" if int(v) == 1 else "red" for v in _probe["test_pred_blue"]]),
-                    pl.Series("prob_blue", [float(v) for v in _probe["test_prob_blue"]]),
+                    pl.Series("true_label", ["blue" if int(v) == 1 else "red" for v in result["test_true_blue"]]),
+                    pl.Series("predicted_label", ["blue" if int(v) == 1 else "red" for v in result["test_pred_blue"]]),
+                    pl.Series("prob_blue", [float(v) for v in result["test_prob_blue"]]),
                 ]
             )
         )
@@ -1151,10 +1304,23 @@ def _(
                     alt.Tooltip("prob_blue:Q", format=".3f"),
                 ],
             )
-            .properties(title="Linear probe test-score histogram", height=280)
+            .properties(title=f"{title} test-score histogram", height=280)
         )
-        _probe_ui = mo.vstack([mo.md("## SupCon Linear Probe"), _metrics, mo.ui.altair_chart(_hist)])
-    _probe_ui
+        return mo.vstack([mo.md(f"### {title}"), _metrics, mo.ui.altair_chart(_hist)])
+
+    _linear_panel = _probe_panel(
+        "Linear Probe",
+        _linear_probe,
+        extra_metrics=[("weight_norm", _linear_probe.get("weight_norm", float("nan")))],
+    )
+    _rbf_panel = _probe_panel(
+        "RBF SVM Probe",
+        _rbf_probe,
+        extra_metrics=[
+            ("support_vectors", _rbf_probe.get("support_vectors", float("nan"))),
+        ],
+    )
+    mo.vstack([mo.md("## SupCon Probes"), _linear_panel, _rbf_panel])
     return
 
 
