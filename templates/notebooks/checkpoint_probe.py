@@ -117,22 +117,13 @@ with app.setup:
             return "n/a"
         return f"{value:.3f}"
 
-    SUPCON_GROUP_OPTIONS = [
-        "series_label_text",
-        "series_family",
-        "native_acquisition_plane",
-        "contrast_bucket",
-        "series_family|plane",
-        "series_family|contrast",
-        "series_family|plane|contrast",
-    ]
-
     def _normalize_group_part(value: object, *, fallback: str) -> str:
         text = str(value or "").strip()
         return text if text else fallback
 
     def prepare_supcon_view_df(view_df: pl.DataFrame) -> pl.DataFrame:
         series_labels = []
+        series_description_display = []
         series_families = []
         contrast_buckets = []
         acquisition_planes = []
@@ -140,6 +131,13 @@ with app.setup:
         family_contrast = []
         family_plane_contrast = []
         for row in view_df.to_dicts():
+            description_display = _normalize_group_part(
+                row.get("series_description"),
+                fallback=_normalize_group_part(
+                    row.get("series_label_text"),
+                    fallback=infer_series_family(row),
+                ),
+            )
             series_label = _normalize_group_part(
                 row.get("series_label_text") or row.get("series_description"),
                 fallback=infer_series_family(row),
@@ -151,6 +149,7 @@ with app.setup:
                 fallback="unknown_plane",
             )
             series_labels.append(series_label)
+            series_description_display.append(description_display)
             series_families.append(series_family)
             contrast_buckets.append(contrast_bucket)
             acquisition_planes.append(acquisition_plane)
@@ -161,6 +160,7 @@ with app.setup:
         return view_df.with_columns(
             [
                 pl.Series("series_label_text", series_labels),
+                pl.Series("series_description_display", series_description_display),
                 pl.Series("series_family", series_families),
                 pl.Series("contrast_bucket", contrast_buckets),
                 pl.Series("native_acquisition_plane", acquisition_planes),
@@ -189,7 +189,7 @@ Load a local checkpoint or a W&B run artifact, run deterministic `study4` sampli
 
 
 @app.cell
-def _(Path, SUPCON_GROUP_OPTIONS, mo, os):
+def _(Path, mo, os):
     default_catalog = os.environ.get(
         "CATALOG_PATH",
         str(Path(__file__).resolve().parents[1] / "data" / "pmbb_catalog.csv.gz"),
@@ -204,11 +204,6 @@ def _(Path, SUPCON_GROUP_OPTIONS, mo, os):
     n_studies = mo.ui.slider(start=1, stop=512, step=1, value=32, label="Studies")
     eval_batch_size = mo.ui.slider(start=1, stop=32, step=1, value=4, label="Eval batch size")
     seed = mo.ui.number(label="Seed", value=42, step=1)
-    supcon_group_by = mo.ui.dropdown(
-        options=SUPCON_GROUP_OPTIONS,
-        value="series_family|plane|contrast",
-        label="SupCon group by",
-    )
     include_background_label_0 = mo.ui.checkbox(label="Include anatomy label 0", value=False)
     _source_note = mo.callout(
         "Provide either a local checkpoint path or a W&B run URL. Local paths take priority. "
@@ -224,7 +219,7 @@ def _(Path, SUPCON_GROUP_OPTIONS, mo, os):
             mo.hstack([checkpoint_path, wandb_run_ref]),
             mo.hstack([catalog_path, validation_cache_dir]),
             mo.hstack([wandb_force_refresh]),
-            mo.hstack([device, n_studies, eval_batch_size, seed, supcon_group_by, include_background_label_0]),
+            mo.hstack([device, n_studies, eval_batch_size, seed, include_background_label_0]),
         ]
     )
     return (
@@ -235,7 +230,6 @@ def _(Path, SUPCON_GROUP_OPTIONS, mo, os):
         include_background_label_0,
         n_studies,
         seed,
-        supcon_group_by,
         validation_cache_dir,
         wandb_force_refresh,
         wandb_run_ref,
@@ -702,50 +696,16 @@ def _(mo, probe_state):
 
 @app.cell
 def _(
-    alt,
-    bucket_top_labels,
-    metric_display,
     mo,
-    nearest_neighbor_purity,
-    pca_project,
+    pl,
     prepare_supcon_view_df,
     probe_state,
-    similarity_frame,
-    supcon_group_by,
-    within_between_cosine_gap,
 ):
     _view_df = prepare_supcon_view_df(probe_state["view_df"])
-    _supcon_embeddings = probe_state["supcon_embeddings"]
-    _coords, _explained = pca_project(_supcon_embeddings)
-    _group_by = str(supcon_group_by.value)
-    _group_column = {
-        "series_label_text": "series_label_text",
-        "series_family": "series_family",
-        "native_acquisition_plane": "native_acquisition_plane",
-        "contrast_bucket": "contrast_bucket",
-        "series_family|plane": "series_family_plane",
-        "series_family|contrast": "series_family_contrast",
-        "series_family|plane|contrast": "series_family_plane_contrast",
-    }[_group_by]
-    _series_labels = _view_df[_group_column].to_list()
-    _supcon_df = _view_df.with_columns(
-        [
-            pl.Series("pc1", _coords[:, 0]),
-            pl.Series("pc2", _coords[:, 1]),
-            pl.Series("supcon_group_label", _series_labels),
-            pl.Series("series_bucket", bucket_top_labels(_series_labels, top_k=12)),
-            pl.Series(
-                "view_key",
-                [f"s{sample_idx}:{view_name}" for sample_idx, view_name in zip(_view_df["sample_index"], _view_df["view_name"])],
-            ),
-        ]
-    )
-    _purity = nearest_neighbor_purity(_supcon_embeddings, _series_labels)
-    _gap = within_between_cosine_gap(_supcon_embeddings, _series_labels)
-    _breakdown_df = (
-        _supcon_df.group_by(
+    _series_summary_df = (
+        _view_df.group_by(
             [
-                "supcon_group_label",
+                "series_description_display",
                 "series_family",
                 "native_acquisition_plane",
                 "contrast_bucket",
@@ -756,11 +716,96 @@ def _(
             [
                 pl.len().alias("view_count"),
                 pl.col("sample_index").n_unique().alias("sample_count"),
-                pl.col("series_description").first().alias("example_series_description"),
             ]
         )
-        .sort(["sample_count", "view_count", "supcon_group_label"], descending=[True, True, False])
+        .sort(["sample_count", "view_count", "series_description_display"], descending=[True, True, False])
     )
+    _series_rows = _series_summary_df.to_dicts()
+    red_series_table = mo.ui.table(
+        _series_rows,
+        selection="multi",
+        pagination=True,
+        page_size=12,
+        wrapped_columns=["series_description_display", "series_family", "series_label_text"],
+        show_download=False,
+        max_height=420,
+        label="Red series",
+    )
+    blue_series_table = mo.ui.table(
+        _series_rows,
+        selection="multi",
+        pagination=True,
+        page_size=12,
+        wrapped_columns=["series_description_display", "series_family", "series_label_text"],
+        show_download=False,
+        max_height=420,
+        label="Blue series",
+    )
+    mo.vstack(
+        [
+            mo.md("## SupCon Series Selection"),
+            mo.hstack([red_series_table, blue_series_table], widths=[1, 1]),
+        ]
+    )
+    return blue_series_table, red_series_table
+
+
+@app.cell
+def _(
+    alt,
+    metric_display,
+    mo,
+    nearest_neighbor_purity,
+    pca_project,
+    pl,
+    prepare_supcon_view_df,
+    probe_state,
+    red_series_table,
+    blue_series_table,
+    similarity_frame,
+    within_between_cosine_gap,
+):
+    _view_df = prepare_supcon_view_df(probe_state["view_df"])
+    _supcon_embeddings = probe_state["supcon_embeddings"]
+    _coords, _explained = pca_project(_supcon_embeddings)
+    _red_descriptions = {
+        str(_row["series_description_display"])
+        for _row in (red_series_table.value or [])
+    }
+    _blue_descriptions = {
+        str(_row["series_description_display"])
+        for _row in (blue_series_table.value or [])
+    }
+
+    _selection_labels = []
+    for _series_description in _view_df["series_description_display"].to_list():
+        _in_red = _series_description in _red_descriptions
+        _in_blue = _series_description in _blue_descriptions
+        if _in_red and _in_blue:
+            _selection_labels.append("both")
+        elif _in_red:
+            _selection_labels.append("red")
+        elif _in_blue:
+            _selection_labels.append("blue")
+        else:
+            _selection_labels.append("other")
+
+    _supcon_df = _view_df.with_columns(
+        [
+            pl.Series("pc1", _coords[:, 0]),
+            pl.Series("pc2", _coords[:, 1]),
+            pl.Series("selection_bucket", _selection_labels),
+            pl.Series(
+                "view_key",
+                [f"s{sample_idx}:{view_name}" for sample_idx, view_name in zip(_view_df["sample_index"], _view_df["view_name"])],
+            ),
+        ]
+    )
+    _purity = nearest_neighbor_purity(_supcon_embeddings, _selection_labels, ignore_labels={"other"})
+    _gap = within_between_cosine_gap(_supcon_embeddings, _selection_labels, ignore_labels={"other"})
+    _red_point_count = int(sum(_label == "red" for _label in _selection_labels))
+    _blue_point_count = int(sum(_label == "blue" for _label in _selection_labels))
+    _both_point_count = int(sum(_label == "both" for _label in _selection_labels))
 
     _scatter = (
         alt.Chart(alt.Data(values=_supcon_df.to_dicts()))
@@ -768,11 +813,19 @@ def _(
         .encode(
             x=alt.X("pc1:Q", title=f"PC1 ({_explained[0] * 100:.1f}%)"),
             y=alt.Y("pc2:Q", title=f"PC2 ({_explained[1] * 100:.1f}%)"),
-            color=alt.Color("series_bucket:N", title="Series group"),
+            color=alt.Color(
+                "selection_bucket:N",
+                title="Selection",
+                scale=alt.Scale(
+                    domain=["other", "red", "blue", "both"],
+                    range=["#b0b0b0", "#d73027", "#2166ac", "#762a83"],
+                ),
+            ),
             tooltip=[
                 alt.Tooltip("sample_index:Q", title="sample"),
                 alt.Tooltip("view_name:N", title="view"),
-                alt.Tooltip("supcon_group_label:N", title="selected group"),
+                alt.Tooltip("selection_bucket:N", title="selection"),
+                alt.Tooltip("series_description_display:N", title="series description"),
                 alt.Tooltip("series_label_text:N", title="series label"),
                 alt.Tooltip("series_family:N", title="series family"),
                 alt.Tooltip("native_acquisition_plane:N", title="plane"),
@@ -782,7 +835,7 @@ def _(
                 alt.Tooltip("series_path:N", title="series_path"),
             ],
         )
-        .properties(title=f"SupCon PCA ({_group_by})", height=360)
+        .properties(title="SupCon PCA", height=360)
     )
 
     _sim_df = similarity_frame(probe_state["supcon_similarity"], _supcon_df["view_key"].to_list())
@@ -804,7 +857,11 @@ def _(
 
     _metrics = pl.DataFrame(
         [
-            {"metric": "group_by", "value": _group_by},
+            {"metric": "red_series_selected", "value": str(len(_red_descriptions))},
+            {"metric": "blue_series_selected", "value": str(len(_blue_descriptions))},
+            {"metric": "red_points", "value": str(_red_point_count)},
+            {"metric": "blue_points", "value": str(_blue_point_count)},
+            {"metric": "overlap_points", "value": str(_both_point_count)},
             {"metric": "nearest_neighbor_purity", "value": metric_display(_purity)},
             {"metric": "within_between_cosine_gap", "value": metric_display(_gap)},
         ]
@@ -814,7 +871,6 @@ def _(
         [
             mo.md("## SupCon Clustering"),
             _metrics,
-            _breakdown_df,
             mo.ui.altair_chart(_scatter),
             mo.ui.altair_chart(_heatmap),
         ]
