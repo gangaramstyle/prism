@@ -1107,14 +1107,62 @@ def _(
             _matrix_rows.append(_row)
 
     position_matrix_df = pl.DataFrame(_matrix_rows)
+    _off_diagonal_pairs = position_matrix_df.filter(
+        pl.col("anchor_position_index") != pl.col("target_position_index")
+    )
+    _anchor_order_df = _off_diagonal_pairs.group_by(
+        ["anchor_position_index", "anchor_label"]
+    ).agg(
+        [
+            pl.col("total_accuracy").mean().alias("anchor_mean_accuracy"),
+            pl.col("total_accuracy").min().alias("anchor_worst_accuracy"),
+        ]
+    ).sort(
+        ["anchor_mean_accuracy", "anchor_worst_accuracy", "anchor_position_index"],
+        descending=[True, True, False],
+        nulls_last=True,
+    ).with_row_index(
+        "anchor_order_index", offset=0
+    )
+    _target_order_df = _off_diagonal_pairs.group_by(
+        ["target_position_index", "target_label"]
+    ).agg(
+        [
+            pl.col("total_accuracy").mean().alias("target_mean_accuracy"),
+            pl.col("total_accuracy").min().alias("target_worst_accuracy"),
+        ]
+    ).sort(
+        ["target_mean_accuracy", "target_worst_accuracy", "target_position_index"],
+        descending=[True, True, False],
+        nulls_last=True,
+    ).with_row_index(
+        "target_order_index", offset=0
+    )
+    position_matrix_df = position_matrix_df.join(
+        _anchor_order_df,
+        on=["anchor_position_index", "anchor_label"],
+        how="left",
+    ).join(
+        _target_order_df,
+        on=["target_position_index", "target_label"],
+        how="left",
+    )
 
     def _heatmap_widget(value_column: str, title: str, color_title: str):
         _chart = (
             alt.Chart(position_matrix_df.to_pandas())
             .mark_rect()
             .encode(
-                x=alt.X("target_position_index:O", title="target position"),
-                y=alt.Y("anchor_position_index:O", title="anchor position"),
+                x=alt.X(
+                    "target_order_index:O",
+                    title="target position",
+                    sort="ascending",
+                ),
+                y=alt.Y(
+                    "anchor_order_index:O",
+                    title="anchor position",
+                    sort="ascending",
+                ),
                 color=alt.Color(
                     f"{value_column}:Q",
                     title=color_title,
@@ -1123,6 +1171,8 @@ def _(
                 tooltip=[
                     alt.Tooltip("anchor_label:N", title="anchor"),
                     alt.Tooltip("target_label:N", title="target"),
+                    alt.Tooltip("anchor_mean_accuracy:Q", title="anchor mean", format=".3f"),
+                    alt.Tooltip("target_mean_accuracy:Q", title="target mean", format=".3f"),
                     alt.Tooltip("total_accuracy:Q", title="total", format=".3f"),
                     alt.Tooltip("lr_accuracy:Q", title="LR", format=".3f"),
                     alt.Tooltip("ap_accuracy:Q", title="AP", format=".3f"),
@@ -1177,6 +1227,7 @@ def _(
     ).head(24)
     _detail_note = mo.callout(
         f"`{_selected_scan}` has {_n_positions} sampled positions in the current evaluation set. "
+        "Rows are ordered by mean anchor-side cross accuracy, and columns are ordered by mean target-side cross accuracy. "
         "Each heatmap cell compares one anchor position (row) to one target position (column) using the trained distance head.",
         kind="info",
     )
