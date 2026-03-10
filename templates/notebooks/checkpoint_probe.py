@@ -132,8 +132,6 @@ with app.setup:
 
         probs_x = torch.sigmoid(outputs.distance_logits_x[:, :3].detach().cpu().to(dtype=torch.float32)).numpy()
         probs_y = torch.sigmoid(outputs.distance_logits_y[:, :3].detach().cpu().to(dtype=torch.float32)).numpy()
-        deltas_x = batch["center_delta_mm_x"].detach().cpu().to(dtype=torch.float32).numpy()
-        deltas_y = batch["center_delta_mm_y"].detach().cpu().to(dtype=torch.float32).numpy()
         sample_rows = list(batch["sample_rows"])
         view_rows = list(batch["view_rows"])
 
@@ -152,13 +150,14 @@ with app.setup:
                 )
 
             pair_specs = (
-                ("x", sample_view_rows[0], sample_view_rows[2], probs_x[local_index], deltas_x[local_index]),
-                ("y", sample_view_rows[1], sample_view_rows[3], probs_y[local_index], deltas_y[local_index]),
+                ("x", sample_view_rows[0], sample_view_rows[2], probs_x[local_index]),
+                ("y", sample_view_rows[1], sample_view_rows[3], probs_y[local_index]),
             )
 
-            for pair_name, anchor_view, target_view, axis_probs, axis_deltas in pair_specs:
+            for pair_name, anchor_view, target_view, axis_probs in pair_specs:
                 anchor_pt = np.asarray(anchor_view["prism_center_pt"], dtype=np.float32)
                 target_pt = np.asarray(target_view["prism_center_pt"], dtype=np.float32)
+                axis_deltas = target_pt - anchor_pt
                 midpoint = 0.5 * (anchor_pt + target_pt)
                 series_id = str(anchor_view["series_id"])
                 base_row: dict[str, object] = {
