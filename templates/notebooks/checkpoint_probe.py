@@ -1097,62 +1097,69 @@ def _(
     _blue_point_count = int(sum(_label == "blue" for _label in _selection_labels))
     _both_point_count = int(sum(_label == "both" for _label in _selection_labels))
     _total_point_count = int(len(_selection_labels))
+    _selected_view_indices = [idx for idx, label in enumerate(_selection_labels) if label != "other"]
+    _selected_view_df = _supcon_df.filter(pl.col("selection_bucket") != "other")
 
-    _scatter = (
-        alt.Chart(
-            alt.Data(
-                values=_supcon_df.select(
-                    [
-                        "sample_index",
-                        "view_name",
-                        "selection_bucket",
-                        "series_description_display",
-                        "series_label_text",
-                        "series_family",
-                        "native_acquisition_plane",
-                        "contrast_bucket",
-                        "series_description",
-                        "study_id",
-                        "series_path",
-                        "pc1",
-                        "pc2",
-                    ]
-                ).to_dicts()
+    if not _selected_view_indices:
+        _scatter_ui = mo.callout(
+            "SupCon PCA requires at least one explicitly selected series from the red or blue tables.",
+            kind="warn",
+        )
+    else:
+        _scatter = (
+            alt.Chart(
+                alt.Data(
+                    values=_selected_view_df.select(
+                        [
+                            "sample_index",
+                            "view_name",
+                            "selection_bucket",
+                            "series_description_display",
+                            "series_label_text",
+                            "series_family",
+                            "native_acquisition_plane",
+                            "contrast_bucket",
+                            "series_description",
+                            "study_id",
+                            "series_path",
+                            "pc1",
+                            "pc2",
+                        ]
+                    ).to_dicts()
+                )
             )
-        )
-        .mark_circle(size=90, opacity=0.85)
-        .encode(
-            x=alt.X("pc1:Q", title=f"PC1 ({_explained[0] * 100:.1f}%)"),
-            y=alt.Y("pc2:Q", title=f"PC2 ({_explained[1] * 100:.1f}%)"),
-            color=alt.Color(
-                "selection_bucket:N",
-                title="Selection",
-                scale=alt.Scale(
-                    domain=["other", "red", "blue", "both"],
-                    range=["#b0b0b0", "#d73027", "#2166ac", "#762a83"],
+            .mark_circle(size=90, opacity=0.85)
+            .encode(
+                x=alt.X("pc1:Q", title=f"PC1 ({_explained[0] * 100:.1f}%)"),
+                y=alt.Y("pc2:Q", title=f"PC2 ({_explained[1] * 100:.1f}%)"),
+                color=alt.Color(
+                    "selection_bucket:N",
+                    title="Selection",
+                    scale=alt.Scale(
+                        domain=["red", "blue", "both"],
+                        range=["#d73027", "#2166ac", "#762a83"],
+                    ),
                 ),
-            ),
-            tooltip=[
-                alt.Tooltip("sample_index:Q", title="sample"),
-                alt.Tooltip("view_name:N", title="view"),
-                alt.Tooltip("selection_bucket:N", title="selection"),
-                alt.Tooltip("series_description_display:N", title="series description"),
-                alt.Tooltip("series_label_text:N", title="series label"),
-                alt.Tooltip("series_family:N", title="series family"),
-                alt.Tooltip("native_acquisition_plane:N", title="plane"),
-                alt.Tooltip("contrast_bucket:N", title="contrast"),
-                alt.Tooltip("series_description:N", title="series description"),
-                alt.Tooltip("study_id:N", title="study_id"),
-                alt.Tooltip("series_path:N", title="series_path"),
-            ],
+                tooltip=[
+                    alt.Tooltip("sample_index:Q", title="sample"),
+                    alt.Tooltip("view_name:N", title="view"),
+                    alt.Tooltip("selection_bucket:N", title="selection"),
+                    alt.Tooltip("series_description_display:N", title="series description"),
+                    alt.Tooltip("series_label_text:N", title="series label"),
+                    alt.Tooltip("series_family:N", title="series family"),
+                    alt.Tooltip("native_acquisition_plane:N", title="plane"),
+                    alt.Tooltip("contrast_bucket:N", title="contrast"),
+                    alt.Tooltip("series_description:N", title="series description"),
+                    alt.Tooltip("study_id:N", title="study_id"),
+                    alt.Tooltip("series_path:N", title="series_path"),
+                ],
+            )
+            .properties(title="SupCon PCA (selected only)", height=360)
         )
-        .properties(title="SupCon PCA", height=360)
-    )
+        _scatter_ui = mo.ui.altair_chart(_scatter)
 
     _heatmap_max_views = 256
     _heatmap_ui = None
-    _selected_view_indices = [idx for idx, label in enumerate(_selection_labels) if label != "other"]
-    _selected_view_df = _supcon_df.filter(pl.col("selection_bucket") != "other")
     if not _selected_view_indices:
         _heatmap_ui = mo.callout(
             "SupCon heatmap requires at least one explicitly selected series from the red or blue tables.",
@@ -1194,6 +1201,7 @@ def _(
             {"metric": "red_points", "value": str(_red_point_count)},
             {"metric": "blue_points", "value": str(_blue_point_count)},
             {"metric": "overlap_points", "value": str(_both_point_count)},
+            {"metric": "scatter_points_selected", "value": str(int(_selected_view_df.height))},
             {"metric": "heatmap_points_selected", "value": str(int(_selected_view_df.height))},
             {"metric": "nearest_neighbor_purity", "value": metric_display(_purity)},
             {"metric": "within_between_cosine_gap", "value": metric_display(_gap)},
@@ -1204,7 +1212,7 @@ def _(
         [
             mo.md("## SupCon Clustering"),
             _metrics,
-            mo.ui.altair_chart(_scatter),
+            _scatter_ui,
             _heatmap_ui,
         ]
     )
