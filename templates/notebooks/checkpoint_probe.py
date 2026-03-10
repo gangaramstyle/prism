@@ -744,7 +744,8 @@ def _(
     mo.vstack(
         [
             mo.md("## SupCon Series Selection"),
-            mo.hstack([red_series_table, blue_series_table], widths=[1, 1]),
+            red_series_table,
+            blue_series_table,
         ]
     )
     return blue_series_table, red_series_table
@@ -806,6 +807,7 @@ def _(
     _red_point_count = int(sum(_label == "red" for _label in _selection_labels))
     _blue_point_count = int(sum(_label == "blue" for _label in _selection_labels))
     _both_point_count = int(sum(_label == "both" for _label in _selection_labels))
+    _total_point_count = int(len(_selection_labels))
 
     _scatter = (
         alt.Chart(alt.Data(values=_supcon_df.to_dicts()))
@@ -857,6 +859,7 @@ def _(
 
     _metrics = pl.DataFrame(
         [
+            {"metric": "total_points_loaded", "value": str(_total_point_count)},
             {"metric": "red_series_selected", "value": str(len(_red_descriptions))},
             {"metric": "blue_series_selected", "value": str(len(_blue_descriptions))},
             {"metric": "red_points", "value": str(_red_point_count)},
