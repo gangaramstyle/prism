@@ -37,7 +37,12 @@ with app.setup:
         within_between_cosine_gap,
     )
     from prism_ssl.eval.checkpoint_probe import VIEW_NAMES
-    from prism_ssl.validation import build_eval_batch_from_ct_validation_cache, load_ct_validation_cache
+    from prism_ssl.validation import (
+        build_eval_batch_from_ct_validation_cache,
+        infer_contrast_bucket,
+        infer_series_family,
+        load_ct_validation_cache,
+    )
 
     alt.data_transformers.disable_max_rows()
 
@@ -112,6 +117,59 @@ with app.setup:
             return "n/a"
         return f"{value:.3f}"
 
+    SUPCON_GROUP_OPTIONS = [
+        "series_label_text",
+        "series_family",
+        "native_acquisition_plane",
+        "contrast_bucket",
+        "series_family|plane",
+        "series_family|contrast",
+        "series_family|plane|contrast",
+    ]
+
+    def _normalize_group_part(value: object, *, fallback: str) -> str:
+        text = str(value or "").strip()
+        return text if text else fallback
+
+    def prepare_supcon_view_df(view_df: pl.DataFrame) -> pl.DataFrame:
+        series_labels = []
+        series_families = []
+        contrast_buckets = []
+        acquisition_planes = []
+        family_plane = []
+        family_contrast = []
+        family_plane_contrast = []
+        for row in view_df.to_dicts():
+            series_label = _normalize_group_part(
+                row.get("series_label_text") or row.get("series_description"),
+                fallback=infer_series_family(row),
+            )
+            series_family = _normalize_group_part(row.get("series_family"), fallback=infer_series_family(row))
+            contrast_bucket = _normalize_group_part(row.get("contrast_bucket"), fallback=infer_contrast_bucket(row))
+            acquisition_plane = _normalize_group_part(
+                row.get("native_acquisition_plane"),
+                fallback="unknown_plane",
+            )
+            series_labels.append(series_label)
+            series_families.append(series_family)
+            contrast_buckets.append(contrast_bucket)
+            acquisition_planes.append(acquisition_plane)
+            family_plane.append(f"{series_family} | {acquisition_plane}")
+            family_contrast.append(f"{series_family} | {contrast_bucket}")
+            family_plane_contrast.append(f"{series_family} | {acquisition_plane} | {contrast_bucket}")
+
+        return view_df.with_columns(
+            [
+                pl.Series("series_label_text", series_labels),
+                pl.Series("series_family", series_families),
+                pl.Series("contrast_bucket", contrast_buckets),
+                pl.Series("native_acquisition_plane", acquisition_planes),
+                pl.Series("series_family_plane", family_plane),
+                pl.Series("series_family_contrast", family_contrast),
+                pl.Series("series_family_plane_contrast", family_plane_contrast),
+            ]
+        )
+
 
 @app.cell
 def _():
@@ -131,7 +189,7 @@ Load a local checkpoint or a W&B run artifact, run deterministic `study4` sampli
 
 
 @app.cell
-def _(Path, mo, os):
+def _(Path, SUPCON_GROUP_OPTIONS, mo, os):
     default_catalog = os.environ.get(
         "CATALOG_PATH",
         str(Path(__file__).resolve().parents[1] / "data" / "pmbb_catalog.csv.gz"),
@@ -146,6 +204,11 @@ def _(Path, mo, os):
     n_studies = mo.ui.slider(start=1, stop=512, step=1, value=32, label="Studies")
     eval_batch_size = mo.ui.slider(start=1, stop=32, step=1, value=4, label="Eval batch size")
     seed = mo.ui.number(label="Seed", value=42, step=1)
+    supcon_group_by = mo.ui.dropdown(
+        options=SUPCON_GROUP_OPTIONS,
+        value="series_family|plane|contrast",
+        label="SupCon group by",
+    )
     include_background_label_0 = mo.ui.checkbox(label="Include anatomy label 0", value=False)
     _source_note = mo.callout(
         "Provide either a local checkpoint path or a W&B run URL. Local paths take priority. "
@@ -161,7 +224,7 @@ def _(Path, mo, os):
             mo.hstack([checkpoint_path, wandb_run_ref]),
             mo.hstack([catalog_path, validation_cache_dir]),
             mo.hstack([wandb_force_refresh]),
-            mo.hstack([device, n_studies, eval_batch_size, seed, include_background_label_0]),
+            mo.hstack([device, n_studies, eval_batch_size, seed, supcon_group_by, include_background_label_0]),
         ]
     )
     return (
@@ -172,6 +235,7 @@ def _(Path, mo, os):
         include_background_label_0,
         n_studies,
         seed,
+        supcon_group_by,
         validation_cache_dir,
         wandb_force_refresh,
         wandb_run_ref,
@@ -644,18 +708,31 @@ def _(
     mo,
     nearest_neighbor_purity,
     pca_project,
+    prepare_supcon_view_df,
     probe_state,
     similarity_frame,
+    supcon_group_by,
     within_between_cosine_gap,
 ):
-    _view_df = probe_state["view_df"]
+    _view_df = prepare_supcon_view_df(probe_state["view_df"])
     _supcon_embeddings = probe_state["supcon_embeddings"]
     _coords, _explained = pca_project(_supcon_embeddings)
-    _series_labels = _view_df["series_label_text"].to_list()
+    _group_by = str(supcon_group_by.value)
+    _group_column = {
+        "series_label_text": "series_label_text",
+        "series_family": "series_family",
+        "native_acquisition_plane": "native_acquisition_plane",
+        "contrast_bucket": "contrast_bucket",
+        "series_family|plane": "series_family_plane",
+        "series_family|contrast": "series_family_contrast",
+        "series_family|plane|contrast": "series_family_plane_contrast",
+    }[_group_by]
+    _series_labels = _view_df[_group_column].to_list()
     _supcon_df = _view_df.with_columns(
         [
             pl.Series("pc1", _coords[:, 0]),
             pl.Series("pc2", _coords[:, 1]),
+            pl.Series("supcon_group_label", _series_labels),
             pl.Series("series_bucket", bucket_top_labels(_series_labels, top_k=12)),
             pl.Series(
                 "view_key",
@@ -665,6 +742,25 @@ def _(
     )
     _purity = nearest_neighbor_purity(_supcon_embeddings, _series_labels)
     _gap = within_between_cosine_gap(_supcon_embeddings, _series_labels)
+    _breakdown_df = (
+        _supcon_df.group_by(
+            [
+                "supcon_group_label",
+                "series_family",
+                "native_acquisition_plane",
+                "contrast_bucket",
+                "series_label_text",
+            ]
+        )
+        .agg(
+            [
+                pl.len().alias("view_count"),
+                pl.col("sample_index").n_unique().alias("sample_count"),
+                pl.col("series_description").first().alias("example_series_description"),
+            ]
+        )
+        .sort(["sample_count", "view_count", "supcon_group_label"], descending=[True, True, False])
+    )
 
     _scatter = (
         alt.Chart(alt.Data(values=_supcon_df.to_dicts()))
@@ -672,17 +768,21 @@ def _(
         .encode(
             x=alt.X("pc1:Q", title=f"PC1 ({_explained[0] * 100:.1f}%)"),
             y=alt.Y("pc2:Q", title=f"PC2 ({_explained[1] * 100:.1f}%)"),
-            color=alt.Color("series_bucket:N", title="Series label"),
+            color=alt.Color("series_bucket:N", title="Series group"),
             tooltip=[
                 alt.Tooltip("sample_index:Q", title="sample"),
                 alt.Tooltip("view_name:N", title="view"),
+                alt.Tooltip("supcon_group_label:N", title="selected group"),
                 alt.Tooltip("series_label_text:N", title="series label"),
+                alt.Tooltip("series_family:N", title="series family"),
+                alt.Tooltip("native_acquisition_plane:N", title="plane"),
+                alt.Tooltip("contrast_bucket:N", title="contrast"),
                 alt.Tooltip("series_description:N", title="series description"),
                 alt.Tooltip("study_id:N", title="study_id"),
                 alt.Tooltip("series_path:N", title="series_path"),
             ],
         )
-        .properties(title="SupCon PCA", height=360)
+        .properties(title=f"SupCon PCA ({_group_by})", height=360)
     )
 
     _sim_df = similarity_frame(probe_state["supcon_similarity"], _supcon_df["view_key"].to_list())
@@ -704,12 +804,21 @@ def _(
 
     _metrics = pl.DataFrame(
         [
+            {"metric": "group_by", "value": _group_by},
             {"metric": "nearest_neighbor_purity", "value": metric_display(_purity)},
             {"metric": "within_between_cosine_gap", "value": metric_display(_gap)},
         ]
     )
 
-    mo.vstack([mo.md("## SupCon Clustering"), _metrics, mo.ui.altair_chart(_scatter), mo.ui.altair_chart(_heatmap)])
+    mo.vstack(
+        [
+            mo.md("## SupCon Clustering"),
+            _metrics,
+            _breakdown_df,
+            mo.ui.altair_chart(_scatter),
+            mo.ui.altair_chart(_heatmap),
+        ]
+    )
     return
 
 
