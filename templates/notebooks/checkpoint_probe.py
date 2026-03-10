@@ -5,6 +5,7 @@ app = marimo.App(width="full")
 
 
 with app.setup:
+    import hashlib
     import json
     import os
     import sys
@@ -117,6 +118,131 @@ with app.setup:
             return "n/a"
         return f"{value:.3f}"
 
+    def _stable_sort_key(text: str, seed: int) -> int:
+        payload = f"{int(seed)}::{text}".encode("utf-8")
+        return int(hashlib.sha256(payload).hexdigest()[:16], 16)
+
+    def deterministic_study_split(
+        study_ids: Sequence[str],
+        *,
+        seed: int,
+        test_fraction: float = 0.2,
+    ) -> tuple[set[str], set[str]]:
+        unique = sorted({str(study_id) for study_id in study_ids}, key=lambda study_id: _stable_sort_key(study_id, seed))
+        if len(unique) < 2:
+            return set(unique), set()
+        n_test = int(round(len(unique) * float(test_fraction)))
+        n_test = min(max(n_test, 1), len(unique) - 1)
+        test_ids = set(unique[:n_test])
+        train_ids = set(unique[n_test:])
+        return train_ids, test_ids
+
+    def binary_auc_score(y_true: np.ndarray, y_score: np.ndarray) -> float:
+        truth = np.asarray(y_true, dtype=np.int64).reshape(-1)
+        scores = np.asarray(y_score, dtype=np.float32).reshape(-1)
+        pos = scores[truth == 1]
+        neg = scores[truth == 0]
+        if pos.size == 0 or neg.size == 0:
+            return float("nan")
+        greater = (pos[:, None] > neg[None, :]).mean()
+        ties = (pos[:, None] == neg[None, :]).mean()
+        return float(greater + 0.5 * ties)
+
+    def fit_binary_linear_probe(
+        embeddings: torch.Tensor,
+        labels: Sequence[str],
+        study_ids: Sequence[str],
+        *,
+        seed: int,
+        test_fraction: float = 0.2,
+        epochs: int = 400,
+        lr: float = 0.05,
+        weight_decay: float = 1e-4,
+    ) -> dict[str, object]:
+        labels_arr = np.asarray([str(label) for label in labels], dtype=object)
+        study_arr = np.asarray([str(study_id) for study_id in study_ids], dtype=object)
+        keep_mask = np.isin(labels_arr, ["red", "blue"])
+        keep_indices = np.flatnonzero(keep_mask)
+        if keep_indices.size < 8:
+            return {"status": "too_few_points", "eligible_points": int(keep_indices.size)}
+
+        x = embeddings.detach().cpu()[keep_mask].to(dtype=torch.float32)
+        x = F.normalize(x, dim=-1)
+        y = np.asarray([1 if label == "blue" else 0 for label in labels_arr[keep_mask]], dtype=np.float32)
+        study_subset = study_arr[keep_mask]
+        train_studies, test_studies = deterministic_study_split(study_subset.tolist(), seed=seed, test_fraction=test_fraction)
+        if not train_studies or not test_studies:
+            return {"status": "insufficient_studies", "eligible_points": int(keep_indices.size)}
+
+        train_mask = np.asarray([study_id in train_studies for study_id in study_subset], dtype=bool)
+        test_mask = np.asarray([study_id in test_studies for study_id in study_subset], dtype=bool)
+        if train_mask.sum() == 0 or test_mask.sum() == 0:
+            return {"status": "empty_split", "eligible_points": int(keep_indices.size)}
+
+        y_train = y[train_mask]
+        y_test = y[test_mask]
+        if np.unique(y_train).size < 2 or np.unique(y_test).size < 2:
+            return {
+                "status": "single_class_split",
+                "eligible_points": int(keep_indices.size),
+                "train_points": int(train_mask.sum()),
+                "test_points": int(test_mask.sum()),
+            }
+
+        torch.manual_seed(int(seed))
+        model = torch.nn.Linear(int(x.shape[1]), 1)
+        optimizer = torch.optim.AdamW(model.parameters(), lr=float(lr), weight_decay=float(weight_decay))
+        pos_count = max(float(y_train.sum()), 1.0)
+        neg_count = max(float(y_train.shape[0] - y_train.sum()), 1.0)
+        loss_fn = torch.nn.BCEWithLogitsLoss(pos_weight=torch.tensor(neg_count / pos_count, dtype=torch.float32))
+
+        x_train = x[train_mask]
+        t_train = torch.tensor(y_train, dtype=torch.float32)
+        for _epoch in range(int(epochs)):
+            optimizer.zero_grad(set_to_none=True)
+            logits = model(x_train).squeeze(-1)
+            loss = loss_fn(logits, t_train)
+            loss.backward()
+            optimizer.step()
+
+        with torch.no_grad():
+            train_probs = torch.sigmoid(model(x_train).squeeze(-1)).cpu().numpy()
+            test_probs = torch.sigmoid(model(x[test_mask]).squeeze(-1)).cpu().numpy()
+
+        train_pred = (train_probs >= 0.5).astype(np.int64)
+        test_pred = (test_probs >= 0.5).astype(np.int64)
+        y_train_int = y_train.astype(np.int64)
+        y_test_int = y_test.astype(np.int64)
+        train_acc = float(np.mean(train_pred == y_train_int))
+        test_acc = float(np.mean(test_pred == y_test_int))
+        train_tpr = float(np.mean(train_pred[y_train_int == 1] == 1))
+        train_tnr = float(np.mean(train_pred[y_train_int == 0] == 0))
+        test_tpr = float(np.mean(test_pred[y_test_int == 1] == 1))
+        test_tnr = float(np.mean(test_pred[y_test_int == 0] == 0))
+
+        return {
+            "status": "ok",
+            "eligible_points": int(keep_indices.size),
+            "eligible_indices": keep_indices.tolist(),
+            "train_mask": train_mask.tolist(),
+            "test_mask": test_mask.tolist(),
+            "train_points": int(train_mask.sum()),
+            "test_points": int(test_mask.sum()),
+            "train_studies": int(len(train_studies)),
+            "test_studies": int(len(test_studies)),
+            "train_accuracy": train_acc,
+            "test_accuracy": test_acc,
+            "train_balanced_accuracy": float(0.5 * (train_tpr + train_tnr)),
+            "test_balanced_accuracy": float(0.5 * (test_tpr + test_tnr)),
+            "test_auc": binary_auc_score(y_test_int, test_probs),
+            "test_prob_blue": test_probs.tolist(),
+            "test_true_blue": y_test_int.tolist(),
+            "test_pred_blue": test_pred.tolist(),
+            "test_study_ids": study_subset[test_mask].tolist(),
+            "weight_norm": float(model.weight.detach().norm().cpu().item()),
+            "bias": float(model.bias.detach().cpu().item()),
+        }
+
     def _normalize_group_part(value: object, *, fallback: str) -> str:
         text = str(value or "").strip()
         return text if text else fallback
@@ -169,6 +295,26 @@ with app.setup:
                 pl.Series("series_family_plane_contrast", family_plane_contrast),
             ]
         )
+
+    def supcon_selection_labels(
+        view_df: pl.DataFrame,
+        *,
+        red_descriptions: set[str],
+        blue_descriptions: set[str],
+    ) -> list[str]:
+        selection_labels: list[str] = []
+        for series_description in view_df["series_description_display"].to_list():
+            in_red = series_description in red_descriptions
+            in_blue = series_description in blue_descriptions
+            if in_red and in_blue:
+                selection_labels.append("both")
+            elif in_red:
+                selection_labels.append("red")
+            elif in_blue:
+                selection_labels.append("blue")
+            else:
+                selection_labels.append("other")
+        return selection_labels
 
 
 @app.cell
@@ -764,6 +910,7 @@ def _(
     red_series_table,
     blue_series_table,
     similarity_frame,
+    supcon_selection_labels,
     within_between_cosine_gap,
 ):
     _view_df = prepare_supcon_view_df(probe_state["view_df"])
@@ -778,18 +925,11 @@ def _(
         for _row in (blue_series_table.value or [])
     }
 
-    _selection_labels = []
-    for _series_description in _view_df["series_description_display"].to_list():
-        _in_red = _series_description in _red_descriptions
-        _in_blue = _series_description in _blue_descriptions
-        if _in_red and _in_blue:
-            _selection_labels.append("both")
-        elif _in_red:
-            _selection_labels.append("red")
-        elif _in_blue:
-            _selection_labels.append("blue")
-        else:
-            _selection_labels.append("other")
+    _selection_labels = supcon_selection_labels(
+        _view_df,
+        red_descriptions=_red_descriptions,
+        blue_descriptions=_blue_descriptions,
+    )
 
     _supcon_df = _view_df.with_columns(
         [
@@ -917,6 +1057,103 @@ def _(
             _heatmap_ui,
         ]
     )
+    return
+
+
+@app.cell
+def _(
+    alt,
+    fit_binary_linear_probe,
+    metric_display,
+    mo,
+    np,
+    pl,
+    prepare_supcon_view_df,
+    probe_state,
+    red_series_table,
+    blue_series_table,
+    seed,
+    supcon_selection_labels,
+):
+    _view_df = prepare_supcon_view_df(probe_state["view_df"])
+    _red_descriptions = {str(_row["series_description_display"]) for _row in (red_series_table.value or [])}
+    _blue_descriptions = {str(_row["series_description_display"]) for _row in (blue_series_table.value or [])}
+    _selection_labels = supcon_selection_labels(
+        _view_df,
+        red_descriptions=_red_descriptions,
+        blue_descriptions=_blue_descriptions,
+    )
+    _probe = fit_binary_linear_probe(
+        probe_state["supcon_embeddings"],
+        _selection_labels,
+        _view_df["study_id"].to_list(),
+        seed=int(seed.value),
+    )
+
+    if _probe["status"] != "ok":
+        _body = pl.DataFrame([{"status": str(_probe["status"]), **{k: v for k, v in _probe.items() if k != "status"}}])
+        _probe_ui = mo.vstack(
+            [
+                mo.md("## SupCon Linear Probe"),
+                mo.callout("Linear probe could not run on the current red/blue selection.", kind="warn"),
+                _body,
+            ]
+        )
+    else:
+        _metrics = pl.DataFrame(
+            [
+                {"metric": "eligible_points", "value": str(_probe["eligible_points"])},
+                {"metric": "train_points", "value": str(_probe["train_points"])},
+                {"metric": "test_points", "value": str(_probe["test_points"])},
+                {"metric": "train_studies", "value": str(_probe["train_studies"])},
+                {"metric": "test_studies", "value": str(_probe["test_studies"])},
+                {"metric": "train_accuracy", "value": metric_display(float(_probe["train_accuracy"]))},
+                {"metric": "test_accuracy", "value": metric_display(float(_probe["test_accuracy"]))},
+                {"metric": "train_balanced_accuracy", "value": metric_display(float(_probe["train_balanced_accuracy"]))},
+                {"metric": "test_balanced_accuracy", "value": metric_display(float(_probe["test_balanced_accuracy"]))},
+                {"metric": "test_auc", "value": metric_display(float(_probe["test_auc"]))},
+                {"metric": "weight_norm", "value": metric_display(float(_probe["weight_norm"]))},
+            ]
+        )
+        _test_indices = np.asarray(_probe["eligible_indices"], dtype=np.int64)[np.asarray(_probe["test_mask"], dtype=bool)]
+        _test_df = (
+            _view_df.with_row_index("_row_idx")
+            .filter(pl.col("_row_idx").is_in(_test_indices.tolist()))
+            .drop("_row_idx")
+            .with_columns(
+                [
+                    pl.Series("true_label", ["blue" if int(v) == 1 else "red" for v in _probe["test_true_blue"]]),
+                    pl.Series("predicted_label", ["blue" if int(v) == 1 else "red" for v in _probe["test_pred_blue"]]),
+                    pl.Series("prob_blue", [float(v) for v in _probe["test_prob_blue"]]),
+                ]
+            )
+        )
+        _hist = (
+            alt.Chart(
+                alt.Data(
+                    values=_test_df.select(
+                        ["true_label", "predicted_label", "prob_blue", "study_id", "series_description_display", "view_name"]
+                    ).to_dicts()
+                )
+            )
+            .mark_bar(opacity=0.7)
+            .encode(
+                x=alt.X("prob_blue:Q", bin=alt.Bin(maxbins=20), title="Predicted P(blue)"),
+                y=alt.Y("count():Q", title="test views"),
+                color=alt.Color("true_label:N", scale=alt.Scale(domain=["red", "blue"], range=["#d73027", "#2166ac"])),
+                tooltip=[
+                    alt.Tooltip("true_label:N", title="true"),
+                    alt.Tooltip("predicted_label:N", title="pred"),
+                    alt.Tooltip("study_id:N", title="study_id"),
+                    alt.Tooltip("series_description_display:N", title="series"),
+                    alt.Tooltip("view_name:N", title="view"),
+                    alt.Tooltip("prob_blue:Q", format=".3f"),
+                ],
+            )
+            .properties(title="Linear probe test-score histogram", height=280)
+        )
+        _probe_ui = mo.vstack([mo.md("## SupCon Linear Probe"), _metrics, mo.ui.altair_chart(_hist)])
+    _probe_ui
     return
 
 
