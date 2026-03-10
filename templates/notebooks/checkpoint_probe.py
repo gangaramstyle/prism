@@ -810,7 +810,27 @@ def _(
     _total_point_count = int(len(_selection_labels))
 
     _scatter = (
-        alt.Chart(alt.Data(values=_supcon_df.to_dicts()))
+        alt.Chart(
+            alt.Data(
+                values=_supcon_df.select(
+                    [
+                        "sample_index",
+                        "view_name",
+                        "selection_bucket",
+                        "series_description_display",
+                        "series_label_text",
+                        "series_family",
+                        "native_acquisition_plane",
+                        "contrast_bucket",
+                        "series_description",
+                        "study_id",
+                        "series_path",
+                        "pc1",
+                        "pc2",
+                    ]
+                ).to_dicts()
+            )
+        )
         .mark_circle(size=90, opacity=0.85)
         .encode(
             x=alt.X("pc1:Q", title=f"PC1 ({_explained[0] * 100:.1f}%)"),
@@ -840,22 +860,40 @@ def _(
         .properties(title="SupCon PCA", height=360)
     )
 
-    _sim_df = similarity_frame(probe_state["supcon_similarity"], _supcon_df["view_key"].to_list())
-    _heatmap = (
-        alt.Chart(alt.Data(values=_sim_df.to_dicts()))
-        .mark_rect()
-        .encode(
-            x=alt.X("x_idx:O", title="view index"),
-            y=alt.Y("y_idx:O", title="view index"),
-            color=alt.Color("similarity:Q", scale=alt.Scale(domain=[-1.0, 1.0], scheme="redblue"), title="cosine"),
-            tooltip=[
-                alt.Tooltip("x_key:N", title="x"),
-                alt.Tooltip("y_key:N", title="y"),
-                alt.Tooltip("similarity:Q", format=".3f"),
-            ],
+    _heatmap_max_views = 256
+    _heatmap_ui = None
+    _selected_view_indices = [idx for idx, label in enumerate(_selection_labels) if label != "other"]
+    _selected_view_df = _supcon_df.filter(pl.col("selection_bucket") != "other")
+    if not _selected_view_indices:
+        _heatmap_ui = mo.callout(
+            "SupCon heatmap requires at least one explicitly selected series from the red or blue tables.",
+            kind="warn",
         )
-        .properties(title="SupCon cosine similarity", height=420, width=420)
-    )
+    elif _selected_view_df.height <= _heatmap_max_views:
+        _selected_similarity = probe_state["supcon_similarity"][np.ix_(_selected_view_indices, _selected_view_indices)]
+        _sim_df = similarity_frame(_selected_similarity, _selected_view_df["view_key"].to_list())
+        _heatmap = (
+            alt.Chart(alt.Data(values=_sim_df.to_dicts()))
+            .mark_rect()
+            .encode(
+                x=alt.X("x_idx:O", title="view index"),
+                y=alt.Y("y_idx:O", title="view index"),
+                color=alt.Color("similarity:Q", scale=alt.Scale(domain=[-1.0, 1.0], scheme="redblue"), title="cosine"),
+                tooltip=[
+                    alt.Tooltip("x_key:N", title="x"),
+                    alt.Tooltip("y_key:N", title="y"),
+                    alt.Tooltip("similarity:Q", format=".3f"),
+                ],
+            )
+            .properties(title="SupCon cosine similarity (selected only)", height=420, width=420)
+        )
+        _heatmap_ui = mo.ui.altair_chart(_heatmap)
+    else:
+        _heatmap_ui = mo.callout(
+            f"SupCon heatmap skipped for {_selected_view_df.height} selected views. "
+            f"The selected-view heatmap is still quadratic in view count and exceeds marimo's payload limit above about {_heatmap_max_views} views.",
+            kind="warn",
+        )
 
     _metrics = pl.DataFrame(
         [
@@ -865,6 +903,7 @@ def _(
             {"metric": "red_points", "value": str(_red_point_count)},
             {"metric": "blue_points", "value": str(_blue_point_count)},
             {"metric": "overlap_points", "value": str(_both_point_count)},
+            {"metric": "heatmap_points_selected", "value": str(int(_selected_view_df.height))},
             {"metric": "nearest_neighbor_purity", "value": metric_display(_purity)},
             {"metric": "within_between_cosine_gap", "value": metric_display(_gap)},
         ]
@@ -875,7 +914,7 @@ def _(
             mo.md("## SupCon Clustering"),
             _metrics,
             mo.ui.altair_chart(_scatter),
-            mo.ui.altair_chart(_heatmap),
+            _heatmap_ui,
         ]
     )
     return
