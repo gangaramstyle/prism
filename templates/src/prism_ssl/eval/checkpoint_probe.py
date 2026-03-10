@@ -8,7 +8,7 @@ from pathlib import Path
 import re
 import shutil
 import tempfile
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Callable, Iterator, Mapping, Sequence
 from urllib.parse import urlparse
 
 import nibabel as nib
@@ -346,7 +346,7 @@ def _select_series_pair(group_rows: Sequence[Mapping[str, Any]], *, seed: int, s
     return row_x, row_x, "duplicate"
 
 
-def sample_study4_examples(
+def iter_study4_examples(
     catalog: str | Path | pl.DataFrame,
     config: RunConfig,
     *,
@@ -354,30 +354,30 @@ def sample_study4_examples(
     seed: int,
     modality_filter: tuple[str, ...] | None = None,
     progress: Callable[[dict[str, Any]], None] | None = None,
-) -> list[dict[str, Any]]:
-    """Sample deterministic same-study examples with training-like 4-view logic."""
+) -> Iterator[dict[str, Any]]:
+    """Yield deterministic same-study examples with training-like 4-view logic."""
     sample_unit = str(config.data.sample_unit).strip().lower()
     if sample_unit != "study4":
-        raise ValueError(f"sample_study4_examples requires data.sample_unit='study4', got '{config.data.sample_unit}'")
+        raise ValueError(f"iter_study4_examples requires data.sample_unit='study4', got '{config.data.sample_unit}'")
 
     df = load_catalog(str(catalog)) if isinstance(catalog, (str, Path)) else catalog
     modalities = tuple(str(m).upper() for m in (modality_filter or config.data.modality_filter))
     filtered = filter_nonempty_series_path(filter_modalities(df, modalities))
     if len(filtered) == 0 or int(n_studies) <= 0:
-        return []
+        return
 
     groups: dict[str, list[dict[str, Any]]] = {}
     for row in filtered.to_dicts():
         groups.setdefault(study_id_from_row(row), []).append(dict(row))
 
     ordered_studies = sorted(groups, key=lambda study_id: stable_int_hash(f"{seed}|{study_id}"))
-    examples: list[dict[str, Any]] = []
+    accepted_examples = 0
     if progress is not None:
         progress(
             {
                 "event": "start",
                 "visited_studies": 0,
-                "accepted_examples": 0,
+                "accepted_examples": int(accepted_examples),
                 "target_examples": int(n_studies),
                 "total_candidates": int(len(ordered_studies)),
                 "study_id": "",
@@ -386,7 +386,7 @@ def sample_study4_examples(
         )
     visited_studies = 0
     for study_order, study_id in enumerate(ordered_studies):
-        if len(examples) >= int(n_studies):
+        if int(accepted_examples) >= int(n_studies):
             break
         visited_studies = int(study_order + 1)
 
@@ -415,7 +415,7 @@ def sample_study4_examples(
                     {
                         "event": "study",
                         "visited_studies": visited_studies,
-                        "accepted_examples": int(len(examples)),
+                        "accepted_examples": int(accepted_examples),
                         "target_examples": int(n_studies),
                         "total_candidates": int(len(ordered_studies)),
                         "study_id": str(study_id),
@@ -512,45 +512,66 @@ def sample_study4_examples(
                 "result": result_bp,
             },
         ]
-        examples.append(
-            {
-                "study_id": study_id,
-                "series_id_x": record_x["series_id"],
-                "series_id_y": record_y["series_id"],
-                "series_path_x": record_x["series_path"],
-                "series_path_y": record_y["series_path"],
-                "series_description_x": str(row_x.get("series_description", "")),
-                "series_description_y": str(row_y.get("series_description", "")),
-                "cross_valid": bool(cross_valid),
-                "cross_mode": str(cross_mode),
-                "views": views,
-            }
-        )
+        example = {
+            "study_id": study_id,
+            "series_id_x": record_x["series_id"],
+            "series_id_y": record_y["series_id"],
+            "series_path_x": record_x["series_path"],
+            "series_path_y": record_y["series_path"],
+            "series_description_x": str(row_x.get("series_description", "")),
+            "series_description_y": str(row_y.get("series_description", "")),
+            "cross_valid": bool(cross_valid),
+            "cross_mode": str(cross_mode),
+            "views": views,
+        }
+        accepted_examples += 1
         if progress is not None:
             progress(
                 {
                     "event": "study",
                     "visited_studies": visited_studies,
-                    "accepted_examples": int(len(examples)),
+                    "accepted_examples": int(accepted_examples),
                     "target_examples": int(n_studies),
                     "total_candidates": int(len(ordered_studies)),
                     "study_id": str(study_id),
                     "status": "accepted",
                 }
             )
+        yield example
     if progress is not None:
         progress(
             {
                 "event": "done",
                 "visited_studies": visited_studies,
-                "accepted_examples": int(len(examples)),
+                "accepted_examples": int(accepted_examples),
                 "target_examples": int(n_studies),
                 "total_candidates": int(len(ordered_studies)),
                 "study_id": "",
                 "status": "complete",
             }
         )
-    return examples
+
+
+def sample_study4_examples(
+    catalog: str | Path | pl.DataFrame,
+    config: RunConfig,
+    *,
+    n_studies: int,
+    seed: int,
+    modality_filter: tuple[str, ...] | None = None,
+    progress: Callable[[dict[str, Any]], None] | None = None,
+) -> list[dict[str, Any]]:
+    """Sample deterministic same-study examples with training-like 4-view logic."""
+    return list(
+        iter_study4_examples(
+            catalog,
+            config,
+            n_studies=n_studies,
+            seed=seed,
+            modality_filter=modality_filter,
+            progress=progress,
+        )
+    )
 
 
 def _dominant_label(values: np.ndarray) -> int:
@@ -825,6 +846,7 @@ __all__ = [
     "parse_wandb_run_ref",
     "list_wandb_run_model_artifacts",
     "download_wandb_run_checkpoint",
+    "iter_study4_examples",
     "sample_study4_examples",
     "build_eval_batch",
     "dominant_totalseg_label_for_view",

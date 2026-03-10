@@ -12,7 +12,7 @@ import polars as pl
 import torch
 
 from prism_ssl.config import RunConfig
-from prism_ssl.eval.checkpoint_probe import build_eval_batch, sample_study4_examples
+from prism_ssl.eval.checkpoint_probe import build_eval_batch, iter_study4_examples
 
 CONTRAST_POSITIVE_KEYWORDS: tuple[str, ...] = (
     "WITH CONTRAST",
@@ -204,26 +204,18 @@ def build_ct_validation_cache(
             }
         )
 
-    examples = sample_study4_examples(
-        catalog,
-        config,
-        n_studies=effective_target,
-        seed=int(seed),
-        modality_filter=("CT",),
-        progress=(lambda payload: progress({"stage": "sampling", **payload}) if progress is not None else None),
-    )
-    if len(examples) == 0:
-        raise RuntimeError("No CT study4 examples could be sampled for validation cache")
-
     samples_rows: list[dict[str, Any]] = []
     views_rows: list[dict[str, Any]] = []
     total_bytes_written = 0
     shard_paths: list[str] = []
     build_started_at = time.strftime("%Y-%m-%dT%H:%M:%S")
+    written_studies = 0
+    current_chunk: list[dict[str, Any]] = []
+    shard_width = max(int(shard_size), 1)
 
-    for shard_index, start in enumerate(range(0, len(examples), max(int(shard_size), 1))):
-        chunk = examples[start : start + max(int(shard_size), 1)]
-        batch = build_eval_batch(chunk, sample_offset=start)
+    def _flush_chunk(chunk: Sequence[Mapping[str, Any]], *, shard_index: int, sample_offset: int) -> None:
+        nonlocal total_bytes_written, written_studies
+        batch = build_eval_batch(chunk, sample_offset=sample_offset)
         shard_payload = {
             "sample_index": torch.tensor([int(row["sample_index"]) for row in batch["sample_rows"]], dtype=torch.int64),
             "patches_views": batch["patches_views"].to(dtype=torch.float16, device="cpu"),
@@ -237,6 +229,7 @@ def build_ct_validation_cache(
 
         samples_rows.extend(_enrich_sample_rows(batch["sample_rows"], shard_index=shard_index))
         views_rows.extend(_enrich_view_rows(batch["view_rows"], shard_index=shard_index))
+        written_studies += int(len(chunk))
 
         if progress is not None:
             progress(
@@ -244,11 +237,30 @@ def build_ct_validation_cache(
                     "stage": "writing",
                     "status": "shard_complete",
                     "shard_index": int(shard_index),
-                    "studies_written": int(start + len(chunk)),
-                    "total_studies": int(len(examples)),
+                    "studies_written": int(written_studies),
+                    "total_studies": int(effective_target),
                     "bytes_written": int(total_bytes_written),
                 }
             )
+
+    for example in iter_study4_examples(
+        catalog,
+        config,
+        n_studies=effective_target,
+        seed=int(seed),
+        modality_filter=("CT",),
+        progress=(lambda payload: progress({"stage": "sampling", **payload}) if progress is not None else None),
+    ):
+        current_chunk.append(example)
+        if len(current_chunk) >= shard_width:
+            _flush_chunk(current_chunk, shard_index=len(shard_paths), sample_offset=written_studies)
+            current_chunk = []
+
+    if current_chunk:
+        _flush_chunk(current_chunk, shard_index=len(shard_paths), sample_offset=written_studies)
+
+    if written_studies == 0:
+        raise RuntimeError("No CT study4 examples could be sampled for validation cache")
 
     samples_df = pl.DataFrame(samples_rows).sort("sample_index")
     views_df = pl.DataFrame(views_rows).sort(["sample_index", "view_index"])
@@ -264,13 +276,13 @@ def build_ct_validation_cache(
         "catalog_path": str(catalog) if isinstance(catalog, (str, Path)) else "<dataframe>",
         "target_studies_requested": int(target_studies),
         "target_studies_budgeted": int(effective_target),
-        "n_studies": int(len(examples)),
+        "n_studies": int(written_studies),
         "n_views": int(len(views_rows)),
         "n_shards": int(len(shard_paths)),
         "shard_size": int(max(int(shard_size), 1)),
         "max_cache_gb": float(max_cache_gb),
         "estimated_bytes_per_sample": int(estimated_bytes_per_sample),
-        "estimated_total_bytes": int(estimated_bytes_per_sample * len(examples)),
+        "estimated_total_bytes": int(estimated_bytes_per_sample * written_studies),
         "actual_tensor_bytes": int(total_bytes_written),
         "n_patches": int(config.data.n_patches),
         "patch_mm": float(config.data.patch_mm),

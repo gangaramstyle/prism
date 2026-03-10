@@ -12,6 +12,7 @@ from prism_ssl.eval.checkpoint_probe import (
     nearest_neighbor_purity,
     pca_project,
     parse_wandb_run_ref,
+    iter_study4_examples,
     sample_study4_examples,
     within_between_cosine_gap,
 )
@@ -24,6 +25,7 @@ __all__ = [
     "parse_wandb_run_ref",
     "list_wandb_run_model_artifacts",
     "download_wandb_run_checkpoint",
+    "iter_study4_examples",
     "sample_study4_examples",
     "build_eval_batch",
     "dominant_totalseg_label_for_view",
