@@ -125,7 +125,7 @@ with app.setup:
             return [dict(item) for item in value]
         return []
 
-    def _series_display_text(row: Mapping[str, object]) -> str:
+    def series_display_text(row: Mapping[str, object]) -> str:
         description = str(row.get("series_description", "") or "").strip()
         if description:
             return description
@@ -135,21 +135,21 @@ with app.setup:
         series_path = str(row.get("series_path", "") or "").strip()
         return Path(series_path).name or "unknown"
 
-    def _scan_label(row: Mapping[str, object]) -> str:
-        description = _series_display_text(row)
+    def scan_label(row: Mapping[str, object]) -> str:
+        description = series_display_text(row)
         study_id = str(row.get("study_id", "") or "").strip()
         series_id = str(row.get("series_id", "") or "").strip()
         series_suffix = series_id.split("_")[-1] if series_id else "unknown"
         return " | ".join(part for part in [description, study_id, series_suffix] if part)
 
-    def _axis_truth(delta_mm: float, *, negative_label: str, positive_label: str, threshold_mm: float = 1.0) -> tuple[str, bool, int]:
+    def axis_truth(delta_mm: float, *, negative_label: str, positive_label: str, threshold_mm: float = 1.0) -> tuple[str, bool, int]:
         delta_value = float(delta_mm)
         if abs(delta_value) < float(threshold_mm):
             return "ambiguous", False, 0
         is_positive = int(delta_value > 0.0)
         return (positive_label if is_positive else negative_label), True, is_positive
 
-    def _axis_prediction(prob_positive: float, *, negative_label: str, positive_label: str) -> tuple[str, int, float]:
+    def axis_prediction(prob_positive: float, *, negative_label: str, positive_label: str) -> tuple[str, int, float]:
         prob_value = float(prob_positive)
         pred_positive = int(prob_value >= 0.5)
         confidence = prob_value if pred_positive == 1 else 1.0 - prob_value
@@ -199,8 +199,8 @@ with app.setup:
                     "study_sample_index": int(sample_row.get("study_sample_index", 0)),
                     "study_id": str(sample_row["study_id"]),
                     "series_id": series_id,
-                    "scan_label": _scan_label(anchor_view),
-                    "series_description_display": _series_display_text(anchor_view),
+                    "scan_label": scan_label(anchor_view),
+                    "series_description_display": series_display_text(anchor_view),
                     "series_path": str(anchor_view.get("series_path", "")),
                     "series_family": infer_series_family(anchor_view),
                     "contrast_bucket": infer_contrast_bucket(anchor_view),
@@ -227,12 +227,12 @@ with app.setup:
                 valid_axes = 0
                 correct_axes = 0
                 for axis_name, negative_label, positive_label, axis_index in axis_specs:
-                    truth_label, is_valid, truth_positive = _axis_truth(
+                    truth_label, is_valid, truth_positive = axis_truth(
                         float(axis_deltas[axis_index]),
                         negative_label=negative_label,
                         positive_label=positive_label,
                     )
-                    pred_label, pred_positive, confidence = _axis_prediction(
+                    pred_label, pred_positive, confidence = axis_prediction(
                         float(axis_probs[axis_index]),
                         negative_label=negative_label,
                         positive_label=positive_label,
@@ -968,9 +968,8 @@ def _(alt, metric_display, mo, pl, probe_state):
 
 @app.cell
 def _(
-    _axis_prediction,
-    _axis_truth,
-    _scan_label,
+    axis_prediction,
+    axis_truth,
     alt,
     mo,
     np,
@@ -978,13 +977,14 @@ def _(
     position_scan_picker,
     position_series_summary,
     probe_state,
+    scan_label,
     torch,
     model,
 ):
     _selected_scan = str(position_scan_picker.value)
     _selected_summary = position_series_summary.filter(pl.col("scan_label") == _selected_scan)
     _view_scan_df = probe_state["view_df"].with_row_index("view_row_index").with_columns(
-        pl.Series("scan_label", [_scan_label(_row) for _row in probe_state["view_df"].to_dicts()])
+        pl.Series("scan_label", [scan_label(_row) for _row in probe_state["view_df"].to_dicts()])
     )
     _selected_positions = _view_scan_df.filter(pl.col("scan_label") == _selected_scan).sort(
         ["sample_index", "view_index"],
@@ -1068,12 +1068,12 @@ def _(
                 "delta_s_mm": float(_delta[2]),
             }
             for _axis_name, _negative_label, _positive_label, _axis_idx in _axis_specs:
-                _truth_label, _valid, _truth_positive = _axis_truth(
+                _truth_label, _valid, _truth_positive = axis_truth(
                     float(_delta[_axis_idx]),
                     negative_label=_negative_label,
                     positive_label=_positive_label,
                 )
-                _pred_label, _pred_positive, _confidence = _axis_prediction(
+                _pred_label, _pred_positive, _confidence = axis_prediction(
                     float(_pair_probs[_anchor_idx, _target_idx, _axis_idx]),
                     negative_label=_negative_label,
                     positive_label=_positive_label,
