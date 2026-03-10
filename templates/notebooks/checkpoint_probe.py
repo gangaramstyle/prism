@@ -110,6 +110,32 @@ with app.setup:
             return "n/a"
         return f"{value:.3f}"
 
+    def patch_quality_row(label: str, patches: np.ndarray) -> dict[str, object]:
+        arr = np.asarray(patches, dtype=np.float32)
+        if arr.size == 0:
+            return {
+                "sample": label,
+                "patch_count": 0,
+                "mean": None,
+                "std": None,
+                "p01": None,
+                "p99": None,
+                "robust_range": None,
+                "frac_low_clip": None,
+                "frac_high_clip": None,
+            }
+        return {
+            "sample": label,
+            "patch_count": int(arr.shape[0]),
+            "mean": float(arr.mean()),
+            "std": float(arr.std()),
+            "p01": float(np.percentile(arr, 1.0)),
+            "p99": float(np.percentile(arr, 99.0)),
+            "robust_range": float(np.percentile(arr, 99.0) - np.percentile(arr, 1.0)),
+            "frac_low_clip": float(np.mean(arr <= -0.95)),
+            "frac_high_clip": float(np.mean(arr >= 0.95)),
+        }
+
     def lookup_view_patches(
         probe_state: Mapping[str, object],
         *,
@@ -1253,6 +1279,7 @@ def _(
     metric_display,
     mo,
     patch_grid,
+    patch_quality_row,
     probe_state,
     ap_heatmap,
     lr_heatmap,
@@ -1279,6 +1306,22 @@ def _(
             probe_state,
             sample_index=int(_record["target_sample_index"]),
             view_index=int(_record["target_view_index"]),
+        )
+        _patch_quality = pl.DataFrame(
+            [
+                patch_quality_row("anchor", _anchor_patches),
+                patch_quality_row("target", _target_patches),
+            ]
+        ).with_columns(
+            [
+                pl.col("mean").round(3),
+                pl.col("std").round(3),
+                pl.col("p01").round(3),
+                pl.col("p99").round(3),
+                pl.col("robust_range").round(3),
+                pl.col("frac_low_clip").round(3),
+                pl.col("frac_high_clip").round(3),
+            ]
         )
         _metrics = pl.DataFrame(
             [
@@ -1316,6 +1359,8 @@ def _(
                     f"delta S={float(_record['delta_s_mm']):.1f} mm)"
                 ),
                 _metrics,
+                mo.md("### Patch quality"),
+                _patch_quality,
                 mo.hstack(
                     [
                         mo.vstack(
