@@ -12,6 +12,7 @@ with app.setup:
     import time
     from collections import Counter
     from pathlib import Path
+    from typing import Sequence
 
     import altair as alt
     import marimo as mo
