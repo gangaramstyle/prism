@@ -12,6 +12,7 @@ from prism_ssl.validation import (
     infer_contrast_bucket,
     infer_series_family,
     load_ct_validation_cache,
+    max_ct_validation_samples_for_budget,
     max_ct_validation_studies_for_budget,
 )
 
@@ -31,9 +32,10 @@ def test_budget_estimate_and_capacity_scale_with_patch_count() -> None:
     assert small > 0
     assert large > small
 
-    capacity = max_ct_validation_studies_for_budget(384, max_cache_gb=2.0)
+    capacity = max_ct_validation_samples_for_budget(384, max_cache_gb=2.0)
     assert capacity > 0
     assert capacity < 10_000
+    assert capacity == max_ct_validation_studies_for_budget(384, max_cache_gb=2.0)
 
 
 def test_validation_cache_roundtrip_and_slice(tmp_path: Path) -> None:
@@ -44,9 +46,11 @@ def test_validation_cache_roundtrip_and_slice(tmp_path: Path) -> None:
         "cache_version": 1,
         "cache_type": "ct_study4_validation",
         "n_studies": 2,
+        "n_samples": 2,
         "n_views": 8,
         "n_shards": 1,
         "n_patches": 3,
+        "samples_per_study": 1,
     }
     (cache_dir / "summary.json").write_text(json.dumps(summary), encoding="utf-8")
 
@@ -54,6 +58,7 @@ def test_validation_cache_roundtrip_and_slice(tmp_path: Path) -> None:
         [
             {
                 "sample_index": 0,
+                "study_sample_index": 0,
                 "study_id": "study_a",
                 "series_id_x": "series_ax",
                 "series_id_y": "series_ay",
@@ -63,6 +68,7 @@ def test_validation_cache_roundtrip_and_slice(tmp_path: Path) -> None:
             },
             {
                 "sample_index": 1,
+                "study_sample_index": 0,
                 "study_id": "study_b",
                 "series_id_x": "series_bx",
                 "series_id_y": "series_by",
@@ -80,6 +86,7 @@ def test_validation_cache_roundtrip_and_slice(tmp_path: Path) -> None:
             view_rows.append(
                 {
                     "sample_index": sample_index,
+                    "study_sample_index": 0,
                     "view_index": view_index,
                     "view_name": view_name,
                     "study_id": f"study_{sample_index}",
@@ -123,5 +130,7 @@ def test_validation_cache_roundtrip_and_slice(tmp_path: Path) -> None:
     assert batch["positions_views"].shape == (1, 4, 3, 3)
     assert batch["cross_valid"].tolist() == [False]
     assert [row["sample_index"] for row in batch["sample_rows"]] == [1]
+    assert [row["study_sample_index"] for row in batch["sample_rows"]] == [0]
     assert [row["view_name"] for row in batch["view_rows"]] == ["a", "ap", "b", "bp"]
+    assert [row["study_sample_index"] for row in batch["view_rows"]] == [0, 0, 0, 0]
     assert [event["stage"] for event in events] == ["metadata", "metadata", "shards", "finalize"]

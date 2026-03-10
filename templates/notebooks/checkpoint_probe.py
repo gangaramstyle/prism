@@ -491,7 +491,7 @@ def _(Path, mo, os):
     catalog_path = mo.ui.text(label="Catalog path (live sampling only)", value=default_catalog)
     validation_cache_dir = mo.ui.text(label="Validation cache dir (optional)", value=default_validation_cache)
     device = mo.ui.dropdown(options=["auto", "cpu", "cuda"], value="auto", label="Device")
-    n_studies = mo.ui.slider(start=1, stop=512, step=1, value=32, label="Studies")
+    n_studies = mo.ui.slider(start=1, stop=8192, step=1, value=32, label="Eval samples (cache) / studies (live)")
     eval_batch_size = mo.ui.slider(start=1, stop=32, step=1, value=4, label="Eval batch size")
     seed = mo.ui.number(label="Seed", value=42, step=1)
     include_background_label_0 = mo.ui.checkbox(label="Include anatomy label 0", value=False)
@@ -682,7 +682,7 @@ def _(checkpoint_source, config, effective_eval_batch_size, effective_n_studies,
                 "n_patches": int(config.data.n_patches),
                 "patch_mm": float(config.data.patch_mm),
                 "modalities": ",".join(config.data.modality_filter),
-                "eval_studies": int(effective_n_studies),
+                "eval_units_requested": int(effective_n_studies),
                 "eval_batch_size": int(effective_eval_batch_size),
             }
         ]
@@ -926,7 +926,6 @@ def _(
     _finalize_t0 = time.perf_counter()
     _supcon_embeddings = torch.cat(_supcon_chunks, dim=0)
     _direction_embeddings = torch.cat(_direction_chunks, dim=0)
-    _supcon_similarity = cosine_similarity_matrix(_supcon_embeddings).detach().cpu().numpy()
     _view_df = pl.DataFrame(_all_view_rows)
     _sample_df = pl.DataFrame(_all_sample_rows)
     _mim_df = pl.DataFrame(_mim_rows)
@@ -941,7 +940,6 @@ def _(
         "reconstruction_rows": _reconstruction_rows,
         "supcon_embeddings": _supcon_embeddings,
         "direction_embeddings": _direction_embeddings,
-        "supcon_similarity": _supcon_similarity,
         "effective_modalities": _modalities,
         "data_source": _data_source,
         "cache_summary": dict(_cache["summary"]) if _cache is not None else None,
@@ -961,6 +959,7 @@ def _(
 @app.cell
 def _(mo, probe_state):
     _view_df = probe_state["view_df"]
+    _sample_df = probe_state["sample_df"]
     _perf_df = (
         pl.DataFrame(probe_state["performance_rows"])
         .filter(pl.col("seconds") > 0)
@@ -970,13 +969,18 @@ def _(mo, probe_state):
     _eval_summary = pl.DataFrame(
         [
             {
-                "samples": int(probe_state["sample_df"].height),
+                "samples": int(_sample_df.height),
+                "unique_studies": int(_sample_df["study_id"].n_unique()) if _sample_df.height > 0 else 0,
                 "views": int(_view_df.height),
                 "totalseg_resolved": f"{int(probe_state['totalseg_resolved_count'])}/{int(_view_df.height)}",
                 "modalities": ",".join(probe_state["effective_modalities"]),
                 "data_source": str(probe_state["data_source"]),
                 "cache_dir": str(_cache_summary.get("cache_dir", "")),
-                "cache_studies_total": int(_cache_summary.get("n_studies", 0)) if _cache_summary else 0,
+                "cache_unique_studies_total": int(_cache_summary.get("n_studies", 0)) if _cache_summary else 0,
+                "cache_samples_total": int(_cache_summary.get("n_samples", _cache_summary.get("n_studies", 0)))
+                if _cache_summary
+                else 0,
+                "cache_samples_per_study": int(_cache_summary.get("samples_per_study", 1)) if _cache_summary else 0,
             }
         ]
     )
@@ -1044,6 +1048,7 @@ def _(
 @app.cell
 def _(
     alt,
+    cosine_similarity_matrix,
     metric_display,
     mo,
     nearest_neighbor_purity,
@@ -1154,7 +1159,9 @@ def _(
             kind="warn",
         )
     elif _selected_view_df.height <= _heatmap_max_views:
-        _selected_similarity = probe_state["supcon_similarity"][np.ix_(_selected_view_indices, _selected_view_indices)]
+        _selected_similarity = (
+            cosine_similarity_matrix(_supcon_embeddings[_selected_view_indices]).detach().cpu().numpy()
+        )
         _sim_df = similarity_frame(_selected_similarity, _selected_view_df["view_key"].to_list())
         _heatmap = (
             alt.Chart(alt.Data(values=_sim_df.to_dicts()))

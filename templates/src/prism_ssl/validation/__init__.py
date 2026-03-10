@@ -7,6 +7,7 @@ from prism_ssl.validation.ct_cache import (
     infer_contrast_bucket,
     infer_series_family,
     load_ct_validation_cache,
+    max_ct_validation_samples_for_budget,
     max_ct_validation_studies_for_budget,
 )
 
@@ -14,6 +15,7 @@ __all__ = [
     "infer_contrast_bucket",
     "infer_series_family",
     "estimate_ct_validation_sample_bytes",
+    "max_ct_validation_samples_for_budget",
     "max_ct_validation_studies_for_budget",
     "build_ct_validation_cache",
     "load_ct_validation_cache",

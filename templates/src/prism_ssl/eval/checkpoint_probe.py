@@ -351,6 +351,7 @@ def iter_study4_examples(
     config: RunConfig,
     *,
     n_studies: int,
+    samples_per_study: int = 1,
     seed: int,
     modality_filter: tuple[str, ...] | None = None,
     progress: Callable[[dict[str, Any]], None] | None = None,
@@ -365,6 +366,7 @@ def iter_study4_examples(
     filtered = filter_nonempty_series_path(filter_modalities(df, modalities))
     if len(filtered) == 0 or int(n_studies) <= 0:
         return
+    repeats_per_study = max(int(samples_per_study), 1)
 
     groups: dict[str, list[dict[str, Any]]] = {}
     for row in filtered.to_dicts():
@@ -372,13 +374,18 @@ def iter_study4_examples(
 
     ordered_studies = sorted(groups, key=lambda study_id: stable_int_hash(f"{seed}|{study_id}"))
     accepted_examples = 0
+    accepted_studies = 0
+    target_examples = int(n_studies) * repeats_per_study
     if progress is not None:
         progress(
             {
                 "event": "start",
                 "visited_studies": 0,
                 "accepted_examples": int(accepted_examples),
-                "target_examples": int(n_studies),
+                "accepted_studies": int(accepted_studies),
+                "target_examples": int(target_examples),
+                "target_studies": int(n_studies),
+                "samples_per_study": int(repeats_per_study),
                 "total_candidates": int(len(ordered_studies)),
                 "study_id": "",
                 "status": "starting",
@@ -386,7 +393,7 @@ def iter_study4_examples(
         )
     visited_studies = 0
     for study_order, study_id in enumerate(ordered_studies):
-        if int(accepted_examples) >= int(n_studies):
+        if int(accepted_studies) >= int(n_studies):
             break
         visited_studies = int(study_order + 1)
 
@@ -416,7 +423,10 @@ def iter_study4_examples(
                         "event": "study",
                         "visited_studies": visited_studies,
                         "accepted_examples": int(accepted_examples),
-                        "target_examples": int(n_studies),
+                        "accepted_studies": int(accepted_studies),
+                        "target_examples": int(target_examples),
+                        "target_studies": int(n_studies),
+                        "samples_per_study": int(repeats_per_study),
                         "total_candidates": int(len(ordered_studies)),
                         "study_id": str(study_id),
                         "status": "load_failed",
@@ -424,127 +434,139 @@ def iter_study4_examples(
                 )
             continue
 
-        study_seed = stable_int_hash(f"{seed}|{study_id}") % 2_147_483_647
-        result_a = scan_x.train_sample(int(config.data.n_patches), seed=study_seed * 4)
-        pair_center_b_vox, pair_center_b_from_body = _sample_pair_center_vox(
-            scan_x,
-            np.asarray(result_a["prism_center_vox"], dtype=np.int64),
-            seed=study_seed * 4 + 1,
-            sample_index=study_order,
-            config=config,
-        )
-        result_b = scan_x.train_sample(
-            int(config.data.n_patches),
-            seed=study_seed * 4 + 2,
-            subset_center_vox=pair_center_b_vox,
-            sampled_body_center=pair_center_b_from_body,
-        )
+        for repeat_index in range(repeats_per_study):
+            example_index = int(accepted_examples)
+            study_seed = stable_int_hash(f"{seed}|{study_id}|sample|{repeat_index}") % 2_147_483_647
+            result_a = scan_x.train_sample(int(config.data.n_patches), seed=study_seed * 8)
+            pair_center_b_vox, pair_center_b_from_body = _sample_pair_center_vox(
+                scan_x,
+                np.asarray(result_a["prism_center_vox"], dtype=np.int64),
+                seed=study_seed * 8 + 1,
+                sample_index=example_index,
+                config=config,
+            )
+            result_b = scan_x.train_sample(
+                int(config.data.n_patches),
+                seed=study_seed * 8 + 2,
+                subset_center_vox=pair_center_b_vox,
+                sampled_body_center=pair_center_b_from_body,
+            )
 
-        cross_valid = False
-        cross_mode = str(fallback_mode)
-        if record_y["series_id"] != record_x["series_id"]:
-            result_ap = _try_same_world_view(
-                scan_y,
-                np.asarray(result_a["prism_center_pt"], dtype=np.float32),
-                seed=study_seed * 4 + 3,
-                n_patches=int(config.data.n_patches),
-            )
-            result_bp = _try_same_world_view(
-                scan_y,
-                np.asarray(result_b["prism_center_pt"], dtype=np.float32),
-                seed=study_seed * 4 + 4,
-                n_patches=int(config.data.n_patches),
-            )
-            if result_ap is not None and result_bp is not None:
-                cross_valid = True
-                cross_mode = "paired_world"
+            cross_valid = False
+            cross_mode = str(fallback_mode)
+            if record_y["series_id"] != record_x["series_id"]:
+                result_ap = _try_same_world_view(
+                    scan_y,
+                    np.asarray(result_a["prism_center_pt"], dtype=np.float32),
+                    seed=study_seed * 8 + 3,
+                    n_patches=int(config.data.n_patches),
+                )
+                result_bp = _try_same_world_view(
+                    scan_y,
+                    np.asarray(result_b["prism_center_pt"], dtype=np.float32),
+                    seed=study_seed * 8 + 4,
+                    n_patches=int(config.data.n_patches),
+                )
+                if result_ap is not None and result_bp is not None:
+                    cross_valid = True
+                    cross_mode = "paired_world"
+                else:
+                    result_ap = scan_y.train_sample(int(config.data.n_patches), seed=study_seed * 8 + 5)
+                    result_bp = scan_y.train_sample(int(config.data.n_patches), seed=study_seed * 8 + 6)
+                    cross_mode = "unpaired"
             else:
-                result_ap = scan_y.train_sample(int(config.data.n_patches), seed=study_seed * 4 + 5)
-                result_bp = scan_y.train_sample(int(config.data.n_patches), seed=study_seed * 4 + 6)
-                cross_mode = "unpaired"
-        else:
-            result_ap = scan_y.train_sample(int(config.data.n_patches), seed=study_seed * 4 + 5)
-            result_bp = scan_y.train_sample(int(config.data.n_patches), seed=study_seed * 4 + 6)
+                result_ap = scan_y.train_sample(int(config.data.n_patches), seed=study_seed * 8 + 5)
+                result_bp = scan_y.train_sample(int(config.data.n_patches), seed=study_seed * 8 + 6)
 
-        views = [
-            {
-                "view_name": "a",
-                "series_id": record_x["series_id"],
-                "modality": record_x["modality"],
-                "series_path": record_x["series_path"],
-                "series_description": str(row_x.get("series_description", "")),
-                "series_label_text": _series_label_text(row_x),
-                "resolved_nifti_path": resolved_nifti_path_x,
-                "totalseg_path": resolve_totalseg_total_ct_path(record_x["series_path"]),
-                "result": result_a,
-            },
-            {
-                "view_name": "ap",
-                "series_id": record_y["series_id"],
-                "modality": record_y["modality"],
-                "series_path": record_y["series_path"],
-                "series_description": str(row_y.get("series_description", "")),
-                "series_label_text": _series_label_text(row_y),
-                "resolved_nifti_path": resolved_nifti_path_y,
-                "totalseg_path": resolve_totalseg_total_ct_path(record_y["series_path"]),
-                "result": result_ap,
-            },
-            {
-                "view_name": "b",
-                "series_id": record_x["series_id"],
-                "modality": record_x["modality"],
-                "series_path": record_x["series_path"],
-                "series_description": str(row_x.get("series_description", "")),
-                "series_label_text": _series_label_text(row_x),
-                "resolved_nifti_path": resolved_nifti_path_x,
-                "totalseg_path": resolve_totalseg_total_ct_path(record_x["series_path"]),
-                "result": result_b,
-            },
-            {
-                "view_name": "bp",
-                "series_id": record_y["series_id"],
-                "modality": record_y["modality"],
-                "series_path": record_y["series_path"],
-                "series_description": str(row_y.get("series_description", "")),
-                "series_label_text": _series_label_text(row_y),
-                "resolved_nifti_path": resolved_nifti_path_y,
-                "totalseg_path": resolve_totalseg_total_ct_path(record_y["series_path"]),
-                "result": result_bp,
-            },
-        ]
-        example = {
-            "study_id": study_id,
-            "series_id_x": record_x["series_id"],
-            "series_id_y": record_y["series_id"],
-            "series_path_x": record_x["series_path"],
-            "series_path_y": record_y["series_path"],
-            "series_description_x": str(row_x.get("series_description", "")),
-            "series_description_y": str(row_y.get("series_description", "")),
-            "cross_valid": bool(cross_valid),
-            "cross_mode": str(cross_mode),
-            "views": views,
-        }
-        accepted_examples += 1
+            views = [
+                {
+                    "view_name": "a",
+                    "series_id": record_x["series_id"],
+                    "modality": record_x["modality"],
+                    "series_path": record_x["series_path"],
+                    "series_description": str(row_x.get("series_description", "")),
+                    "series_label_text": _series_label_text(row_x),
+                    "resolved_nifti_path": resolved_nifti_path_x,
+                    "totalseg_path": resolve_totalseg_total_ct_path(record_x["series_path"]),
+                    "result": result_a,
+                },
+                {
+                    "view_name": "ap",
+                    "series_id": record_y["series_id"],
+                    "modality": record_y["modality"],
+                    "series_path": record_y["series_path"],
+                    "series_description": str(row_y.get("series_description", "")),
+                    "series_label_text": _series_label_text(row_y),
+                    "resolved_nifti_path": resolved_nifti_path_y,
+                    "totalseg_path": resolve_totalseg_total_ct_path(record_y["series_path"]),
+                    "result": result_ap,
+                },
+                {
+                    "view_name": "b",
+                    "series_id": record_x["series_id"],
+                    "modality": record_x["modality"],
+                    "series_path": record_x["series_path"],
+                    "series_description": str(row_x.get("series_description", "")),
+                    "series_label_text": _series_label_text(row_x),
+                    "resolved_nifti_path": resolved_nifti_path_x,
+                    "totalseg_path": resolve_totalseg_total_ct_path(record_x["series_path"]),
+                    "result": result_b,
+                },
+                {
+                    "view_name": "bp",
+                    "series_id": record_y["series_id"],
+                    "modality": record_y["modality"],
+                    "series_path": record_y["series_path"],
+                    "series_description": str(row_y.get("series_description", "")),
+                    "series_label_text": _series_label_text(row_y),
+                    "resolved_nifti_path": resolved_nifti_path_y,
+                    "totalseg_path": resolve_totalseg_total_ct_path(record_y["series_path"]),
+                    "result": result_bp,
+                },
+            ]
+            example = {
+                "study_id": study_id,
+                "study_sample_index": int(repeat_index),
+                "series_id_x": record_x["series_id"],
+                "series_id_y": record_y["series_id"],
+                "series_path_x": record_x["series_path"],
+                "series_path_y": record_y["series_path"],
+                "series_description_x": str(row_x.get("series_description", "")),
+                "series_description_y": str(row_y.get("series_description", "")),
+                "cross_valid": bool(cross_valid),
+                "cross_mode": str(cross_mode),
+                "views": views,
+            }
+            accepted_examples += 1
+            yield example
+
+        accepted_studies += 1
         if progress is not None:
             progress(
                 {
                     "event": "study",
                     "visited_studies": visited_studies,
                     "accepted_examples": int(accepted_examples),
-                    "target_examples": int(n_studies),
+                    "accepted_studies": int(accepted_studies),
+                    "target_examples": int(target_examples),
+                    "target_studies": int(n_studies),
+                    "samples_per_study": int(repeats_per_study),
                     "total_candidates": int(len(ordered_studies)),
                     "study_id": str(study_id),
                     "status": "accepted",
                 }
             )
-        yield example
+        del scan_x, scan_y
     if progress is not None:
         progress(
             {
                 "event": "done",
                 "visited_studies": visited_studies,
                 "accepted_examples": int(accepted_examples),
-                "target_examples": int(n_studies),
+                "accepted_studies": int(accepted_studies),
+                "target_examples": int(target_examples),
+                "target_studies": int(n_studies),
+                "samples_per_study": int(repeats_per_study),
                 "total_candidates": int(len(ordered_studies)),
                 "study_id": "",
                 "status": "complete",
@@ -557,6 +579,7 @@ def sample_study4_examples(
     config: RunConfig,
     *,
     n_studies: int,
+    samples_per_study: int = 1,
     seed: int,
     modality_filter: tuple[str, ...] | None = None,
     progress: Callable[[dict[str, Any]], None] | None = None,
@@ -567,6 +590,7 @@ def sample_study4_examples(
             catalog,
             config,
             n_studies=n_studies,
+            samples_per_study=samples_per_study,
             seed=seed,
             modality_filter=modality_filter,
             progress=progress,
@@ -677,6 +701,7 @@ def build_eval_batch(examples: Sequence[Mapping[str, Any]], *, sample_offset: in
         sample_rows.append(
             {
                 "sample_index": sample_index,
+                "study_sample_index": int(example.get("study_sample_index", 0)),
                 "study_id": str(example["study_id"]),
                 "series_id_x": str(example["series_id_x"]),
                 "series_id_y": str(example["series_id_y"]),
@@ -692,6 +717,7 @@ def build_eval_batch(examples: Sequence[Mapping[str, Any]], *, sample_offset: in
             view_rows.append(
                 {
                     "sample_index": sample_index,
+                    "study_sample_index": int(example.get("study_sample_index", 0)),
                     "view_index": int(view_index),
                     "view_name": str(view["view_name"]),
                     "study_id": str(example["study_id"]),

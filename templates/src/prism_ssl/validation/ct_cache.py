@@ -89,7 +89,7 @@ def estimate_ct_validation_sample_bytes(
     return int(patches_bytes + positions_bytes + cross_valid_bytes + metadata_slack_bytes)
 
 
-def max_ct_validation_studies_for_budget(
+def max_ct_validation_samples_for_budget(
     n_patches: int,
     *,
     max_cache_gb: float,
@@ -105,6 +105,22 @@ def max_ct_validation_studies_for_budget(
         position_dtype=position_dtype,
     )
     return max(1, budget_bytes // max(per_sample_bytes, 1))
+
+
+def max_ct_validation_studies_for_budget(
+    n_patches: int,
+    *,
+    max_cache_gb: float,
+    patch_dtype: torch.dtype = torch.float16,
+    position_dtype: torch.dtype = torch.float32,
+) -> int:
+    """Backward-compatible alias for sample capacity under a budget."""
+    return max_ct_validation_samples_for_budget(
+        n_patches,
+        max_cache_gb=max_cache_gb,
+        patch_dtype=patch_dtype,
+        position_dtype=position_dtype,
+    )
 
 
 def _cache_summary_path(output_dir: Path) -> Path:
@@ -187,6 +203,7 @@ def _compact_example_for_cache(example: Mapping[str, Any]) -> dict[str, Any]:
         )
     return {
         "study_id": str(example["study_id"]),
+        "study_sample_index": int(example.get("study_sample_index", 0)),
         "series_id_x": str(example["series_id_x"]),
         "series_id_y": str(example["series_id_y"]),
         "series_path_x": str(example["series_path_x"]),
@@ -205,6 +222,7 @@ def build_ct_validation_cache(
     output_dir: str | Path,
     *,
     target_studies: int,
+    samples_per_study: int,
     seed: int,
     max_cache_gb: float = 2.0,
     shard_size: int = 128,
@@ -230,23 +248,35 @@ def build_ct_validation_cache(
             if stale_path.exists():
                 stale_path.unlink()
 
-    max_budget_studies = max_ct_validation_studies_for_budget(
+    repeats_per_study = max(int(samples_per_study), 1)
+    max_budget_samples = max_ct_validation_samples_for_budget(
         int(config.data.n_patches),
         max_cache_gb=float(max_cache_gb),
     )
-    effective_target = min(max(int(target_studies), 0), max_budget_studies)
-    if effective_target <= 0:
+    requested_studies = max(int(target_studies), 0)
+    requested_samples = requested_studies * repeats_per_study
+    estimated_bytes_per_sample = estimate_ct_validation_sample_bytes(int(config.data.n_patches))
+    required_cache_gb = float((requested_samples * estimated_bytes_per_sample) / (1024**3))
+    if requested_samples <= 0:
         raise ValueError(
-            f"Requested target_studies={target_studies} does not fit within max_cache_gb={max_cache_gb:.2f}"
+            "Requested target_studies and samples_per_study must produce at least one cached sample"
+        )
+    if requested_samples > max_budget_samples:
+        raise ValueError(
+            "Requested validation cache exceeds the configured disk budget: "
+            f"{requested_studies} studies x {repeats_per_study} samples/study = {requested_samples} samples, "
+            f"but max_cache_gb={max_cache_gb:.2f} only fits about {max_budget_samples} samples. "
+            f"Need at least {required_cache_gb:.2f} GiB."
         )
 
     if progress is not None:
         progress(
             {
                 "stage": "sampling",
-                "target_studies_requested": int(target_studies),
-                "target_studies_budgeted": int(effective_target),
-                "max_budget_studies": int(max_budget_studies),
+                "target_studies_requested": int(requested_studies),
+                "target_samples_requested": int(requested_samples),
+                "samples_per_study": int(repeats_per_study),
+                "max_budget_samples": int(max_budget_samples),
                 "status": "start",
             }
         )
@@ -256,12 +286,13 @@ def build_ct_validation_cache(
     total_bytes_written = 0
     shard_paths: list[str] = []
     build_started_at = time.strftime("%Y-%m-%dT%H:%M:%S")
-    written_studies = 0
+    written_samples = 0
+    written_study_ids: set[str] = set()
     current_chunk: list[dict[str, Any]] = []
     shard_width = max(int(shard_size), 1)
 
     def _flush_chunk(chunk: Sequence[Mapping[str, Any]], *, shard_index: int, sample_offset: int) -> None:
-        nonlocal total_bytes_written, written_studies
+        nonlocal total_bytes_written, written_samples
         batch = build_eval_batch(chunk, sample_offset=sample_offset)
         shard_payload = {
             "sample_index": torch.tensor([int(row["sample_index"]) for row in batch["sample_rows"]], dtype=torch.int64),
@@ -276,7 +307,8 @@ def build_ct_validation_cache(
 
         samples_rows.extend(_enrich_sample_rows(batch["sample_rows"], shard_index=shard_index))
         views_rows.extend(_enrich_view_rows(batch["view_rows"], shard_index=shard_index))
-        written_studies += int(len(chunk))
+        written_samples += int(len(chunk))
+        written_study_ids.update(str(row["study_id"]) for row in batch["sample_rows"])
 
         if progress is not None:
             progress(
@@ -284,8 +316,10 @@ def build_ct_validation_cache(
                     "stage": "writing",
                     "status": "shard_complete",
                     "shard_index": int(shard_index),
-                    "studies_written": int(written_studies),
-                    "total_studies": int(effective_target),
+                    "samples_written": int(written_samples),
+                    "total_samples": int(requested_samples),
+                    "unique_studies_written": int(len(written_study_ids)),
+                    "total_studies": int(requested_studies),
                     "bytes_written": int(total_bytes_written),
                 }
             )
@@ -295,23 +329,24 @@ def build_ct_validation_cache(
     for example in iter_study4_examples(
         catalog,
         config,
-        n_studies=effective_target,
+        n_studies=requested_studies,
+        samples_per_study=repeats_per_study,
         seed=int(seed),
         modality_filter=("CT",),
         progress=(lambda payload: progress({"stage": "sampling", **payload}) if progress is not None else None),
     ):
         current_chunk.append(_compact_example_for_cache(example))
         if len(current_chunk) >= shard_width:
-            _flush_chunk(current_chunk, shard_index=len(shard_paths), sample_offset=written_studies)
+            _flush_chunk(current_chunk, shard_index=len(shard_paths), sample_offset=written_samples)
             current_chunk = []
             gc.collect()
 
     if current_chunk:
-        _flush_chunk(current_chunk, shard_index=len(shard_paths), sample_offset=written_studies)
+        _flush_chunk(current_chunk, shard_index=len(shard_paths), sample_offset=written_samples)
         current_chunk = []
         gc.collect()
 
-    if written_studies == 0:
+    if written_samples == 0:
         raise RuntimeError("No CT study4 examples could be sampled for validation cache")
 
     samples_df = pl.DataFrame(samples_rows).sort("sample_index")
@@ -319,22 +354,23 @@ def build_ct_validation_cache(
     samples_df.write_parquet(_cache_samples_path(output_root))
     views_df.write_parquet(_cache_views_path(output_root))
 
-    estimated_bytes_per_sample = estimate_ct_validation_sample_bytes(int(config.data.n_patches))
     summary = {
         "cache_version": _CACHE_VERSION,
         "cache_type": "ct_study4_validation",
         "created_at": build_started_at,
         "output_dir": str(output_root),
         "catalog_path": str(catalog) if isinstance(catalog, (str, Path)) else "<dataframe>",
-        "target_studies_requested": int(target_studies),
-        "target_studies_budgeted": int(effective_target),
-        "n_studies": int(written_studies),
+        "target_studies_requested": int(requested_studies),
+        "samples_per_study": int(repeats_per_study),
+        "target_samples_requested": int(requested_samples),
+        "n_studies": int(len(written_study_ids)),
+        "n_samples": int(written_samples),
         "n_views": int(len(views_rows)),
         "n_shards": int(len(shard_paths)),
         "shard_size": int(max(int(shard_size), 1)),
         "max_cache_gb": float(max_cache_gb),
         "estimated_bytes_per_sample": int(estimated_bytes_per_sample),
-        "estimated_total_bytes": int(estimated_bytes_per_sample * written_studies),
+        "estimated_total_bytes": int(estimated_bytes_per_sample * written_samples),
         "actual_tensor_bytes": int(total_bytes_written),
         "n_patches": int(config.data.n_patches),
         "patch_mm": float(config.data.patch_mm),
@@ -383,7 +419,8 @@ def load_ct_validation_cache(
                 "status": "complete",
                 "cache_dir": str(cache_root),
                 "n_shards": int(len(shard_paths)),
-                "n_studies": int(samples_df.height),
+                "n_samples": int(samples_df.height),
+                "n_studies": int(samples_df["study_id"].n_unique()),
             }
         )
 
@@ -411,7 +448,8 @@ def load_ct_validation_cache(
                 "status": "complete",
                 "cache_dir": str(cache_root),
                 "n_shards": int(len(shard_paths)),
-                "n_studies": int(patches_views.shape[0]),
+                "n_samples": int(patches_views.shape[0]),
+                "n_studies": int(samples_df["study_id"].n_unique()),
                 "n_views": int(patches_views.shape[0] * 4),
             }
         )
@@ -455,6 +493,7 @@ __all__ = [
     "infer_contrast_bucket",
     "infer_series_family",
     "estimate_ct_validation_sample_bytes",
+    "max_ct_validation_samples_for_budget",
     "max_ct_validation_studies_for_budget",
     "build_ct_validation_cache",
     "load_ct_validation_cache",
