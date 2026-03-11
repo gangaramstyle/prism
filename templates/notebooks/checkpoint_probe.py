@@ -9,16 +9,18 @@ with app.setup:
     import sys
     import time
     from collections import Counter
+    from functools import lru_cache
     from pathlib import Path
     from typing import Mapping
 
     import altair as alt
     import marimo as mo
+    import nibabel as nib
     import numpy as np
     import polars as pl
     import torch
     import torch.nn.functional as F
-    from PIL import Image
+    from PIL import Image, ImageDraw
 
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -153,6 +155,95 @@ with app.setup:
             return np.asarray(result["normalized_patches"], dtype=np.float32)
 
         raise KeyError("No patch source is available for the requested view")
+
+    def lookup_view_row(
+        probe_state: Mapping[str, object],
+        *,
+        sample_index: int,
+        view_index: int,
+    ) -> dict[str, object]:
+        view_df = probe_state.get("view_df")
+        if view_df is None:
+            raise KeyError("No view metadata source is available for the requested view")
+        matches = view_df.filter(
+            (pl.col("sample_index") == int(sample_index)) & (pl.col("view_index") == int(view_index))
+        )
+        if matches.height == 0:
+            raise KeyError(f"Could not find view metadata for sample_index={sample_index}, view_index={view_index}")
+        return dict(matches.row(0, named=True))
+
+    _THIN_AXIS_BY_NAME = {"x": 0, "y": 1, "z": 2}
+
+    @lru_cache(maxsize=12)
+    def load_canonical_volume(nifti_path: str) -> np.ndarray:
+        raw = nib.load(str(nifti_path))
+        try:
+            img = nib.as_closest_canonical(raw)
+        except Exception:
+            img = raw
+        data = np.asarray(img.get_fdata(), dtype=np.float32)
+        if data.ndim == 4:
+            data = data[..., 0]
+        if data.ndim != 3:
+            raise ValueError(f"Expected a 3D NIfTI volume, got shape={tuple(data.shape)} for {nifti_path}")
+        return data
+
+    def render_windowed_slice(
+        view_row: Mapping[str, object],
+        *,
+        slice_index: int,
+        target_long_side: int = 420,
+    ) -> Image.Image:
+        nifti_path = str(view_row.get("resolved_nifti_path") or view_row.get("series_path") or "")
+        volume = load_canonical_volume(nifti_path)
+        thin_axis_name = str(view_row.get("native_thin_axis_name", "z")).lower()
+        thin_axis = _THIN_AXIS_BY_NAME.get(thin_axis_name, 2)
+        prism_center_vox = np.asarray(view_row.get("prism_center_vox", [0, 0, 0]), dtype=np.int64).reshape(3)
+        patch_centers_vox = np.asarray(view_row.get("patch_centers_vox", []), dtype=np.int64).reshape(-1, 3)
+        wc = float(view_row.get("wc", 0.0))
+        ww = max(float(view_row.get("ww", 1.0)), 1e-3)
+        slice_value = int(np.clip(int(slice_index), 0, int(volume.shape[thin_axis]) - 1))
+
+        if thin_axis == 0:
+            plane = volume[slice_value, :, :].T
+            prism_xy = (int(prism_center_vox[1]), int(prism_center_vox[2]))
+            patch_xy = patch_centers_vox[:, [1, 2]] if patch_centers_vox.size else np.empty((0, 2), dtype=np.int64)
+            patch_mask = patch_centers_vox[:, 0] == slice_value if patch_centers_vox.size else np.zeros((0,), dtype=bool)
+        elif thin_axis == 1:
+            plane = volume[:, slice_value, :].T
+            prism_xy = (int(prism_center_vox[0]), int(prism_center_vox[2]))
+            patch_xy = patch_centers_vox[:, [0, 2]] if patch_centers_vox.size else np.empty((0, 2), dtype=np.int64)
+            patch_mask = patch_centers_vox[:, 1] == slice_value if patch_centers_vox.size else np.zeros((0,), dtype=bool)
+        else:
+            plane = volume[:, :, slice_value].T
+            prism_xy = (int(prism_center_vox[0]), int(prism_center_vox[1]))
+            patch_xy = patch_centers_vox[:, [0, 1]] if patch_centers_vox.size else np.empty((0, 2), dtype=np.int64)
+            patch_mask = patch_centers_vox[:, 2] == slice_value if patch_centers_vox.size else np.zeros((0,), dtype=bool)
+
+        low = wc - 0.5 * ww
+        high = wc + 0.5 * ww
+        gray = np.clip((plane - low) / max(high - low, 1e-6) * 255.0, 0, 255).astype(np.uint8)
+        rgb = Image.fromarray(gray, mode="L").convert("RGB")
+        scale = float(target_long_side) / max(int(rgb.width), int(rgb.height), 1)
+        new_size = (
+            max(1, int(round(rgb.width * scale))),
+            max(1, int(round(rgb.height * scale))),
+        )
+        rgb = rgb.resize(new_size, Image.Resampling.NEAREST if scale >= 1.0 else Image.Resampling.BILINEAR)
+        draw = ImageDraw.Draw(rgb)
+        scale_x = float(rgb.width) / max(float(gray.shape[1]), 1.0)
+        scale_y = float(rgb.height) / max(float(gray.shape[0]), 1.0)
+
+        for point in patch_xy[patch_mask]:
+            cx = float(point[0]) * scale_x
+            cy = float(point[1]) * scale_y
+            draw.ellipse((cx - 3, cy - 3, cx + 3, cy + 3), outline=(0, 255, 255), width=2)
+
+        px = float(prism_xy[0]) * scale_x
+        py = float(prism_xy[1]) * scale_y
+        draw.line((px - 6, py, px + 6, py), fill=(255, 64, 64), width=2)
+        draw.line((px, py - 6, px, py + 6), fill=(255, 64, 64), width=2)
+        return rgb
 
     def dataframe_records(value: object) -> list[dict[str, object]]:
         if value is None:
@@ -1275,12 +1366,18 @@ def _(
 @app.cell
 def _(
     dataframe_records,
+    load_canonical_volume,
     lookup_view_patches,
+    lookup_view_row,
     metric_display,
     mo,
+    np,
     patch_grid,
     patch_quality_row,
+    pl,
     probe_state,
+    render_windowed_slice,
+    series_display_text,
     ap_heatmap,
     lr_heatmap,
     position_matrix_df,
@@ -1297,6 +1394,16 @@ def _(
         _detail_panel = mo.callout("Click a total-heatmap cell to inspect the two sampled positions behind that decoder comparison.", kind="info")
     else:
         _record = _selected_records[0]
+        _anchor_view = lookup_view_row(
+            probe_state,
+            sample_index=int(_record["anchor_sample_index"]),
+            view_index=int(_record["anchor_view_index"]),
+        )
+        _target_view = lookup_view_row(
+            probe_state,
+            sample_index=int(_record["target_sample_index"]),
+            view_index=int(_record["target_view_index"]),
+        )
         _anchor_patches = lookup_view_patches(
             probe_state,
             sample_index=int(_record["anchor_sample_index"]),
@@ -1323,6 +1430,52 @@ def _(
                 pl.col("frac_high_clip").round(3),
             ]
         )
+        def _slice_browser(title: str, view_row: dict[str, object]):
+            _thin_axis_name = str(view_row.get("native_thin_axis_name", "z")).lower()
+            _thin_axis = {"x": 0, "y": 1, "z": 2}.get(_thin_axis_name, 2)
+            _resolved_path = str(view_row.get("resolved_nifti_path") or view_row.get("series_path") or "")
+            _volume = load_canonical_volume(_resolved_path)
+            _prism_center_vox = np.asarray(view_row.get("prism_center_vox", [0, 0, 0]), dtype=np.int64).reshape(3)
+            _patch_centers_vox = np.asarray(view_row.get("patch_centers_vox", []), dtype=np.int64).reshape(-1, 3)
+            _default_slice = int(np.clip(int(_prism_center_vox[_thin_axis]), 0, int(_volume.shape[_thin_axis]) - 1))
+            _slice_slider = mo.ui.slider(
+                start=0,
+                stop=max(int(_volume.shape[_thin_axis]) - 1, 0),
+                step=1,
+                value=_default_slice,
+                label=f"{title} {_thin_axis_name}-slice",
+            )
+            _visible_centers = (
+                int(np.sum(_patch_centers_vox[:, _thin_axis] == int(_slice_slider.value)))
+                if _patch_centers_vox.size
+                else 0
+            )
+            _meta = pl.DataFrame(
+                [
+                    {
+                        "series": series_display_text(view_row),
+                        "plane": str(view_row.get("native_acquisition_plane", "unknown")),
+                        "thin_axis": _thin_axis_name,
+                        "wc": round(float(view_row.get("wc", 0.0)), 1),
+                        "ww": round(float(view_row.get("ww", 0.0)), 1),
+                        "prism_center_vox": str(tuple(int(v) for v in _prism_center_vox.tolist())),
+                        "visible_patch_centers": _visible_centers,
+                    }
+                ]
+            )
+            return mo.vstack(
+                [
+                    mo.md(f"### {title} scan"),
+                    _meta,
+                    mo.md(f"`{_resolved_path}`"),
+                    _slice_slider,
+                    mo.image(render_windowed_slice(view_row, slice_index=int(_slice_slider.value)), width=420),
+                    mo.md("Red = prism center. Cyan = patch centers on the current slice."),
+                ]
+            )
+
+        _anchor_browser = _slice_browser("Anchor", _anchor_view)
+        _target_browser = _slice_browser("Target", _target_view)
         _metrics = pl.DataFrame(
             [
                 {"axis": "total", "truth": "-", "pred": "-", "correct": "-", "accuracy": metric_display(float(_record["total_accuracy"]))},
@@ -1376,6 +1529,7 @@ def _(
                         ),
                     ]
                 ),
+                mo.hstack([_anchor_browser, _target_browser]),
             ]
         )
     _ui = mo.vstack(
