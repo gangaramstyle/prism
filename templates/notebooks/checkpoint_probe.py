@@ -1496,11 +1496,15 @@ def _(
         if _anchor_window_params is not None:
             _anchor_view["wc"], _anchor_view["ww"] = _anchor_window_params
             _anchor_view["window_source"] = "sampled"
+        elif _anchor_view.get("wc") is not None and _anchor_view.get("ww") is not None:
+            _anchor_view["window_source"] = "cached_sampled"
         else:
             _anchor_view["window_source"] = "volume_p01_p99_fallback"
         if _target_window_params is not None:
             _target_view["wc"], _target_view["ww"] = _target_window_params
             _target_view["window_source"] = "sampled"
+        elif _target_view.get("wc") is not None and _target_view.get("ww") is not None:
+            _target_view["window_source"] = "cached_sampled"
         else:
             _target_view["window_source"] = "volume_p01_p99_fallback"
         _anchor_patches = lookup_view_patches(
