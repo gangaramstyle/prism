@@ -322,7 +322,10 @@ def _(Path, mo, os):
         "CATALOG_PATH",
         str(Path(__file__).resolve().parents[1] / "data" / "pmbb_catalog.csv.gz"),
     )
-    default_validation_cache = os.environ.get("PRISM_VALIDATION_CACHE", "")
+    default_validation_cache = os.environ.get(
+        "PRISM_VALIDATION_CACHE",
+        "/vast/home/g/gangaram/prism_ssl_validation/ct_phase1_v9ng7z6_v80_256",
+    )
     checkpoint_path = mo.ui.text(label="Checkpoint path (optional)", value=os.environ.get("PRISM_NOTEBOOK_CKPT", ""))
     wandb_run_ref = mo.ui.text(label="W&B run URL (optional)", value=os.environ.get("PRISM_NOTEBOOK_WANDB_RUN", ""))
     wandb_force_refresh = mo.ui.checkbox(label="Refresh W&B artifacts", value=False)
@@ -1263,8 +1266,8 @@ def _(
             mo.md("## Relative Position Details"),
             _summary_table,
             _detail_note,
-            mo.hstack([total_heatmap, lr_heatmap]),
-            mo.hstack([ap_heatmap, si_heatmap]),
+            mo.hstack([lr_heatmap, ap_heatmap]),
+            si_heatmap,
             mo.md("### Worst pairs for the selected scan"),
             _worst_selected_pairs,
         ]
@@ -1359,20 +1362,34 @@ def _(
                     f"delta S={float(_record['delta_s_mm']):.1f} mm)"
                 ),
                 _metrics,
-                mo.md("### Patch quality"),
-                _patch_quality,
                 mo.hstack(
                     [
                         mo.vstack(
                             [
-                                mo.md(f"Anchor patches: `{_record['anchor_label']}`"),
-                                mo.image(patch_grid(_anchor_patches, auto_contrast=True), width=420),
+                                mo.md("### Total confusion"),
+                                total_heatmap,
                             ]
                         ),
                         mo.vstack(
                             [
-                                mo.md(f"Target patches: `{_record['target_label']}`"),
-                                mo.image(patch_grid(_target_patches, auto_contrast=True), width=420),
+                                mo.md("### Patch quality"),
+                                _patch_quality,
+                                mo.hstack(
+                                    [
+                                        mo.vstack(
+                                            [
+                                                mo.md(f"Anchor patches: `{_record['anchor_label']}`"),
+                                                mo.image(patch_grid(_anchor_patches, auto_contrast=True), width=420),
+                                            ]
+                                        ),
+                                        mo.vstack(
+                                            [
+                                                mo.md(f"Target patches: `{_record['target_label']}`"),
+                                                mo.image(patch_grid(_target_patches, auto_contrast=True), width=420),
+                                            ]
+                                        ),
+                                    ]
+                                ),
                             ]
                         ),
                     ]
