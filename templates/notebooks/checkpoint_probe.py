@@ -324,7 +324,7 @@ def _(Path, mo, os):
     )
     default_validation_cache = os.environ.get(
         "PRISM_VALIDATION_CACHE",
-        "/vast/home/g/gangaram/prism_ssl_validation/ct_phase1_v9ng7z6_v80_256",
+        "/vast/home/g/gangaram/prism_ssl_validation/ct_phase1_v9ng7z6_v80_256/",
     )
     checkpoint_path = mo.ui.text(label="Checkpoint path (optional)", value=os.environ.get("PRISM_NOTEBOOK_CKPT", ""))
     wandb_run_ref = mo.ui.text(label="W&B run URL (optional)", value=os.environ.get("PRISM_NOTEBOOK_WANDB_RUN", ""))
@@ -332,8 +332,8 @@ def _(Path, mo, os):
     catalog_path = mo.ui.text(label="Catalog path (live sampling only)", value=default_catalog)
     validation_cache_dir = mo.ui.text(label="Validation cache dir (optional)", value=default_validation_cache)
     device = mo.ui.dropdown(options=["auto", "cpu", "cuda"], value="auto", label="Device")
-    n_studies = mo.ui.slider(start=1, stop=8192, step=1, value=32, label="Eval samples (cache) / studies (live)")
-    eval_batch_size = mo.ui.slider(start=1, stop=32, step=1, value=4, label="Eval batch size")
+    n_studies = mo.ui.slider(start=1, stop=8192, step=1, value=8192, label="Eval samples (cache) / studies (live)")
+    eval_batch_size = mo.ui.slider(start=1, stop=32, step=1, value=32, label="Eval batch size")
     seed = mo.ui.number(label="Seed", value=42, step=1)
     include_background_label_0 = mo.ui.checkbox(label="Include anatomy label 0", value=False)
     _source_note = mo.callout(
@@ -1297,7 +1297,7 @@ def _(
             break
 
     if not _selected_records:
-        _ui = mo.callout("Click a heatmap cell to inspect the two sampled positions behind that decoder comparison.", kind="info")
+        _detail_panel = mo.callout("Click a total-heatmap cell to inspect the two sampled positions behind that decoder comparison.", kind="info")
     else:
         _record = _selected_records[0]
         _anchor_patches = lookup_view_patches(
@@ -1352,9 +1352,8 @@ def _(
                 },
             ]
         )
-        _ui = mo.vstack(
+        _detail_panel = mo.vstack(
             [
-                mo.md("## Selected Position Comparison"),
                 mo.md(
                     f"Anchor `{_record['anchor_label']}` vs target `{_record['target_label']}` "
                     f"(delta R={float(_record['delta_r_mm']):.1f} mm, "
@@ -1362,40 +1361,42 @@ def _(
                     f"delta S={float(_record['delta_s_mm']):.1f} mm)"
                 ),
                 _metrics,
+                mo.md("### Patch quality"),
+                _patch_quality,
                 mo.hstack(
                     [
                         mo.vstack(
                             [
-                                mo.md("### Total confusion"),
-                                total_heatmap,
+                                mo.md(f"Anchor patches: `{_record['anchor_label']}`"),
+                                mo.image(patch_grid(_anchor_patches, auto_contrast=True), width=420),
                             ]
                         ),
                         mo.vstack(
                             [
-                                mo.md("### Patch quality"),
-                                _patch_quality,
-                                mo.hstack(
-                                    [
-                                        mo.vstack(
-                                            [
-                                                mo.md(f"Anchor patches: `{_record['anchor_label']}`"),
-                                                mo.image(patch_grid(_anchor_patches, auto_contrast=True), width=420),
-                                            ]
-                                        ),
-                                        mo.vstack(
-                                            [
-                                                mo.md(f"Target patches: `{_record['target_label']}`"),
-                                                mo.image(patch_grid(_target_patches, auto_contrast=True), width=420),
-                                            ]
-                                        ),
-                                    ]
-                                ),
+                                mo.md(f"Target patches: `{_record['target_label']}`"),
+                                mo.image(patch_grid(_target_patches, auto_contrast=True), width=420),
                             ]
                         ),
                     ]
                 ),
             ]
         )
+    _ui = mo.vstack(
+        [
+            mo.md("## Selected Position Comparison"),
+            mo.hstack(
+                [
+                    mo.vstack(
+                        [
+                            mo.md("### Total confusion"),
+                            total_heatmap,
+                        ]
+                    ),
+                    _detail_panel,
+                ]
+            ),
+        ]
+    )
     _ui
     return
 
