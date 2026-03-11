@@ -435,6 +435,8 @@ def run_training(config: RunConfig) -> dict[str, Any]:
                         w_supcon_protocol=loss_bundle.w_supcon_protocol,
                         patch_size_mae_mm=diagnostics["patch_size_mae_mm"],
                         source_patch_mm_mean=diagnostics["source_patch_mm_mean"],
+                        center_distance_mm_mean=diagnostics["center_distance_mm_mean"],
+                        low_variation_sample_count=diagnostics["low_variation_sample_count"],
                         step_time_ms=step_time_ms,
                         data_wait_ms=data_wait_ms,
                         gpu_time_ms=gpu_time_ms,
@@ -475,6 +477,10 @@ def run_training(config: RunConfig) -> dict[str, Any]:
                     "train/w_supcon_protocol": float(loss_bundle.w_supcon_protocol),
                     "train/target_center_delta_mm_mean": diagnostics["target_center_delta_mean"],
                     "train/target_center_delta_std": diagnostics["target_center_delta_std"],
+                    "train/center_distance_mm_mean": diagnostics["center_distance_mm_mean"],
+                    "train/center_distance_mm_std": diagnostics["center_distance_mm_std"],
+                    "train/center_distance_mm_min": diagnostics["center_distance_mm_min"],
+                    "train/center_distance_mm_max": diagnostics["center_distance_mm_max"],
                     "train/mim_target_abs_mean": diagnostics["mim_target_abs_mean"],
                     "train/mim_pred_abs_mean": diagnostics["mim_pred_abs_mean"],
                     "train/mim_masked_patch_count": diagnostics["mim_masked_patch_count"],
@@ -482,6 +488,13 @@ def run_training(config: RunConfig) -> dict[str, Any]:
                     "train/source_patch_mm_mean": diagnostics["source_patch_mm_mean"],
                     "train/source_patch_mm_min": diagnostics["source_patch_mm_min"],
                     "train/source_patch_mm_max": diagnostics["source_patch_mm_max"],
+                    "train/low_variation_sample_count": diagnostics["low_variation_sample_count"],
+                    "train/low_variation_sample_ratio": diagnostics["low_variation_sample_ratio"],
+                    "train/low_variation_view_count": diagnostics["low_variation_view_count"],
+                    "train/low_variation_both_views_count": diagnostics["low_variation_both_views_count"],
+                    "train/low_variation_view_std_threshold": diagnostics["low_variation_view_std_threshold"],
+                    "train/patch_pixel_std_a_mean": diagnostics["patch_pixel_std_a_mean"],
+                    "train/patch_pixel_std_b_mean": diagnostics["patch_pixel_std_b_mean"],
                     "train/supcon_instance_positives_per_anchor_mean": diagnostics["supcon_instance_positives_per_anchor_mean"],
                     "train/supcon_protocol_positives_per_anchor_mean": diagnostics["supcon_protocol_positives_per_anchor_mean"],
                     "train/step_time_ms": step_time_ms,
@@ -579,4 +592,3 @@ def run_training(config: RunConfig) -> dict[str, Any]:
 
 def write_summary(path: str, payload: dict[str, Any]) -> None:
     atomic_write_json(path, payload)
-

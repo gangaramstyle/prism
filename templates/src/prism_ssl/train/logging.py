@@ -24,6 +24,8 @@ def format_step_log(
     w_supcon_protocol: float,
     patch_size_mae_mm: float,
     source_patch_mm_mean: float,
+    center_distance_mm_mean: float,
+    low_variation_sample_count: float,
     step_time_ms: float,
     data_wait_ms: float = 0.0,
     gpu_time_ms: float = 0.0,
@@ -42,6 +44,7 @@ def format_step_log(
         f"shared_acc={pair_relation_acc_shared:.3f} wc_acc={window_acc_wc:.3f} ww_acc={window_acc_ww:.3f} "
         f"supcon_i={sci(loss_supcon_instance)} supcon_p={sci(loss_supcon_protocol)} "
         f"patch={sci(loss_patch_size)} patch_mae_mm={patch_size_mae_mm:.2f} src_mm={source_patch_mm_mean:.1f} "
+        f"dist_mm={center_distance_mm_mean:.1f} lowvar={low_variation_sample_count:.0f} "
         f"mim={sci(loss_mim)} w_i={w_supcon_instance:.4f} w_p={w_supcon_protocol:.4f} "
         f"ts_scan_ratio={ts_loaded_ratio:.3f} ts_view_ratio={ts_view_ratio:.3f} "
         f"step_ms={step_time_ms:.1f} data_ms={data_wait_ms:.1f} gpu_ms={gpu_time_ms:.1f} "
@@ -49,4 +52,3 @@ def format_step_log(
         f"post_ms={post_step_ms:.1f} step_tput={step_throughput:.1f} "
         f"eff_tput={throughput_effective:.1f} broken_ratio={broken_ratio:.4f}"
     )
-

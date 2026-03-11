@@ -10,6 +10,8 @@ from prism_ssl.config.schema import LossConfig
 from prism_ssl.model.heads import PrismModelOutput
 from prism_ssl.model.schedules import supcon_weight
 
+LOW_VARIATION_VIEW_STD_THRESHOLD = 0.05
+
 
 @dataclass
 class LossBundle:
@@ -102,6 +104,30 @@ def _patch_size_targets(batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, t
     return target_a, target_b
 
 
+def _low_variation_patch_stats(
+    batch: dict[str, torch.Tensor],
+    *,
+    std_threshold: float = LOW_VARIATION_VIEW_STD_THRESHOLD,
+) -> dict[str, float]:
+    patches_a = batch["patches_a"].float().reshape(batch["patches_a"].shape[0], -1)
+    patches_b = batch["patches_b"].float().reshape(batch["patches_b"].shape[0], -1)
+    std_a = patches_a.std(dim=1, unbiased=False)
+    std_b = patches_b.std(dim=1, unbiased=False)
+    low_a = std_a < float(std_threshold)
+    low_b = std_b < float(std_threshold)
+    low_any = low_a | low_b
+    low_both = low_a & low_b
+    return {
+        "low_variation_view_std_threshold": float(std_threshold),
+        "low_variation_view_count": float((low_a.sum() + low_b.sum()).item()),
+        "low_variation_sample_count": float(low_any.sum().item()),
+        "low_variation_sample_ratio": float(low_any.float().mean().item()),
+        "low_variation_both_views_count": float(low_both.sum().item()),
+        "patch_pixel_std_a_mean": float(std_a.mean().item()),
+        "patch_pixel_std_b_mean": float(std_b.mean().item()),
+    }
+
+
 def compute_loss_bundle(
     outputs: PrismModelOutput,
     batch: dict,
@@ -183,8 +209,10 @@ def compute_loss_bundle(
         relation_acc_per_axis = pair_metrics["pair_relation_acc_per_axis"]
         relation_acc_shared = pair_metrics["pair_relation_acc_shared"]
         window_acc_per_axis = pair_metrics["window_acc_per_axis"]
+        center_distance_mm = batch["center_distance_mm"].float()
         patch_size_pred_mm = torch.pow(2.0, torch.cat([outputs.patch_size_pred_a.float(), outputs.patch_size_pred_b.float()], dim=0))
         patch_size_target_mm = torch.cat([batch["source_patch_mm_a"].float(), batch["source_patch_mm_b"].float()], dim=0)
+        low_variation_stats = _low_variation_patch_stats(batch)
 
     diagnostics = {
         "pair_relation_acc": float(relation_acc.item()),
@@ -197,6 +225,10 @@ def compute_loss_bundle(
         "pair_relation_valid_ratio": float(pair_metrics["pair_relation_valid_ratio"].item()),
         "target_center_delta_mean": float(torch.mean(target_center_delta).item()),
         "target_center_delta_std": float(torch.std(target_center_delta).item()),
+        "center_distance_mm_mean": float(center_distance_mm.mean().item()),
+        "center_distance_mm_std": float(center_distance_mm.std(unbiased=False).item()),
+        "center_distance_mm_min": float(center_distance_mm.min().item()),
+        "center_distance_mm_max": float(center_distance_mm.max().item()),
         "mim_target_abs_mean": float(
             torch.mean(
                 torch.abs(
@@ -235,6 +267,7 @@ def compute_loss_bundle(
         "source_patch_mm_max": float(patch_size_target_mm.max().item()),
         "supcon_instance_positives_per_anchor_mean": positives_per_anchor_mean(instance_labels),
         "supcon_protocol_positives_per_anchor_mean": positives_per_anchor_mean(protocol_labels),
+        **low_variation_stats,
     }
 
     return (
