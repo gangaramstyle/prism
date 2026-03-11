@@ -322,10 +322,7 @@ def _(Path, mo, os):
         "CATALOG_PATH",
         str(Path(__file__).resolve().parents[1] / "data" / "pmbb_catalog.csv.gz"),
     )
-    default_validation_cache = os.environ.get(
-        "PRISM_VALIDATION_CACHE",
-        "/vast/home/g/gangaram/prism_ssl_validation/ct_phase1_v9ng7z6_v80_256/",
-    )
+    default_validation_cache = "/vast/home/g/gangaram/prism_ssl_validation/ct_phase1_v9ng7z6_v80_256/"
     checkpoint_path = mo.ui.text(label="Checkpoint path (optional)", value=os.environ.get("PRISM_NOTEBOOK_CKPT", ""))
     wandb_run_ref = mo.ui.text(label="W&B run URL (optional)", value=os.environ.get("PRISM_NOTEBOOK_WANDB_RUN", ""))
     wandb_force_refresh = mo.ui.checkbox(label="Refresh W&B artifacts", value=False)
