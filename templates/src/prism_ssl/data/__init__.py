@@ -1,6 +1,14 @@
 """Data package exports."""
 
-from prism_ssl.data.catalog import build_scan_id, load_catalog, sample_scan_candidates, series_id_from_row, study_id_from_row
+from prism_ssl.data.catalog import (
+    build_scan_id,
+    load_catalog,
+    normalize_series_description,
+    protocol_key_from_row,
+    sample_scan_candidates,
+    series_id_from_row,
+    study_id_from_row,
+)
 from prism_ssl.data.collate import collate_prism_batch
 from prism_ssl.data.preflight import (
     NiftiLoadError,
@@ -14,12 +22,14 @@ from prism_ssl.data.preflight import (
     voxel_points_to_world,
     world_points_to_voxel,
 )
-from prism_ssl.data.sample_contract import build_dataset_item, build_study4_dataset_item, compute_pair_targets, tensorize_sample_view
-from prism_ssl.data.sharded_dataset import BrokenScanRateExceeded, ShardedScanDataset, StudyShardedScanDataset
+from prism_ssl.data.sample_contract import build_dataset_item, compute_pair_targets, tensorize_sample_view
+from prism_ssl.data.sharded_dataset import BrokenScanRateExceeded, ShardedScanDataset
 
 __all__ = [
     "build_scan_id",
     "load_catalog",
+    "normalize_series_description",
+    "protocol_key_from_row",
     "sample_scan_candidates",
     "series_id_from_row",
     "study_id_from_row",
@@ -37,8 +47,7 @@ __all__ = [
     "tensorize_sample_view",
     "compute_pair_targets",
     "build_dataset_item",
-    "build_study4_dataset_item",
     "BrokenScanRateExceeded",
     "ShardedScanDataset",
-    "StudyShardedScanDataset",
 ]
+

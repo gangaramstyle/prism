@@ -14,18 +14,10 @@ from pathlib import Path
 from typing import Any
 
 import torch
-import torch.nn as nn
 from torch.utils.data import DataLoader
 
 from prism_ssl.config import RunConfig, flatten_config
-from prism_ssl.data import (
-    BrokenScanRateExceeded,
-    ShardedScanDataset,
-    StudyShardedScanDataset,
-    collate_prism_batch,
-    load_catalog,
-    sample_scan_candidates,
-)
+from prism_ssl.data import BrokenScanRateExceeded, ShardedScanDataset, collate_prism_batch, load_catalog, sample_scan_candidates
 from prism_ssl.model import PrismSSLModel, compute_loss_bundle
 from prism_ssl.train.checkpoint import (
     download_latest_artifact_checkpoint,
@@ -160,53 +152,30 @@ def run_training(config: RunConfig) -> dict[str, Any]:
     if not records:
         raise RuntimeError("No candidate scan records found after modality/path filtering")
     result["cfg_resolved_n_scans"] = len(records)
-    worker_scratch_dir = str(tmp_run_dir / "scan_scratch") if config.data.use_local_scratch else None
-    sample_unit = str(config.data.sample_unit).strip().lower()
-    if sample_unit not in {"pair2", "study4"}:
-        raise ValueError(f"Unsupported data.sample_unit='{config.data.sample_unit}'. Expected 'pair2' or 'study4'.")
-    is_study4 = sample_unit == "study4"
 
-    if is_study4:
-        dataset = StudyShardedScanDataset(
-            scan_records=records,
-            n_patches=config.data.n_patches,
-            base_patch_mm=config.data.patch_mm,
-            warm_pool_size=config.data.warm_pool_size,
-            visits_per_scan=config.data.visits_per_scan,
-            seed=config.train.seed,
-            use_totalseg_body_centers=config.data.use_totalseg_body_centers,
-            pair_local_curriculum_steps=config.data.pair_local_curriculum_steps,
-            pair_local_final_prob=config.data.pair_local_final_prob,
-            pair_local_start_radius_mm=config.data.pair_local_start_radius_mm,
-            pair_local_end_radius_mm=config.data.pair_local_end_radius_mm,
-            broken_abort_ratio=config.data.broken_abort_ratio,
-            broken_abort_min_attempts=config.data.broken_abort_min_attempts,
-            max_broken_series_log=config.data.max_broken_series_log,
-            broken_series_log_path=str(broken_log_path),
-            scratch_dir=worker_scratch_dir,
-        )
-    else:
-        dataset = ShardedScanDataset(
-            scan_records=records,
-            n_patches=config.data.n_patches,
-            base_patch_mm=config.data.patch_mm,
-            warm_pool_size=config.data.warm_pool_size,
-            visits_per_scan=config.data.visits_per_scan,
-            seed=config.train.seed,
-            max_prefetch_replacements=config.data.max_prefetch_replacements,
-            use_totalseg_body_centers=config.data.use_totalseg_body_centers,
-            pair_local_curriculum_steps=config.data.pair_local_curriculum_steps,
-            pair_local_final_prob=config.data.pair_local_final_prob,
-            pair_local_start_radius_mm=config.data.pair_local_start_radius_mm,
-            pair_local_end_radius_mm=config.data.pair_local_end_radius_mm,
-            strict_background_errors=config.data.strict_background_errors,
-            broken_abort_ratio=config.data.broken_abort_ratio,
-            broken_abort_min_attempts=config.data.broken_abort_min_attempts,
-            max_broken_series_log=config.data.max_broken_series_log,
-            broken_series_log_path=str(broken_log_path),
-            scratch_dir=worker_scratch_dir,
-            pair_views=True,
-        )
+    worker_scratch_dir = str(tmp_run_dir / "scan_scratch") if config.data.use_local_scratch else None
+    dataset = ShardedScanDataset(
+        scan_records=records,
+        n_patches=config.data.n_patches,
+        source_patch_mm_min=config.data.source_patch_mm_min,
+        source_patch_mm_max=config.data.source_patch_mm_max,
+        source_patch_mm_distribution=config.data.source_patch_mm_distribution,
+        warm_pool_size=config.data.warm_pool_size,
+        visits_per_scan=config.data.visits_per_scan,
+        seed=config.train.seed,
+        max_prefetch_replacements=config.data.max_prefetch_replacements,
+        use_totalseg_body_centers=config.data.use_totalseg_body_centers,
+        pair_local_curriculum_steps=config.data.pair_local_curriculum_steps,
+        pair_local_final_prob=config.data.pair_local_final_prob,
+        pair_local_start_radius_mm=config.data.pair_local_start_radius_mm,
+        pair_local_end_radius_mm=config.data.pair_local_end_radius_mm,
+        strict_background_errors=config.data.strict_background_errors,
+        broken_abort_ratio=config.data.broken_abort_ratio,
+        broken_abort_min_attempts=config.data.broken_abort_min_attempts,
+        max_broken_series_log=config.data.max_broken_series_log,
+        broken_series_log_path=str(broken_log_path),
+        scratch_dir=worker_scratch_dir,
+    )
 
     loader_kwargs: dict[str, Any] = {
         "batch_size": config.train.batch_size,
@@ -252,15 +221,16 @@ def run_training(config: RunConfig) -> dict[str, Any]:
     )
     print(
         "[train] "
-        f"sample_unit={sample_unit} "
         f"batch_size={config.train.batch_size} n_patches={config.data.n_patches} "
         f"n_scans={len(records)} warm_pool_size={config.data.warm_pool_size} visits_per_scan={config.data.visits_per_scan} "
-        f"patch_views_per_step={config.train.batch_size * config.data.n_patches * (4 if is_study4 else 2)} "
+        f"patch_views_per_step={config.train.batch_size * config.data.n_patches * 2} "
         f"workers={config.data.workers} log_every={config.train.log_every} "
         f"ts_body_centers={str(config.data.use_totalseg_body_centers).lower()} "
         f"pair_local_prob_final={config.data.pair_local_final_prob:.2f} "
         f"pair_local_radius_mm=({config.data.pair_local_start_radius_mm:.0f},{config.data.pair_local_end_radius_mm:.0f}) "
         f"pair_local_steps={config.data.pair_local_curriculum_steps} "
+        f"source_patch_mm=({config.data.source_patch_mm_min:.1f},{config.data.source_patch_mm_max:.1f}) "
+        f"source_patch_dist={config.data.source_patch_mm_distribution} "
         f"local_ckpt_every_h={config.checkpoint.local_ckpt_every_hours:.2f} "
         f"artifact_every_h={config.checkpoint.artifact_every_hours:.2f} "
         f"artifact_every_steps={config.checkpoint.artifact_every_steps}",
@@ -327,40 +297,23 @@ def run_training(config: RunConfig) -> dict[str, Any]:
             data_wait_ms = (time.perf_counter() - data_wait_t0) * 1000.0
             compute_t0 = time.perf_counter()
 
-            if is_study4:
-                patches_views = batch["patches_views"].to(device, non_blocking=True)
-                positions_views = batch["positions_views"].to(device, non_blocking=True)
+            patches_a = batch["patches_a"].to(device, non_blocking=True)
+            positions_a = batch["positions_a"].to(device, non_blocking=True)
+            patches_b = batch["patches_b"].to(device, non_blocking=True)
+            positions_b = batch["positions_b"].to(device, non_blocking=True)
 
-                batch["center_delta_mm_x"] = batch["center_delta_mm_x"].to(device, non_blocking=True)
-                batch["center_distance_mm_x"] = batch["center_distance_mm_x"].to(device, non_blocking=True)
-                batch["window_delta_x"] = batch["window_delta_x"].to(device, non_blocking=True)
-                batch["center_delta_mm_y"] = batch["center_delta_mm_y"].to(device, non_blocking=True)
-                batch["center_distance_mm_y"] = batch["center_distance_mm_y"].to(device, non_blocking=True)
-                batch["window_delta_y"] = batch["window_delta_y"].to(device, non_blocking=True)
-                batch["series_label_views"] = batch["series_label_views"].to(device, non_blocking=True)
-                batch["cross_valid"] = batch["cross_valid"].to(device, non_blocking=True)
-            else:
-                patches_a = batch["patches_a"].to(device, non_blocking=True)
-                positions_a = batch["positions_a"].to(device, non_blocking=True)
-                patches_b = batch["patches_b"].to(device, non_blocking=True)
-                positions_b = batch["positions_b"].to(device, non_blocking=True)
-
-                batch["center_delta_mm"] = batch["center_delta_mm"].to(device, non_blocking=True)
-                batch["center_distance_mm"] = batch["center_distance_mm"].to(device, non_blocking=True)
-                batch["window_delta"] = batch["window_delta"].to(device, non_blocking=True)
-                batch["series_label"] = batch["series_label"].to(device, non_blocking=True)
+            batch["center_delta_mm"] = batch["center_delta_mm"].to(device, non_blocking=True)
+            batch["center_distance_mm"] = batch["center_distance_mm"].to(device, non_blocking=True)
+            batch["window_delta"] = batch["window_delta"].to(device, non_blocking=True)
+            batch["series_instance_label"] = batch["series_instance_label"].to(device, non_blocking=True)
+            batch["series_protocol_label"] = batch["series_protocol_label"].to(device, non_blocking=True)
+            batch["source_patch_mm_a"] = batch["source_patch_mm_a"].to(device, non_blocking=True)
+            batch["source_patch_mm_b"] = batch["source_patch_mm_b"].to(device, non_blocking=True)
 
             autocast_enabled = use_amp
             dtype = torch.bfloat16 if use_amp else torch.float32
             with torch.autocast(device_type=device.type, dtype=dtype, enabled=autocast_enabled):
-                if is_study4:
-                    outputs = model.forward_study4(
-                        patches_views,
-                        positions_views,
-                        cross_valid=batch["cross_valid"],
-                    )
-                else:
-                    outputs = model(patches_a, positions_a, patches_b, positions_b)
+                outputs = model(patches_a, positions_a, patches_b, positions_b)
                 loss_bundle, diagnostics = compute_loss_bundle(
                     outputs,
                     batch,
@@ -375,20 +328,9 @@ def run_training(config: RunConfig) -> dict[str, Any]:
             gpu_time_s = time.perf_counter() - compute_t0
 
             final_step = step + 1
-            if is_study4:
-                pair_patches_this_step = int(patches_views.shape[0] * patches_views.shape[2])
-                patch_views_this_step = pair_patches_this_step * 4
-                sample_views_this_step = int(patches_views.shape[0] * 4)
-                labels = batch["series_label_views"].reshape(-1)
-            else:
-                pair_patches_this_step = int(patches_a.shape[0] * patches_a.shape[1])
-                patch_views_this_step = pair_patches_this_step * 2
-                sample_views_this_step = int(patches_a.shape[0] * 2)
-                labels = batch["series_label"]
-            same = labels[:, None] == labels[None, :]
-            positives = same.sum(dim=1) - 1
-            positives = torch.clamp(positives, min=0)
-            positives_mean = float(positives.float().mean().item())
+            pair_patches_this_step = int(patches_a.shape[0] * patches_a.shape[1])
+            patch_views_this_step = pair_patches_this_step * 2
+            sample_views_this_step = int(patches_a.shape[0] * 2)
 
             target_std_flags = [
                 diagnostics["target_center_delta_std"] < 1e-6,
@@ -480,14 +422,19 @@ def run_training(config: RunConfig) -> dict[str, Any]:
                     format_step_log(
                         step=final_step,
                         total_loss=float(loss_bundle.total.item()),
-                        loss_distance=float(loss_bundle.distance.item()),
-                        distance_acc=diagnostics["distance_acc"],
-                        distance_acc_shared=diagnostics["distance_acc_shared"],
+                        loss_pair_relation=float(loss_bundle.pair_relation.item()),
+                        pair_relation_acc=diagnostics["pair_relation_acc"],
+                        pair_relation_acc_shared=diagnostics["pair_relation_acc_shared"],
                         window_acc_wc=diagnostics["window_acc_wc"],
                         window_acc_ww=diagnostics["window_acc_ww"],
-                        loss_supcon=float(loss_bundle.supcon.item()),
+                        loss_supcon_instance=float(loss_bundle.supcon_instance.item()),
+                        loss_supcon_protocol=float(loss_bundle.supcon_protocol.item()),
+                        loss_patch_size=float(loss_bundle.patch_size.item()),
                         loss_mim=float(loss_bundle.mim.item()),
-                        supcon_weight=loss_bundle.supcon_weight,
+                        w_supcon_instance=loss_bundle.w_supcon_instance,
+                        w_supcon_protocol=loss_bundle.w_supcon_protocol,
+                        patch_size_mae_mm=diagnostics["patch_size_mae_mm"],
+                        source_patch_mm_mean=diagnostics["source_patch_mm_mean"],
                         step_time_ms=step_time_ms,
                         data_wait_ms=data_wait_ms,
                         gpu_time_ms=gpu_time_ms,
@@ -499,11 +446,6 @@ def run_training(config: RunConfig) -> dict[str, Any]:
                         broken_ratio=accum.broken_ratio,
                         ts_loaded_ratio=accum.loaded_with_body_ratio,
                         ts_view_ratio=accum.sampled_body_center_view_ratio,
-                        loss_mim_register=diagnostics.get("loss_mim_register") if is_study4 else None,
-                        loss_mim_cross=diagnostics.get("loss_mim_cross") if is_study4 else None,
-                        cross_valid_ratio=diagnostics.get("cross_valid_ratio") if is_study4 else None,
-                        mim_register_weight=loss_bundle.mim_register_weight if is_study4 else None,
-                        mim_cross_weight=loss_bundle.mim_cross_weight if is_study4 else None,
                     ),
                     flush=True,
                 )
@@ -516,24 +458,32 @@ def run_training(config: RunConfig) -> dict[str, Any]:
 
                 metrics = {
                     "train/loss": float(loss_bundle.total.item()),
-                    "train/loss_distance": float(loss_bundle.distance.item()),
-                    "train/distance_acc": diagnostics["distance_acc"],
-                    "train/distance_acc_R": diagnostics["distance_acc_R"],
-                    "train/distance_acc_A": diagnostics["distance_acc_A"],
-                    "train/distance_acc_S": diagnostics["distance_acc_S"],
-                    "train/distance_acc_shared": diagnostics["distance_acc_shared"],
+                    "train/loss_pair_relation": float(loss_bundle.pair_relation.item()),
+                    "train/pair_relation_acc": diagnostics["pair_relation_acc"],
+                    "train/pair_relation_acc_x": diagnostics["pair_relation_acc_x"],
+                    "train/pair_relation_acc_y": diagnostics["pair_relation_acc_y"],
+                    "train/pair_relation_acc_z": diagnostics["pair_relation_acc_z"],
+                    "train/pair_relation_acc_shared": diagnostics["pair_relation_acc_shared"],
                     "train/window_acc_wc": diagnostics["window_acc_wc"],
                     "train/window_acc_ww": diagnostics["window_acc_ww"],
-                    "train/distance_valid_ratio": diagnostics["distance_valid_ratio"],
-                    "train/loss_supcon": float(loss_bundle.supcon.item()),
-                    "train/loss_mim": float(diagnostics.get("loss_mim_self", float(loss_bundle.mim.item()))),
-                    "train/w_supcon": float(loss_bundle.supcon_weight),
+                    "train/pair_relation_valid_ratio": diagnostics["pair_relation_valid_ratio"],
+                    "train/loss_supcon_instance": float(loss_bundle.supcon_instance.item()),
+                    "train/loss_supcon_protocol": float(loss_bundle.supcon_protocol.item()),
+                    "train/loss_patch_size": float(loss_bundle.patch_size.item()),
+                    "train/loss_mim": float(loss_bundle.mim.item()),
+                    "train/w_supcon_instance": float(loss_bundle.w_supcon_instance),
+                    "train/w_supcon_protocol": float(loss_bundle.w_supcon_protocol),
                     "train/target_center_delta_mm_mean": diagnostics["target_center_delta_mean"],
                     "train/target_center_delta_std": diagnostics["target_center_delta_std"],
                     "train/mim_target_abs_mean": diagnostics["mim_target_abs_mean"],
                     "train/mim_pred_abs_mean": diagnostics["mim_pred_abs_mean"],
                     "train/mim_masked_patch_count": diagnostics["mim_masked_patch_count"],
-                    "train/supcon_positives_per_anchor_mean": positives_mean,
+                    "train/patch_size_mae_mm": diagnostics["patch_size_mae_mm"],
+                    "train/source_patch_mm_mean": diagnostics["source_patch_mm_mean"],
+                    "train/source_patch_mm_min": diagnostics["source_patch_mm_min"],
+                    "train/source_patch_mm_max": diagnostics["source_patch_mm_max"],
+                    "train/supcon_instance_positives_per_anchor_mean": diagnostics["supcon_instance_positives_per_anchor_mean"],
+                    "train/supcon_protocol_positives_per_anchor_mean": diagnostics["supcon_protocol_positives_per_anchor_mean"],
                     "train/step_time_ms": step_time_ms,
                     "train/data_wait_ms": data_wait_ms,
                     "train/gpu_time_ms": gpu_time_ms,
@@ -557,30 +507,6 @@ def run_training(config: RunConfig) -> dict[str, Any]:
                     "data/sampled_body_center_view_ratio": accum.sampled_body_center_view_ratio,
                     "train/global_step": final_step,
                 }
-                if is_study4:
-                    metrics.update(
-                        {
-                            "train/loss_mim_self": diagnostics["loss_mim_self"],
-                            "train/loss_mim_register": diagnostics["loss_mim_register"],
-                            "train/loss_mim_cross": diagnostics["loss_mim_cross"],
-                            "train/w_mim_register": diagnostics["mim_register_weight"],
-                            "train/w_mim_cross": diagnostics["mim_cross_weight"],
-                            "train/mim_register_gain": diagnostics["mim_register_gain"],
-                            "train/mim_cross_gain_vs_self": diagnostics["mim_cross_gain_vs_self"],
-                            "train/mim_cross_gain_vs_register": diagnostics["mim_cross_gain_vs_register"],
-                            "train/cross_valid_ratio": diagnostics["cross_valid_ratio"],
-                            "train/loss_distance_x": diagnostics["distance_x"],
-                            "train/loss_distance_y": diagnostics["distance_y"],
-                            "train/distance_acc_x": diagnostics["distance_acc_x"],
-                            "train/distance_acc_y": diagnostics["distance_acc_y"],
-                            "train/shared_acc_x": diagnostics["distance_acc_shared_x"],
-                            "train/shared_acc_y": diagnostics["distance_acc_shared_y"],
-                            "train/window_acc_wc_x": diagnostics["window_acc_wc_x"],
-                            "train/window_acc_wc_y": diagnostics["window_acc_wc_y"],
-                            "train/window_acc_ww_x": diagnostics["window_acc_ww_x"],
-                            "train/window_acc_ww_y": diagnostics["window_acc_ww_y"],
-                        }
-                    )
                 if run is not None:
                     run.log(metrics, step=final_step)
 
@@ -607,7 +533,6 @@ def run_training(config: RunConfig) -> dict[str, Any]:
         except Exception:
             pass
 
-        # If worker aborted before all deltas surfaced, reconcile from log file.
         broken_unique = _count_unique_broken_series(broken_log_path)
         if broken_unique > accum.broken_series_count:
             accum.broken_series_count = broken_unique
@@ -631,7 +556,7 @@ def run_training(config: RunConfig) -> dict[str, Any]:
         result["local_ckpt_path"] = str(local_last_ckpt)
         result["local_ckpt_dir_size_gb"] = float(compute_dir_size_gb(local_ckpt_dir))
         result["home_usage_gb"] = None
-        result["patch_views_per_step"] = int(config.train.batch_size * config.data.n_patches * (4 if is_study4 else 2))
+        result["patch_views_per_step"] = int(config.train.batch_size * config.data.n_patches * 2)
         result["hostname"] = platform.node()
         result["slurm_job_id"] = os.environ.get("SLURM_JOB_ID", "")
         result["timestamp"] = time.strftime("%Y-%m-%dT%H:%M:%S")
@@ -654,3 +579,4 @@ def run_training(config: RunConfig) -> dict[str, Any]:
 
 def write_summary(path: str, payload: dict[str, Any]) -> None:
     atomic_write_json(path, payload)
+

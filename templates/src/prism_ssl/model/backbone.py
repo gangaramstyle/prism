@@ -174,8 +174,8 @@ class TransformerPatchPositionEncoder(nn.Module):
             min_wavelength_mm=pos_min_wavelength_mm,
             max_wavelength_mm=pos_max_wavelength_mm,
         )
-        self.distance_cls_token = nn.Parameter(torch.zeros(1, 1, d_model))
-        self.supcon_cls_token = nn.Parameter(torch.zeros(1, 1, d_model))
+        self.view_cls_token = nn.Parameter(torch.zeros(1, 1, d_model))
+        self.series_cls_token = nn.Parameter(torch.zeros(1, 1, d_model))
         self.dropout = nn.Dropout(dropout)
         self.rope_embed = MultiAxisRoPEEmbeddingCat(
             d_model // num_heads,
@@ -196,17 +196,17 @@ class TransformerPatchPositionEncoder(nn.Module):
             ]
         )
         self.norm = nn.LayerNorm(d_model)
-        nn.init.trunc_normal_(self.distance_cls_token, std=0.02)
-        nn.init.trunc_normal_(self.supcon_cls_token, std=0.02)
+        nn.init.trunc_normal_(self.view_cls_token, std=0.02)
+        nn.init.trunc_normal_(self.series_cls_token, std=0.02)
 
     def forward(self, patches: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
         bsz, n_patches = patches.shape[:2]
         x = patches.reshape(bsz, n_patches, -1)
         x = self.patch_proj(x)
         x = x + self.pos_abs(positions).to(dtype=x.dtype)
-        distance_cls = self.distance_cls_token.expand(bsz, -1, -1)
-        supcon_cls = self.supcon_cls_token.expand(bsz, -1, -1)
-        x = torch.cat([distance_cls, supcon_cls, x], dim=1)
+        view_cls = self.view_cls_token.expand(bsz, -1, -1)
+        series_cls = self.series_cls_token.expand(bsz, -1, -1)
+        x = torch.cat([view_cls, series_cls, x], dim=1)
         x = self.dropout(x)
 
         rope = self.rope_embed(positions).to(dtype=x.dtype)

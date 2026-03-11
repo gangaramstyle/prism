@@ -12,9 +12,10 @@ class ScanRecord:
 
     scan_id: str
     series_id: str
-    study_id: str
     modality: str
     series_path: str
+    study_id: str = ""
+    series_description: str = ""
     nifti_path: str = ""
 
 
@@ -39,9 +40,10 @@ class DataConfig:
     catalog_path: str = "data/pmbb_catalog.csv.gz"
     n_scans: int = 0
     modality_filter: tuple[str, ...] = ("CT", "MR")
-    sample_unit: str = "pair2"
     n_patches: int = 1024
-    patch_mm: float = 16.0
+    source_patch_mm_min: float = 16.0
+    source_patch_mm_max: float = 64.0
+    source_patch_mm_distribution: str = "log_uniform"
     storage_mode: str = "sharded"
     workers: int = 8
     warm_pool_size: int = 16
@@ -63,12 +65,10 @@ class DataConfig:
 class LossConfig:
     w_distance: float = 1.0
     w_mim: float = 1.0
-    w_mim_register_target: float = 0.5
-    w_mim_cross_target: float = 0.5
-    w_supcon_target: float = 0.2
+    w_supcon_instance_target: float = 0.1
+    w_supcon_protocol_target: float = 0.1
+    w_patch_size: float = 0.25
     supcon_temperature: float = 0.1
-    mim_aux_warmup_steps: int = 2000
-    mim_aux_ramp_steps: int = 3000
     supcon_warmup_steps: int = 2000
     supcon_ramp_steps: int = 3000
 

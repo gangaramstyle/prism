@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import glob
 import hashlib
+import math
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -183,6 +184,9 @@ class NiftiScan:
     robust_std: float
     robust_low: float
     robust_high: float
+    source_patch_mm_min: float = 16.0
+    source_patch_mm_max: float = 64.0
+    source_patch_mm_distribution: str = "log_uniform"
     body_center_candidates_vox: np.ndarray | None = field(default=None, repr=False)
     body_center_candidates_pt: np.ndarray | None = field(default=None, repr=False)
     body_sampling_source: str = ""
@@ -236,15 +240,23 @@ class NiftiScan:
 
     @property
     def patch_shape_vox(self) -> np.ndarray:
-        """Physical voxel footprint for base_patch_mm (used for overlay box drawing)."""
-        return self._mm_patch_vox_shape(self.base_patch_mm)
+        """Conservative voxel footprint based on the maximum source patch size."""
+        return self.mm_patch_vox_shape(self.source_patch_mm_max)
 
-    def _mm_patch_vox_shape(self, patch_mm: float) -> np.ndarray:
+    def mm_patch_vox_shape(self, patch_mm: float) -> np.ndarray:
         """Compute 3D voxel shape covering patch_mm in-plane, 1 voxel on thin axis."""
         thin = self.geometry.thin_axis
         n_vox = np.maximum(np.ceil(patch_mm / self.voxel_axis_mm).astype(np.int64), 1)
         n_vox[thin] = 1
         return n_vox
+
+    def _sample_source_patch_mm(self, rng: np.random.Generator) -> float:
+        lo = max(float(self.source_patch_mm_min), 1e-3)
+        hi = max(float(self.source_patch_mm_max), lo)
+        distribution = str(self.source_patch_mm_distribution).strip().lower()
+        if distribution == "log_uniform":
+            return float(math.exp(rng.uniform(math.log(lo), math.log(hi))))
+        return float(rng.uniform(lo, hi))
 
     def _sample_center(self, rng: np.random.Generator, patch_vox: np.ndarray) -> np.ndarray:
         """Pick a random voxel inside the volume with just enough margin for one patch."""
@@ -401,6 +413,7 @@ class NiftiScan:
         n_patches: int,
         *,
         seed: int | None = None,
+        source_patch_mm: float | None = None,
         wc: float | None = None,
         ww: float | None = None,
         sampling_radius_mm: float | None = None,
@@ -410,8 +423,20 @@ class NiftiScan:
         target_patch_size: int | None = None,
     ) -> dict[str, Any]:
         resolved_patch_size = int(self.target_patch_size if target_patch_size is None else target_patch_size)
-        patch_vox = self._mm_patch_vox_shape(self.base_patch_mm)
         rng = np.random.default_rng(seed)
+        resolved_source_patch_mm = (
+            self._sample_source_patch_mm(rng)
+            if source_patch_mm is None
+            else float(source_patch_mm)
+        )
+        resolved_source_patch_mm = float(
+            np.clip(
+                resolved_source_patch_mm,
+                float(self.source_patch_mm_min),
+                float(self.source_patch_mm_max),
+            )
+        )
+        patch_vox = self.mm_patch_vox_shape(resolved_source_patch_mm)
 
         min_center_idx, max_center_idx = self._center_bounds_for_full_patch(patch_vox)
 
@@ -480,6 +505,7 @@ class NiftiScan:
             "normalized_patches": normalized.astype(np.float32, copy=False),
             "raw_patches": raw_patches,
             "target_patch_size": int(resolved_patch_size),
+            "source_patch_mm": float(resolved_source_patch_mm),
             "patch_vox_shape": tuple(int(v) for v in patch_vox.tolist()),
             "patch_centers_pt": patch_centers_pt,
             "patch_centers_vox": centers_arr.astype(np.int64, copy=False),
@@ -570,6 +596,9 @@ def load_nifti_scan(
     record: ScanRecord | dict[str, Any],
     base_patch_mm: float,
     *,
+    source_patch_mm_min: float | None = None,
+    source_patch_mm_max: float | None = None,
+    source_patch_mm_distribution: str = "log_uniform",
     use_totalseg_body_centers: bool = True,
 ) -> tuple[NiftiScan, str]:
     """Load a scan object from a record; resolve NIfTI path lazily if needed."""
@@ -599,7 +628,16 @@ def load_nifti_scan(
         if np.any(spacing <= 0):
             raise NiftiLoadError(f"Invalid spacing for {effective_path}: {spacing}")
         median, std, p_low, p_high = compute_robust_stats(data)
-        patch_vox = np.maximum(np.ceil(float(base_patch_mm) / np.clip(spacing, 1e-6, None)).astype(np.int64), 1)
+        effective_source_patch_mm_max = (
+            float(source_patch_mm_max) if source_patch_mm_max is not None else float(base_patch_mm)
+        )
+        effective_source_patch_mm_min = (
+            float(source_patch_mm_min) if source_patch_mm_min is not None else min(float(base_patch_mm), effective_source_patch_mm_max)
+        )
+        patch_vox = np.maximum(
+            np.ceil(effective_source_patch_mm_max / np.clip(spacing, 1e-6, None)).astype(np.int64),
+            1,
+        )
         geometry = infer_scan_geometry(data.shape, spacing)
         patch_vox[int(geometry.thin_axis)] = 1
         body_center_candidates_vox, body_sampling_source = (
@@ -618,6 +656,9 @@ def load_nifti_scan(
             spacing=spacing,
             modality=modality.upper(),
             base_patch_mm=float(base_patch_mm),
+            source_patch_mm_min=float(effective_source_patch_mm_min),
+            source_patch_mm_max=float(effective_source_patch_mm_max),
+            source_patch_mm_distribution=str(source_patch_mm_distribution),
             robust_median=median,
             robust_std=std,
             robust_low=p_low,

@@ -26,9 +26,13 @@ def test_vit_l_backbone_forward_shapes():
         dropout=0.0,
     )
     out = model(*_inputs())
-    assert out.distance_logits.shape == (2, 3)
-    assert out.proj_a.shape == (2, 32)
-    assert out.proj_b.shape == (2, 32)
+    assert out.pair_relation_logits.shape == (2, 5)
+    assert out.proj_instance_a.shape == (2, 32)
+    assert out.proj_instance_b.shape == (2, 32)
+    assert out.proj_protocol_a.shape == (2, 32)
+    assert out.proj_protocol_b.shape == (2, 32)
+    assert out.patch_size_pred_a.shape == (2,)
+    assert out.patch_size_pred_b.shape == (2,)
     assert out.mim_pred_a.shape[0] == 2
     assert out.mim_pred_a.shape[-3:] == (16, 16, 1)
     assert out.mim_pred_a.shape == out.mim_target_a.shape
@@ -47,9 +51,13 @@ def test_vit_l_backbone_second_config_forward_shapes():
         dropout=0.0,
     )
     out = model(*_inputs())
-    assert out.distance_logits.shape == (2, 3)
-    assert out.proj_a.shape == (2, 64)
-    assert out.proj_b.shape == (2, 64)
+    assert out.pair_relation_logits.shape == (2, 5)
+    assert out.proj_instance_a.shape == (2, 64)
+    assert out.proj_instance_b.shape == (2, 64)
+    assert out.proj_protocol_a.shape == (2, 64)
+    assert out.proj_protocol_b.shape == (2, 64)
+    assert out.patch_size_pred_a.shape == (2,)
+    assert out.patch_size_pred_b.shape == (2,)
     assert out.mim_pred_a.shape == out.mim_target_a.shape
     assert out.mim_pred_b.shape == out.mim_target_b.shape
 

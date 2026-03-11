@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from pathlib import Path
 from typing import Any
 
@@ -42,6 +43,20 @@ def study_id_from_row(row: dict[str, Any]) -> str:
     return f"study_{stable_int_hash(study_path) & 0xFFFFFFFF:08x}"
 
 
+def normalize_series_description(series_description: str) -> str:
+    raw = str(series_description or "").strip().upper()
+    if not raw:
+        return "UNKNOWN"
+    normalized = re.sub(r"[^A-Z0-9]+", "_", raw).strip("_")
+    return normalized or "UNKNOWN"
+
+
+def protocol_key_from_row(row: dict[str, Any]) -> str:
+    modality = str(row.get("modality", "CT")).upper()
+    normalized_desc = normalize_series_description(str(row.get("series_description", "")))
+    return f"{modality}::{normalized_desc}"
+
+
 def sample_scan_candidates(
     df: pl.DataFrame,
     n_scans: int,
@@ -79,6 +94,7 @@ def sample_scan_candidates(
                 study_id=study_id_from_row(row),
                 modality=str(row.get("modality", "CT")).upper(),
                 series_path=str(row["series_path"]),
+                series_description=str(row.get("series_description", "")),
                 nifti_path="",  # resolved lazily by dataset workers
             )
         )

@@ -25,6 +25,7 @@ def _valid_record(base: Path, idx: int) -> ScanRecord:
         series_id=f"series_{idx}",
         modality="CT",
         series_path=str(series_dir),
+        series_description="AX_BONE",
     )
 
 
@@ -36,6 +37,7 @@ def _broken_record(base: Path, idx: int) -> ScanRecord:
         series_id=f"broken_series_{idx}",
         modality="CT",
         series_path=str(series_dir),
+        series_description="AX_BONE",
     )
 
 
@@ -45,18 +47,23 @@ def test_sharded_dataset_bootstrap_and_replacement(tmp_path: Path):
     ds = ShardedScanDataset(
         scan_records=records,
         n_patches=8,
-        base_patch_mm=16.0,
-
+        source_patch_mm_min=16.0,
+        source_patch_mm_max=64.0,
+        source_patch_mm_distribution="log_uniform",
         warm_pool_size=2,
         visits_per_scan=1,
         seed=7,
         max_prefetch_replacements=1,
+        use_totalseg_body_centers=False,
+        pair_local_curriculum_steps=0,
+        pair_local_final_prob=0.0,
+        pair_local_start_radius_mm=128.0,
+        pair_local_end_radius_mm=16.0,
         strict_background_errors=False,
         broken_abort_ratio=0.99,
         broken_abort_min_attempts=100,
         max_broken_series_log=100,
         broken_series_log_path=str(tmp_path / "broken.jsonl"),
-        pair_views=True,
     )
 
     it = iter(ds)
@@ -65,6 +72,9 @@ def test_sharded_dataset_bootstrap_and_replacement(tmp_path: Path):
     assert samples[0]["patches_a"].shape[-1] == 1
     assert tuple(samples[0]["patches_a"].shape[1:3]) == (16, 16)
     assert samples[0]["positions_a"].shape[-1] == 3
+    assert "protocol_key" in samples[0]
+    assert "source_patch_mm_a" in samples[0]
+    assert "source_patch_mm_b" in samples[0]
 
     replacement_events = sum(int(s["replacement_completed_count_delta"]) + int(s["replacement_failed_count_delta"]) for s in samples)
     assert replacement_events >= 0
@@ -78,18 +88,23 @@ def test_broken_ratio_abort(tmp_path: Path):
     ds = ShardedScanDataset(
         scan_records=records,
         n_patches=4,
-        base_patch_mm=16.0,
-
+        source_patch_mm_min=16.0,
+        source_patch_mm_max=64.0,
+        source_patch_mm_distribution="log_uniform",
         warm_pool_size=2,
         visits_per_scan=1,
         seed=13,
         max_prefetch_replacements=1,
+        use_totalseg_body_centers=False,
+        pair_local_curriculum_steps=0,
+        pair_local_final_prob=0.0,
+        pair_local_start_radius_mm=128.0,
+        pair_local_end_radius_mm=16.0,
         strict_background_errors=False,
         broken_abort_ratio=0.10,
         broken_abort_min_attempts=1,
         max_broken_series_log=100,
         broken_series_log_path=str(tmp_path / "broken_abort.jsonl"),
-        pair_views=True,
     )
 
     with pytest.raises(BrokenScanRateExceeded):
@@ -103,19 +118,24 @@ def test_scratch_staging_is_bounded_and_cleaned(tmp_path: Path):
     ds = ShardedScanDataset(
         scan_records=records,
         n_patches=8,
-        base_patch_mm=16.0,
-
+        source_patch_mm_min=16.0,
+        source_patch_mm_max=64.0,
+        source_patch_mm_distribution="log_uniform",
         warm_pool_size=2,
         visits_per_scan=1,
         seed=17,
         max_prefetch_replacements=1,
+        use_totalseg_body_centers=False,
+        pair_local_curriculum_steps=0,
+        pair_local_final_prob=0.0,
+        pair_local_start_radius_mm=128.0,
+        pair_local_end_radius_mm=16.0,
         strict_background_errors=False,
         broken_abort_ratio=0.99,
         broken_abort_min_attempts=200,
         max_broken_series_log=100,
         broken_series_log_path=str(tmp_path / "broken_scratch.jsonl"),
         scratch_dir=str(scratch_root),
-        pair_views=True,
     )
 
     it = iter(ds)

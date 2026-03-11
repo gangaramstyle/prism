@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 import random
 import shutil
@@ -17,8 +18,9 @@ import torch
 from torch.utils.data import IterableDataset
 
 from prism_ssl.config.schema import ScanRecord
-from prism_ssl.data.preflight import SmallScanError, load_nifti_scan, resolve_nifti_path, voxel_points_to_world, world_points_to_voxel
-from prism_ssl.data.sample_contract import build_dataset_item, build_study4_dataset_item
+from prism_ssl.data.catalog import normalize_series_description
+from prism_ssl.data.preflight import SmallScanError, load_nifti_scan, resolve_nifti_path
+from prism_ssl.data.sample_contract import build_dataset_item
 from prism_ssl.utils import append_jsonl, shard_worker
 
 
@@ -65,7 +67,9 @@ class WarmPool:
         *,
         capacity: int,
         visits_per_scan: int,
-        base_patch_mm: float,
+        source_patch_mm_max: float,
+        source_patch_mm_min: float,
+        source_patch_mm_distribution: str,
         worker_id: int,
         strict_background_errors: bool,
         max_prefetch_replacements: int,
@@ -78,7 +82,9 @@ class WarmPool:
     ) -> None:
         self._capacity = max(1, int(capacity))
         self._visits_per_scan = max(1, int(visits_per_scan))
-        self._base_patch_mm = float(base_patch_mm)
+        self._source_patch_mm_max = float(source_patch_mm_max)
+        self._source_patch_mm_min = float(source_patch_mm_min)
+        self._source_patch_mm_distribution = str(source_patch_mm_distribution)
         self._strict_background_errors = bool(strict_background_errors)
         self._max_prefetch_replacements = max(1, int(max_prefetch_replacements))
         self._use_totalseg_body_centers = bool(use_totalseg_body_centers)
@@ -229,7 +235,10 @@ class WarmPool:
         if self._worker_scratch is None:
             return load_nifti_scan(
                 record,
-                base_patch_mm=self._base_patch_mm,
+                base_patch_mm=self._source_patch_mm_max,
+                source_patch_mm_min=self._source_patch_mm_min,
+                source_patch_mm_max=self._source_patch_mm_max,
+                source_patch_mm_distribution=self._source_patch_mm_distribution,
                 use_totalseg_body_centers=self._use_totalseg_body_centers,
             )
 
@@ -238,14 +247,19 @@ class WarmPool:
         staged_record = ScanRecord(
             scan_id=record.scan_id,
             series_id=record.series_id,
+            study_id=record.study_id,
             modality=record.modality,
             series_path=record.series_path,
+            series_description=record.series_description,
             nifti_path=staged_path,
         )
         try:
             return load_nifti_scan(
                 staged_record,
-                base_patch_mm=self._base_patch_mm,
+                base_patch_mm=self._source_patch_mm_max,
+                source_patch_mm_min=self._source_patch_mm_min,
+                source_patch_mm_max=self._source_patch_mm_max,
+                source_patch_mm_distribution=self._source_patch_mm_distribution,
                 use_totalseg_body_centers=self._use_totalseg_body_centers,
             )
         except Exception:
@@ -267,6 +281,8 @@ class WarmPool:
                 "scan_id": record.scan_id,
                 "series_id": record.series_id,
                 "series_path": record.series_path,
+                "series_description": record.series_description,
+                "protocol_key": f"{record.modality.upper()}::{normalize_series_description(record.series_description)}",
                 "scan": scan,
                 "visits": 0,
                 "resolved_nifti_path": path,
@@ -330,7 +346,11 @@ class WarmPool:
             except Exception as exc:
                 events.failed += 1
                 self.replacement_failed_count += 1
-                failed_series = str((slot.get("replacement_record") or {}).series_path if slot.get("replacement_record") else slot.get("series_path", ""))
+                failed_series = str(
+                    (slot.get("replacement_record") or {}).series_path
+                    if slot.get("replacement_record")
+                    else slot.get("series_path", "")
+                )
                 self._note_broken(failed_series, exc, stage="replacement")
 
                 slot["replacing"] = False
@@ -348,6 +368,12 @@ class WarmPool:
             slot["scan_id"] = slot["replacement_scan_id"]
             slot["series_id"] = replacement_record.series_id if replacement_record else slot["scan_id"]
             slot["series_path"] = replacement_record.series_path if replacement_record else slot.get("series_path", "")
+            slot["series_description"] = replacement_record.series_description if replacement_record else slot.get("series_description", "")
+            slot["protocol_key"] = (
+                f"{replacement_record.modality.upper()}::{normalize_series_description(replacement_record.series_description)}"
+                if replacement_record is not None
+                else slot.get("protocol_key", "CT::UNKNOWN")
+            )
             slot["resolved_nifti_path"] = path
             slot["visits"] = 0
             slot["replacing"] = False
@@ -393,14 +419,16 @@ class WarmPool:
 
 
 class ShardedScanDataset(IterableDataset):
-    """Stream samples from hash-sharded scans with warm-pool replacement."""
+    """Stream paired samples from hash-sharded scans with warm-pool replacement."""
 
     def __init__(
         self,
         *,
         scan_records: list[ScanRecord],
         n_patches: int,
-        base_patch_mm: float,
+        source_patch_mm_min: float,
+        source_patch_mm_max: float,
+        source_patch_mm_distribution: str,
         warm_pool_size: int,
         visits_per_scan: int,
         seed: int,
@@ -416,11 +444,12 @@ class ShardedScanDataset(IterableDataset):
         max_broken_series_log: int,
         broken_series_log_path: str,
         scratch_dir: str | None = None,
-        pair_views: bool = True,
     ) -> None:
         self.scan_records = list(scan_records)
         self.n_patches = int(n_patches)
-        self.base_patch_mm = float(base_patch_mm)
+        self.source_patch_mm_min = float(source_patch_mm_min)
+        self.source_patch_mm_max = float(source_patch_mm_max)
+        self.source_patch_mm_distribution = str(source_patch_mm_distribution)
         self.warm_pool_size = int(warm_pool_size)
         self.visits_per_scan = int(visits_per_scan)
         self.seed = int(seed)
@@ -436,7 +465,6 @@ class ShardedScanDataset(IterableDataset):
         self.max_broken_series_log = int(max_broken_series_log)
         self.broken_series_log_path = broken_series_log_path
         self.scratch_dir = scratch_dir
-        self.pair_views = bool(pair_views)
 
     def _pair_curriculum(self, sample_index: int) -> tuple[float, float]:
         if self.pair_local_curriculum_steps <= 0 or self.pair_local_final_prob <= 0.0:
@@ -448,16 +476,26 @@ class ShardedScanDataset(IterableDataset):
         ) * progress
         return float(local_prob), float(max(radius_mm, 0.0))
 
+    def _sample_source_patch_mm(self, rng: np.random.Generator) -> float:
+        lo = max(self.source_patch_mm_min, 1e-3)
+        hi = max(self.source_patch_mm_max, lo)
+        distribution = self.source_patch_mm_distribution.strip().lower()
+        if distribution == "log_uniform":
+            return float(math.exp(rng.uniform(math.log(lo), math.log(hi))))
+        return float(rng.uniform(lo, hi))
+
     def _sample_pair_center_vox(
         self,
         scan: Any,
         center_a_vox: np.ndarray,
         seed: int,
         sample_index: int,
+        source_patch_mm_b: float,
     ) -> tuple[np.ndarray, bool]:
         """Sample paired-view centers with a slow global-to-local curriculum."""
         rng = np.random.default_rng(int(seed))
         center_a = np.asarray(center_a_vox, dtype=np.int64).reshape(3)
+        patch_vox_b = scan.mm_patch_vox_shape(float(source_patch_mm_b))
         local_prob, local_radius_mm = self._pair_curriculum(sample_index)
 
         if local_prob > 0.0 and float(rng.random()) < local_prob:
@@ -465,21 +503,21 @@ class ShardedScanDataset(IterableDataset):
                 rng,
                 center_a,
                 radius_mm=local_radius_mm,
-                patch_vox=scan.patch_shape_vox,
+                patch_vox=patch_vox_b,
             )
             if np.any(local_center != center_a):
                 return local_center, bool(local_from_body)
 
         for _ in range(32):
-            center_b, center_b_from_body = scan.sample_prism_center_with_source(rng, patch_vox=scan.patch_shape_vox)
+            center_b, center_b_from_body = scan.sample_prism_center_with_source(rng, patch_vox=patch_vox_b)
             if np.any(center_b != center_a):
                 return center_b, bool(center_b_from_body)
 
         return scan.sample_center_near_with_source(
             rng,
             center_a,
-            radius_mm=max(local_radius_mm, self.base_patch_mm * 2.0),
-            patch_vox=scan.patch_shape_vox,
+            radius_mm=max(local_radius_mm, self.source_patch_mm_max * 2.0),
+            patch_vox=patch_vox_b,
         )
 
     def __iter__(self):
@@ -503,7 +541,9 @@ class ShardedScanDataset(IterableDataset):
         pool = WarmPool(
             capacity=effective_pool,
             visits_per_scan=self.visits_per_scan,
-            base_patch_mm=self.base_patch_mm,
+            source_patch_mm_max=self.source_patch_mm_max,
+            source_patch_mm_min=self.source_patch_mm_min,
+            source_patch_mm_distribution=self.source_patch_mm_distribution,
             worker_id=worker_id,
             strict_background_errors=self.strict_background_errors,
             max_prefetch_replacements=self.max_prefetch_replacements,
@@ -548,6 +588,10 @@ class ShardedScanDataset(IterableDataset):
                 slot_idx, slot, needs_replacement = sampled
 
                 sample_seed = self.seed + worker_id * 1_000_000 + sample_count
+                source_rng = np.random.default_rng(sample_seed + 17)
+                source_patch_mm_a = self._sample_source_patch_mm(source_rng)
+                source_patch_mm_b = self._sample_source_patch_mm(source_rng)
+
                 np_rng_state = np.random.get_state()
                 py_rng_state = random.getstate()
                 random.seed(sample_seed)
@@ -555,23 +599,25 @@ class ShardedScanDataset(IterableDataset):
 
                 try:
                     scan = slot["scan"]
-                    if self.pair_views:
-                        result_a = scan.train_sample(self.n_patches, seed=sample_seed * 2)
-                        pair_center_b_vox, pair_center_b_from_body = self._sample_pair_center_vox(
-                            scan,
-                            np.asarray(result_a["prism_center_vox"], dtype=np.int64),
-                            seed=sample_seed * 2 + 1,
-                            sample_index=sample_count,
-                        )
-                        result_b = scan.train_sample(
-                            self.n_patches,
-                            seed=sample_seed * 2 + 3,
-                            subset_center_vox=pair_center_b_vox,
-                            sampled_body_center=pair_center_b_from_body,
-                        )
-                    else:
-                        result_a = scan.train_sample(self.n_patches, seed=sample_seed)
-                        result_b = result_a
+                    result_a = scan.train_sample(
+                        self.n_patches,
+                        seed=sample_seed * 2,
+                        source_patch_mm=source_patch_mm_a,
+                    )
+                    pair_center_b_vox, pair_center_b_from_body = self._sample_pair_center_vox(
+                        scan,
+                        np.asarray(result_a["prism_center_vox"], dtype=np.int64),
+                        seed=sample_seed * 2 + 1,
+                        sample_index=sample_count,
+                        source_patch_mm_b=source_patch_mm_b,
+                    )
+                    result_b = scan.train_sample(
+                        self.n_patches,
+                        seed=sample_seed * 2 + 3,
+                        source_patch_mm=source_patch_mm_b,
+                        subset_center_vox=pair_center_b_vox,
+                        sampled_body_center=pair_center_b_from_body,
+                    )
                 except SmallScanError as exc:
                     pool.mark_series_broken(slot_idx, exc)
                     pool.request_replacement(slot_idx, _next_record())
@@ -592,6 +638,7 @@ class ShardedScanDataset(IterableDataset):
                     result_b=result_b,
                     scan_id=str(slot["scan_id"]),
                     series_id=str(slot["series_id"]),
+                    protocol_key=str(slot["protocol_key"]),
                     replacement_completed_count_delta=events.completed,
                     replacement_failed_count_delta=events.failed,
                     replacement_wait_time_ms_delta=events.wait_ms,
@@ -604,461 +651,3 @@ class ShardedScanDataset(IterableDataset):
         finally:
             pool.cleanup()
 
-
-@dataclass(frozen=True)
-class _StudyGroup:
-    study_id: str
-    records: tuple[ScanRecord, ...]
-
-
-class StudyShardedScanDataset(IterableDataset):
-    """Stream 4-view same-study samples with optional paired-world cross reconstruction."""
-
-    def __init__(
-        self,
-        *,
-        scan_records: list[ScanRecord],
-        n_patches: int,
-        base_patch_mm: float,
-        warm_pool_size: int,
-        visits_per_scan: int,
-        seed: int,
-        use_totalseg_body_centers: bool,
-        pair_local_curriculum_steps: int,
-        pair_local_final_prob: float,
-        pair_local_start_radius_mm: float,
-        pair_local_end_radius_mm: float,
-        broken_abort_ratio: float,
-        broken_abort_min_attempts: int,
-        max_broken_series_log: int,
-        broken_series_log_path: str,
-        scratch_dir: str | None = None,
-    ) -> None:
-        self.n_patches = int(n_patches)
-        self.base_patch_mm = float(base_patch_mm)
-        self.warm_pool_size = int(warm_pool_size)
-        self.visits_per_scan = int(visits_per_scan)
-        self.seed = int(seed)
-        self.use_totalseg_body_centers = bool(use_totalseg_body_centers)
-        self.pair_local_curriculum_steps = max(0, int(pair_local_curriculum_steps))
-        self.pair_local_final_prob = float(np.clip(pair_local_final_prob, 0.0, 1.0))
-        self.pair_local_start_radius_mm = max(float(pair_local_start_radius_mm), 0.0)
-        self.pair_local_end_radius_mm = max(float(pair_local_end_radius_mm), 0.0)
-        self.broken_abort_ratio = float(broken_abort_ratio)
-        self.broken_abort_min_attempts = int(broken_abort_min_attempts)
-        self.max_broken_series_log = int(max_broken_series_log)
-        self.broken_series_log_path = broken_series_log_path
-        self.scratch_dir = scratch_dir
-
-        groups: dict[str, list[ScanRecord]] = {}
-        for record in scan_records:
-            groups.setdefault(record.study_id, []).append(record)
-        self.study_groups = [
-            _StudyGroup(study_id=study_id, records=tuple(records))
-            for study_id, records in groups.items()
-            if records
-        ]
-
-    def _check_abort_threshold(self, attempted_series: int, broken_series: int, broken_names: list[str]) -> None:
-        if attempted_series < self.broken_abort_min_attempts:
-            return
-        ratio = broken_series / float(max(attempted_series, 1))
-        if ratio > self.broken_abort_ratio:
-            raise BrokenScanRateExceeded(
-                attempted_series=attempted_series,
-                broken_series=broken_series,
-                ratio=ratio,
-                broken_series_names=list(broken_names),
-            )
-
-    def _note_broken(self, broken_seen: set[str], broken_names: list[str], series_name: str, error: Exception | str, stage: str, worker_id: int, attempted_series: int, broken_series: int) -> None:
-        if series_name and series_name not in broken_seen:
-            if len(broken_names) < self.max_broken_series_log:
-                broken_names.append(series_name)
-            broken_seen.add(series_name)
-        append_jsonl(
-            self.broken_series_log_path,
-            {
-                "ts": time.time(),
-                "worker_id": worker_id,
-                "series": series_name,
-                "stage": stage,
-                "error": str(error),
-                "attempted_series": attempted_series,
-                "broken_series": broken_series,
-            },
-        )
-
-    def _pair_curriculum(self, sample_index: int) -> tuple[float, float]:
-        if self.pair_local_curriculum_steps <= 0 or self.pair_local_final_prob <= 0.0:
-            return 0.0, self.pair_local_start_radius_mm
-        progress = min(max(int(sample_index), 0) / float(self.pair_local_curriculum_steps), 1.0)
-        local_prob = self.pair_local_final_prob * progress
-        radius_mm = self.pair_local_start_radius_mm + (
-            self.pair_local_end_radius_mm - self.pair_local_start_radius_mm
-        ) * progress
-        return float(local_prob), float(max(radius_mm, 0.0))
-
-    def _sample_pair_center_vox(
-        self,
-        scan: Any,
-        center_a_vox: np.ndarray,
-        seed: int,
-        sample_index: int,
-    ) -> tuple[np.ndarray, bool]:
-        rng = np.random.default_rng(int(seed))
-        center_a = np.asarray(center_a_vox, dtype=np.int64).reshape(3)
-        local_prob, local_radius_mm = self._pair_curriculum(sample_index)
-        if local_prob > 0.0 and float(rng.random()) < local_prob:
-            local_center, local_from_body = scan.sample_center_near_with_source(
-                rng,
-                center_a,
-                radius_mm=local_radius_mm,
-                patch_vox=scan.patch_shape_vox,
-            )
-            if np.any(local_center != center_a):
-                return local_center, bool(local_from_body)
-        for _ in range(32):
-            center_b, center_b_from_body = scan.sample_prism_center_with_source(rng, patch_vox=scan.patch_shape_vox)
-            if np.any(center_b != center_a):
-                return center_b, bool(center_b_from_body)
-        return scan.sample_center_near_with_source(
-            rng,
-            center_a,
-            radius_mm=max(local_radius_mm, self.base_patch_mm * 2.0),
-            patch_vox=scan.patch_shape_vox,
-        )
-
-    @staticmethod
-    def _path_suffix(path: str) -> str:
-        p = Path(path)
-        if p.name.endswith(".nii.gz"):
-            return ".nii.gz"
-        if p.suffix:
-            return p.suffix
-        return ".nii"
-
-    def _stage_to_scratch(self, path: str, worker_id: int, slot_idx: int, role: str) -> str:
-        if self.scratch_dir is None:
-            return path
-        slot_dir = Path(self.scratch_dir) / f"study_worker_{worker_id}" / f"slot_{slot_idx:03d}" / role
-        slot_dir.mkdir(parents=True, exist_ok=True)
-        for entry in slot_dir.glob("*"):
-            if entry.is_file():
-                entry.unlink(missing_ok=True)
-        suffix = self._path_suffix(path)
-        dst = slot_dir / f"scan{suffix}"
-        tmp = slot_dir / f"scan{suffix}.tmp.{os.getpid()}.{threading.get_ident()}"
-        try:
-            shutil.copy2(path, tmp)
-            os.replace(tmp, dst)
-        finally:
-            if tmp.exists():
-                tmp.unlink(missing_ok=True)
-        return str(dst)
-
-    def _load_scan(self, record: ScanRecord, worker_id: int, slot_idx: int, role: str) -> tuple[Any, str]:
-        if self.scratch_dir is None:
-            return load_nifti_scan(
-                record,
-                base_patch_mm=self.base_patch_mm,
-                use_totalseg_body_centers=self.use_totalseg_body_centers,
-            )
-        source_path = record.nifti_path or resolve_nifti_path(record.series_path)
-        staged_path = self._stage_to_scratch(source_path, worker_id, slot_idx, role)
-        staged_record = ScanRecord(
-            scan_id=record.scan_id,
-            series_id=record.series_id,
-            study_id=record.study_id,
-            modality=record.modality,
-            series_path=record.series_path,
-            nifti_path=staged_path,
-        )
-        return load_nifti_scan(
-            staged_record,
-            base_patch_mm=self.base_patch_mm,
-            use_totalseg_body_centers=self.use_totalseg_body_centers,
-        )
-
-    def _select_series_pair(self, group: _StudyGroup, rng: random.Random) -> tuple[ScanRecord, ScanRecord, str]:
-        records = list(group.records)
-        record_x = rng.choice(records)
-        distinct = [record for record in records if record.series_id != record_x.series_id]
-        if not distinct:
-            return record_x, record_x, "duplicate"
-        return record_x, rng.choice(distinct), "paired_world"
-
-    def _load_study_slot(
-        self,
-        group: _StudyGroup,
-        *,
-        rng: random.Random,
-        worker_id: int,
-        slot_idx: int,
-    ) -> tuple[dict[str, Any], int, int]:
-        record_x, record_y, mode = self._select_series_pair(group, rng)
-        scan_x, path_x = self._load_scan(record_x, worker_id, slot_idx, "x")
-        loaded_delta = 1
-        loaded_with_body_delta = int(bool(str(getattr(scan_x, "body_sampling_source", ""))))
-        if record_y.series_id == record_x.series_id:
-            scan_y = scan_x
-            path_y = path_x
-        else:
-            scan_y, path_y = self._load_scan(record_y, worker_id, slot_idx, "y")
-            loaded_delta += 1
-            loaded_with_body_delta += int(bool(str(getattr(scan_y, "body_sampling_source", ""))))
-        return (
-            {
-                "study_id": group.study_id,
-                "record_x": record_x,
-                "record_y": record_y,
-                "scan_x": scan_x,
-                "scan_y": scan_y,
-                "resolved_nifti_path_x": path_x,
-                "resolved_nifti_path_y": path_y,
-                "visits": 0,
-                "fallback_mode": mode,
-            },
-            loaded_delta,
-            loaded_with_body_delta,
-        )
-
-    def _try_same_world_view(
-        self,
-        scan: Any,
-        world_center_pt: np.ndarray,
-        *,
-        seed: int,
-    ) -> Mapping[str, Any] | None:
-        center_vox = np.rint(world_points_to_voxel(np.asarray(world_center_pt, dtype=np.float32), scan.affine)[0]).astype(np.int64)
-        if not scan._patch_has_overlap(center_vox, scan.patch_shape_vox):  # noqa: SLF001
-            return None
-        min_idx, max_idx = scan._center_bounds_for_full_patch(scan.patch_shape_vox)  # noqa: SLF001
-        center_vox = np.clip(center_vox, min_idx, max_idx)
-        if not scan._patch_has_overlap(center_vox, scan.patch_shape_vox):  # noqa: SLF001
-            return None
-        return scan.train_sample(
-            self.n_patches,
-            seed=seed,
-            subset_center_vox=center_vox,
-            sampled_body_center=scan.contains_body_center_vox(center_vox),
-        )
-
-    def __iter__(self):
-        worker = torch.utils.data.get_worker_info()
-        if worker is None:
-            worker_id = 0
-            n_workers = 1
-        else:
-            worker_id = worker.id
-            n_workers = worker.num_workers
-
-        shard_groups = [g for g in self.study_groups if shard_worker(g.study_id, n_workers) == worker_id]
-        if not shard_groups:
-            return
-
-        rng = random.Random(self.seed + worker_id)
-        rng.shuffle(shard_groups)
-
-        effective_pool = min(max(1, self.warm_pool_size), len(shard_groups))
-        slots: list[dict[str, Any]] = []
-        next_idx = 0
-        sample_count = 0
-        rr_index = 0
-
-        pending_completed = 0
-        pending_failed = 0
-        pending_wait_ms = 0.0
-        pending_attempted = 0
-        pending_broken = 0
-        pending_loaded = 0
-        pending_loaded_with_body = 0
-
-        attempted_series = 0
-        broken_series = 0
-        broken_seen: set[str] = set()
-        broken_names: list[str] = []
-
-        def _next_group() -> _StudyGroup:
-            nonlocal next_idx
-            group = shard_groups[next_idx % len(shard_groups)]
-            next_idx += 1
-            return group
-
-        while len(slots) < effective_pool and next_idx < len(shard_groups):
-            group = _next_group()
-            try:
-                pending_attempted += len(group.records)
-                attempted_series += len(group.records)
-                slot, loaded_delta, loaded_with_body_delta = self._load_study_slot(
-                    group,
-                    rng=rng,
-                    worker_id=worker_id,
-                    slot_idx=len(slots),
-                )
-            except Exception as exc:
-                pending_broken += len(group.records)
-                broken_series += len(group.records)
-                for record in group.records:
-                    self._note_broken(
-                        broken_seen,
-                        broken_names,
-                        record.series_path,
-                        exc,
-                        stage="initial_load",
-                        worker_id=worker_id,
-                        attempted_series=attempted_series,
-                        broken_series=broken_series,
-                    )
-                self._check_abort_threshold(attempted_series, broken_series, broken_names)
-                continue
-            slots.append(slot)
-            pending_loaded += loaded_delta
-            pending_loaded_with_body += loaded_with_body_delta
-
-        if not slots:
-            raise RuntimeError("Study warm pool bootstrap failed: no valid study groups")
-
-        try:
-            while True:
-                slot_idx = rr_index % len(slots)
-                rr_index += 1
-                slot = slots[slot_idx]
-                slot["visits"] += 1
-
-                sample_seed = self.seed + worker_id * 1_000_000 + sample_count
-                np_rng_state = np.random.get_state()
-                py_rng_state = random.getstate()
-                random.seed(sample_seed)
-                np.random.seed(sample_seed)
-
-                try:
-                    scan_x = slot["scan_x"]
-                    result_a = scan_x.train_sample(self.n_patches, seed=sample_seed * 4)
-                    pair_center_b_vox, pair_center_b_from_body = self._sample_pair_center_vox(
-                        scan_x,
-                        np.asarray(result_a["prism_center_vox"], dtype=np.int64),
-                        seed=sample_seed * 4 + 1,
-                        sample_index=sample_count,
-                    )
-                    result_b = scan_x.train_sample(
-                        self.n_patches,
-                        seed=sample_seed * 4 + 2,
-                        subset_center_vox=pair_center_b_vox,
-                        sampled_body_center=pair_center_b_from_body,
-                    )
-
-                    cross_valid = False
-                    cross_mode = str(slot["fallback_mode"])
-                    scan_y = slot["scan_y"]
-                    if slot["record_y"].series_id != slot["record_x"].series_id:
-                        result_ap = self._try_same_world_view(
-                            scan_y,
-                            np.asarray(result_a["prism_center_pt"], dtype=np.float32),
-                            seed=sample_seed * 4 + 3,
-                        )
-                        result_bp = self._try_same_world_view(
-                            scan_y,
-                            np.asarray(result_b["prism_center_pt"], dtype=np.float32),
-                            seed=sample_seed * 4 + 4,
-                        )
-                        if result_ap is not None and result_bp is not None:
-                            cross_valid = True
-                            cross_mode = "paired_world"
-                        else:
-                            result_ap = scan_y.train_sample(self.n_patches, seed=sample_seed * 4 + 5)
-                            result_bp = scan_y.train_sample(self.n_patches, seed=sample_seed * 4 + 6)
-                            cross_mode = "unpaired"
-                    else:
-                        result_ap = scan_y.train_sample(self.n_patches, seed=sample_seed * 4 + 5)
-                        result_bp = scan_y.train_sample(self.n_patches, seed=sample_seed * 4 + 6)
-                except SmallScanError as exc:
-                    broken_series += 1
-                    pending_broken += 1
-                    self._note_broken(
-                        broken_seen,
-                        broken_names,
-                        slot["record_x"].series_path,
-                        exc,
-                        stage="sample",
-                        worker_id=worker_id,
-                        attempted_series=attempted_series,
-                        broken_series=broken_series,
-                    )
-                    self._check_abort_threshold(attempted_series, broken_series, broken_names)
-                    sample_count += 1
-                    continue
-                finally:
-                    random.setstate(py_rng_state)
-                    np.random.set_state(np_rng_state)
-
-                replacement_requested = False
-                if slot["visits"] >= self.visits_per_scan:
-                    replacement_requested = True
-                    group = _next_group()
-                    t0 = time.perf_counter()
-                    pending_attempted += len(group.records)
-                    attempted_series += len(group.records)
-                    try:
-                        new_slot, loaded_delta, loaded_with_body_delta = self._load_study_slot(
-                            group,
-                            rng=rng,
-                            worker_id=worker_id,
-                            slot_idx=slot_idx,
-                        )
-                    except Exception as exc:
-                        pending_failed += 1
-                        broken_series += len(group.records)
-                        pending_broken += len(group.records)
-                        for record in group.records:
-                            self._note_broken(
-                                broken_seen,
-                                broken_names,
-                                record.series_path,
-                                exc,
-                                stage="replacement",
-                                worker_id=worker_id,
-                                attempted_series=attempted_series,
-                                broken_series=broken_series,
-                            )
-                        self._check_abort_threshold(attempted_series, broken_series, broken_names)
-                    else:
-                        slots[slot_idx] = new_slot
-                        pending_completed += 1
-                        pending_loaded += loaded_delta
-                        pending_loaded_with_body += loaded_with_body_delta
-                    pending_wait_ms += (time.perf_counter() - t0) * 1000.0
-
-                sample_count += 1
-
-                yield build_study4_dataset_item(
-                    result_a=result_a,
-                    result_ap=result_ap,
-                    result_b=result_b,
-                    result_bp=result_bp,
-                    study_id=str(slot["study_id"]),
-                    series_id_x=str(slot["record_x"].series_id),
-                    series_id_y=str(slot["record_y"].series_id),
-                    cross_valid=bool(cross_valid),
-                    cross_mode=cross_mode,
-                    replacement_completed_count_delta=pending_completed,
-                    replacement_failed_count_delta=pending_failed,
-                    replacement_wait_time_ms_delta=pending_wait_ms,
-                    attempted_series_delta=pending_attempted,
-                    broken_series_delta=pending_broken,
-                    loaded_series_delta=pending_loaded,
-                    loaded_with_body_delta=pending_loaded_with_body,
-                    replacement_requested=replacement_requested,
-                )
-
-                pending_completed = 0
-                pending_failed = 0
-                pending_wait_ms = 0.0
-                pending_attempted = 0
-                pending_broken = 0
-                pending_loaded = 0
-                pending_loaded_with_body = 0
-        finally:
-            if self.scratch_dir is not None:
-                worker_scratch = Path(self.scratch_dir) / f"study_worker_{worker_id}"
-                shutil.rmtree(worker_scratch, ignore_errors=True)

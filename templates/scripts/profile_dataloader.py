@@ -12,14 +12,19 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from prism_ssl.data import load_catalog, load_nifti_scan, sample_scan_candidates
 
 
-def profile_single_scan(record, base_patch_mm: float = 20.0, n_patches: int = 256, n_iters: int = 20):
+def profile_single_scan(record, source_patch_mm: float = 20.0, n_patches: int = 256, n_iters: int = 20):
     # Time NIfTI load
     t0 = time.perf_counter()
-    scan, path = load_nifti_scan(record, base_patch_mm=base_patch_mm)
+    scan, path = load_nifti_scan(
+        record,
+        base_patch_mm=source_patch_mm,
+        source_patch_mm_min=source_patch_mm,
+        source_patch_mm_max=source_patch_mm,
+    )
     load_ms = (time.perf_counter() - t0) * 1000
 
     geo = scan.geometry
-    patch_vox = scan._mm_patch_vox_shape(base_patch_mm)
+    patch_vox = scan.mm_patch_vox_shape(source_patch_mm)
     in_plane = [i for i in range(3) if i != geo.thin_axis]
     native_h = int(patch_vox[in_plane[0]])
     native_w = int(patch_vox[in_plane[1]])
@@ -37,7 +42,7 @@ def profile_single_scan(record, base_patch_mm: float = 20.0, n_patches: int = 25
     total_times = []
     for i in range(n_iters):
         t0 = time.perf_counter()
-        result = scan.train_sample(n_patches, seed=i)
+        result = scan.train_sample(n_patches, seed=i, source_patch_mm=source_patch_mm)
         total_ms = (time.perf_counter() - t0) * 1000
         total_times.append(total_ms)
 
@@ -111,8 +116,8 @@ def profile_single_scan(record, base_patch_mm: float = 20.0, n_patches: int = 25
     # Time pair (2x train_sample, like actual training)
     t0 = time.perf_counter()
     for i in range(n_iters):
-        scan.train_sample(n_patches, seed=i * 2)
-        scan.train_sample(n_patches, seed=i * 2 + 1)
+        scan.train_sample(n_patches, seed=i * 2, source_patch_mm=source_patch_mm)
+        scan.train_sample(n_patches, seed=i * 2 + 1, source_patch_mm=source_patch_mm)
     pair_ms = (time.perf_counter() - t0) * 1000 / n_iters
     print(f"\n  Pair sample (2x): {pair_ms:.2f} ms")
     print(f"  Required rate for batch=8, step=50ms: {8 / 0.050:.0f} pairs/sec")

@@ -27,15 +27,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--warm-pool-size", type=int, default=None)
     p.add_argument("--visits-per-scan", type=int, default=None)
     p.add_argument("--max-prefetch-replacements", type=int, default=None)
-    p.add_argument("--position-frame-for-model", type=str, default=None, choices=["ras", "aug", "final"])
-    p.add_argument("--rotation-augmentation-max-degrees", type=float, default=None)
-    p.add_argument(
-        "--no-native-orientation-hint",
-        dest="apply_native_orientation_hint",
-        action="store_false",
-        default=None,
-        help="Disable adding inferred native orientation hint to sampled rotations.",
-    )
+    p.add_argument("--source-patch-mm-min", type=float, default=None)
+    p.add_argument("--source-patch-mm-max", type=float, default=None)
+    p.add_argument("--source-patch-mm-distribution", type=str, default=None, choices=["log_uniform", "uniform"])
 
     p.add_argument("--model-name", type=str, default=None, choices=["vit_l"])
     p.add_argument("--model-d-model", type=int, default=None)
@@ -48,8 +42,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--model-pos-max-wavelength-mm", type=float, default=None)
     p.add_argument("--model-mim-mask-ratio", type=float, default=None)
 
-    p.add_argument("--loss-weight-supcon", type=float, default=None)
+    p.add_argument("--loss-weight-supcon-instance", type=float, default=None)
+    p.add_argument("--loss-weight-supcon-protocol", type=float, default=None)
     p.add_argument("--loss-weight-mim", type=float, default=None)
+    p.add_argument("--loss-weight-patch-size", type=float, default=None)
     p.add_argument("--supcon-warmup-steps", type=int, default=None)
     p.add_argument("--supcon-ramp-steps", type=int, default=None)
 
@@ -90,9 +86,9 @@ def main() -> int:
         "data.warm_pool_size": args.warm_pool_size,
         "data.visits_per_scan": args.visits_per_scan,
         "data.max_prefetch_replacements": args.max_prefetch_replacements,
-        "data.position_frame_for_model": args.position_frame_for_model,
-        "data.rotation_augmentation_max_degrees": args.rotation_augmentation_max_degrees,
-        "data.apply_native_orientation_hint": args.apply_native_orientation_hint,
+        "data.source_patch_mm_min": args.source_patch_mm_min,
+        "data.source_patch_mm_max": args.source_patch_mm_max,
+        "data.source_patch_mm_distribution": args.source_patch_mm_distribution,
         "model.name": args.model_name,
         "model.d_model": args.model_d_model,
         "model.num_layers": args.model_num_layers,
@@ -103,8 +99,10 @@ def main() -> int:
         "model.pos_min_wavelength_mm": args.model_pos_min_wavelength_mm,
         "model.pos_max_wavelength_mm": args.model_pos_max_wavelength_mm,
         "model.mim_mask_ratio": args.model_mim_mask_ratio,
-        "loss.w_supcon_target": args.loss_weight_supcon,
+        "loss.w_supcon_instance_target": args.loss_weight_supcon_instance,
+        "loss.w_supcon_protocol_target": args.loss_weight_supcon_protocol,
         "loss.w_mim": args.loss_weight_mim,
+        "loss.w_patch_size": args.loss_weight_patch_size,
         "loss.supcon_warmup_steps": args.supcon_warmup_steps,
         "loss.supcon_ramp_steps": args.supcon_ramp_steps,
         "data.broken_abort_ratio": args.broken_abort_ratio,
@@ -139,3 +137,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

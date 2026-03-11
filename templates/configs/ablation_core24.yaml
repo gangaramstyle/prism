@@ -1,4 +1,4 @@
-# 24-run core ablation definition
+# 36-run clean pair2 ablation definition
 # Cartesian product of factors below.
 
 base:
@@ -7,10 +7,10 @@ base:
     max_steps: 30000
 
 factors:
-  batch_size: [32, 64]
-  warm_pool_size: [16, 24]
-  w_supcon_target: [0.1, 0.2, 0.4]
-  supcon_ramp_steps: [2000, 5000]
+  w_supcon_instance_target: [0.05, 0.1, 0.2]
+  w_supcon_protocol_target: [0.05, 0.1, 0.2]
+  w_patch_size: [0.1, 0.25]
+  source_patch_mm_max: [48, 64]
 
 fixed:
   data:
@@ -18,6 +18,7 @@ fixed:
     workers: 8
     visits_per_scan: 100
     use_local_scratch: true
+    source_patch_mm_min: 16.0
 
 ranking:
   primary_metric: proxy_quality_score

@@ -1,11 +1,13 @@
 #!/bin/bash
+# 36-run clean pair2 ablation sweep:
+# 3 exact-series SupCon weights x 3 protocol-family SupCon weights x 2 patch-size weights x 2 source patch maxima.
 #SBATCH --job-name=prism-ssl-ablate
 #SBATCH --partition=dgx-b200
 #SBATCH --gpus=1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=256G
 #SBATCH --time=24:00:00
-#SBATCH --array=0-23
+#SBATCH --array=0-35
 #SBATCH --output=logs/%x_%A_%a.out
 #SBATCH --error=logs/%x_%A_%a.err
 
@@ -33,28 +35,28 @@ cleanup_tmp() {
 }
 trap cleanup_tmp EXIT
 
-BATCHES=(4 8)
-POOLS=(16 24)
-SUPCON_WEIGHTS=(0.1 0.2 0.4)
-RAMP_STEPS=(2000 5000)
+SUPCON_INSTANCE_WEIGHTS=(0.05 0.1 0.2)
+SUPCON_PROTOCOL_WEIGHTS=(0.05 0.1 0.2)
+PATCH_WEIGHTS=(0.1 0.25)
+SOURCE_PATCH_MAXES=(48 64)
 MODEL_NAME="${MODEL_NAME:-vit_l}"
 N_PATCHES="${N_PATCHES:-256}"
 WORKERS="${WORKERS:-8}"
 
 TASK_ID=${SLURM_ARRAY_TASK_ID}
-B_IDX=$(( TASK_ID / (2 * 3 * 2) ))
-REM1=$(( TASK_ID % (2 * 3 * 2) ))
-P_IDX=$(( REM1 / (3 * 2) ))
-REM2=$(( REM1 % (3 * 2) ))
+I_IDX=$(( TASK_ID / (3 * 2 * 2) ))
+REM1=$(( TASK_ID % (3 * 2 * 2) ))
+P_IDX=$(( REM1 / (2 * 2) ))
+REM2=$(( REM1 % (2 * 2) ))
 W_IDX=$(( REM2 / 2 ))
-R_IDX=$(( REM2 % 2 ))
+M_IDX=$(( REM2 % 2 ))
 
-BATCH=${BATCHES[$B_IDX]}
-POOL=${POOLS[$P_IDX]}
-SUPCON=${SUPCON_WEIGHTS[$W_IDX]}
-RAMP=${RAMP_STEPS[$R_IDX]}
+SUPCON_INSTANCE=${SUPCON_INSTANCE_WEIGHTS[$I_IDX]}
+SUPCON_PROTOCOL=${SUPCON_PROTOCOL_WEIGHTS[$P_IDX]}
+PATCH_WEIGHT=${PATCH_WEIGHTS[$W_IDX]}
+SOURCE_PATCH_MAX=${SOURCE_PATCH_MAXES[$M_IDX]}
 
-RUN_NAME="core24_b${BATCH}_p${POOL}_s${SUPCON}_r${RAMP}_${SLURM_ARRAY_TASK_ID}"
+RUN_NAME="clean_pair2_si${SUPCON_INSTANCE}_sp${SUPCON_PROTOCOL}_wp${PATCH_WEIGHT}_max${SOURCE_PATCH_MAX}_${SLURM_ARRAY_TASK_ID}"
 SUMMARY_PATH="results/ablations/${RUN_NAME}.json"
 CATALOG_PATH="${CATALOG_PATH:-data/pmbb_catalog.csv.gz}"
 
@@ -76,10 +78,10 @@ uv run python scripts/train_prism_ssl.py \
   --model-name "$MODEL_NAME" \
   --n-patches "$N_PATCHES" \
   --workers "$WORKERS" \
-  --batch-size "$BATCH" \
-  --warm-pool-size "$POOL" \
-  --loss-weight-supcon "$SUPCON" \
-  --supcon-ramp-steps "$RAMP" \
+  --loss-weight-supcon-instance "$SUPCON_INSTANCE" \
+  --loss-weight-supcon-protocol "$SUPCON_PROTOCOL" \
+  --loss-weight-patch-size "$PATCH_WEIGHT" \
+  --source-patch-mm-max "$SOURCE_PATCH_MAX" \
   --wandb-run-name "$RUN_NAME" \
   --wandb-mode online \
   --tmp-run-dir "$TMP_BASE" \
