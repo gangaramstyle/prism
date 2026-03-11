@@ -1533,6 +1533,12 @@ def _(
                 pl.col("frac_high_clip").round(3),
             ]
         )
+        _patch_quality_ui = mo.ui.table(
+            _patch_quality.to_dicts(),
+            pagination=False,
+            selection=None,
+            show_download=False,
+        )
         def _browser_meta(title: str, view_row: dict[str, object]) -> tuple[pl.DataFrame, object]:
             _thin_axis_name = str(view_row.get("native_thin_axis_name", "z")).lower()
             _thin_axis = {"x": 0, "y": 1, "z": 2}.get(_thin_axis_name, 2)
@@ -1566,7 +1572,13 @@ def _(
                 value=_default_slice,
                 label=f"{title} {_thin_axis_name}-slice",
             )
-            return _meta, _slider
+            _meta_ui = mo.ui.table(
+                _meta.to_dicts(),
+                pagination=False,
+                selection=None,
+                show_download=False,
+            )
+            return _meta_ui, _slider
 
         _anchor_meta, _anchor_slice_slider = _browser_meta("Anchor", _anchor_view)
         _target_meta, _target_slice_slider = _browser_meta("Target", _target_view)
@@ -1596,6 +1608,12 @@ def _(
                 },
             ]
         )
+        _metrics_ui = mo.ui.table(
+            _metrics.to_dicts(),
+            pagination=False,
+            selection=None,
+            show_download=False,
+        )
         _detail_panel = mo.vstack(
             [
                 mo.md(
@@ -1604,9 +1622,9 @@ def _(
                     f"delta A={float(_record['delta_a_mm']):.1f} mm, "
                     f"delta S={float(_record['delta_s_mm']):.1f} mm)"
                 ),
-                _metrics,
+                _metrics_ui,
                 mo.md("### Patch quality"),
-                _patch_quality,
+                _patch_quality_ui,
                 mo.hstack(
                     [
                         mo.vstack(
@@ -1715,11 +1733,17 @@ def _(
                 {"sample": "target", "visible_patch_centers": _target_visible, "slice_index": int(target_slice_slider.value)},
             ]
         )
+        _browser_stats_ui = mo.ui.table(
+            _browser_stats.to_dicts(),
+            pagination=False,
+            selection=None,
+            show_download=False,
+        )
 
         _browser_ui = mo.vstack(
             [
                 mo.md("### Scan browser"),
-                _browser_stats,
+                _browser_stats_ui,
                 mo.hstack(
                     [
                         mo.vstack(
