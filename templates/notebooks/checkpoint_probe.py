@@ -172,10 +172,40 @@ with app.setup:
             raise KeyError(f"Could not find view metadata for sample_index={sample_index}, view_index={view_index}")
         return dict(matches.row(0, named=True))
 
+    def lookup_view_relative_patch_centers_pt(
+        probe_state: Mapping[str, object],
+        *,
+        sample_index: int,
+        view_index: int,
+    ) -> np.ndarray | None:
+        positions_views_source = probe_state.get("positions_views_source")
+        if positions_views_source is not None:
+            tensor = positions_views_source[int(sample_index), int(view_index)]
+            return np.asarray(tensor.detach().cpu().numpy(), dtype=np.float32)
+
+        examples = probe_state.get("examples")
+        if examples is not None:
+            result = examples[int(sample_index)]["views"][int(view_index)]["result"]
+            return np.asarray(result["relative_patch_centers_pt"], dtype=np.float32)
+
+        return None
+
+    def lookup_view_window_params(
+        probe_state: Mapping[str, object],
+        *,
+        sample_index: int,
+        view_index: int,
+    ) -> tuple[float, float] | None:
+        examples = probe_state.get("examples")
+        if examples is None:
+            return None
+        result = examples[int(sample_index)]["views"][int(view_index)]["result"]
+        return float(result["wc"]), float(result["ww"])
+
     _THIN_AXIS_BY_NAME = {"x": 0, "y": 1, "z": 2}
 
     @lru_cache(maxsize=12)
-    def load_canonical_volume(nifti_path: str) -> np.ndarray:
+    def load_canonical_scan(nifti_path: str) -> tuple[np.ndarray, np.ndarray]:
         raw = nib.load(str(nifti_path))
         try:
             img = nib.as_closest_canonical(raw)
@@ -186,7 +216,10 @@ with app.setup:
             data = data[..., 0]
         if data.ndim != 3:
             raise ValueError(f"Expected a 3D NIfTI volume, got shape={tuple(data.shape)} for {nifti_path}")
-        return data
+        return data, np.asarray(img.affine, dtype=np.float32)
+
+    def load_canonical_volume(nifti_path: str) -> np.ndarray:
+        return load_canonical_scan(nifti_path)[0]
 
     def render_windowed_slice(
         view_row: Mapping[str, object],
@@ -195,13 +228,33 @@ with app.setup:
         target_long_side: int = 420,
     ) -> Image.Image:
         nifti_path = str(view_row.get("resolved_nifti_path") or view_row.get("series_path") or "")
-        volume = load_canonical_volume(nifti_path)
+        volume, affine = load_canonical_scan(nifti_path)
+        affine_inv = np.linalg.inv(affine)
         thin_axis_name = str(view_row.get("native_thin_axis_name", "z")).lower()
         thin_axis = _THIN_AXIS_BY_NAME.get(thin_axis_name, 2)
-        prism_center_vox = np.asarray(view_row.get("prism_center_vox", [0, 0, 0]), dtype=np.int64).reshape(3)
-        patch_centers_vox = np.asarray(view_row.get("patch_centers_vox", []), dtype=np.int64).reshape(-1, 3)
-        wc = float(view_row.get("wc", 0.0))
-        ww = max(float(view_row.get("ww", 1.0)), 1e-3)
+        if view_row.get("prism_center_vox") is not None:
+            prism_center_vox = np.asarray(view_row.get("prism_center_vox", [0, 0, 0]), dtype=np.int64).reshape(3)
+        else:
+            prism_center_pt = np.asarray(view_row.get("prism_center_pt", [0.0, 0.0, 0.0]), dtype=np.float32).reshape(3)
+            prism_center_vox = np.rint(nib.affines.apply_affine(affine_inv, prism_center_pt.reshape(1, 3))).astype(np.int64)[0]
+        patch_centers_vox_raw = np.asarray(view_row.get("patch_centers_vox", []), dtype=np.float32).reshape(-1, 3)
+        if patch_centers_vox_raw.size:
+            patch_centers_vox = np.rint(patch_centers_vox_raw).astype(np.int64)
+        else:
+            patch_centers_pt = np.asarray(view_row.get("patch_centers_pt", []), dtype=np.float32).reshape(-1, 3)
+            if patch_centers_pt.size:
+                patch_centers_vox = np.rint(nib.affines.apply_affine(affine_inv, patch_centers_pt)).astype(np.int64)
+            else:
+                patch_centers_vox = np.empty((0, 3), dtype=np.int64)
+        wc = view_row.get("wc")
+        ww = view_row.get("ww")
+        if wc is None or ww is None or not np.isfinite(float(ww)) or float(ww) <= 1e-6:
+            low_p = float(np.percentile(volume, 1.0))
+            high_p = float(np.percentile(volume, 99.0))
+            wc = 0.5 * (low_p + high_p)
+            ww = max(high_p - low_p, 1e-3)
+        wc = float(wc)
+        ww = max(float(ww), 1e-3)
         slice_value = int(np.clip(int(slice_index), 0, int(volume.shape[thin_axis]) - 1))
 
         if thin_axis == 0:
@@ -237,7 +290,7 @@ with app.setup:
         for point in patch_xy[patch_mask]:
             cx = float(point[0]) * scale_x
             cy = float(point[1]) * scale_y
-            draw.ellipse((cx - 3, cy - 3, cx + 3, cy + 3), outline=(0, 255, 255), width=2)
+            draw.ellipse((cx - 6, cy - 6, cx + 6, cy + 6), fill=(0, 255, 255), outline=(0, 0, 0), width=2)
 
         px = float(prism_xy[0]) * scale_x
         py = float(prism_xy[1]) * scale_y
@@ -869,6 +922,7 @@ def _(
         "reconstruction_rows": _reconstruction_rows,
         "direction_embeddings_raw": _direction_embeddings,
         "patches_views_source": _cache["patches_views"] if _cache is not None else None,
+        "positions_views_source": _cache["positions_views"] if _cache is not None else None,
         "effective_modalities": _modalities,
         "data_source": _data_source,
         "cache_summary": dict(_cache["summary"]) if _cache is not None else None,
@@ -1368,7 +1422,9 @@ def _(
     dataframe_records,
     load_canonical_volume,
     lookup_view_patches,
+    lookup_view_relative_patch_centers_pt,
     lookup_view_row,
+    lookup_view_window_params,
     metric_display,
     mo,
     np,
@@ -1407,6 +1463,46 @@ def _(
             sample_index=int(_record["target_sample_index"]),
             view_index=int(_record["target_view_index"]),
         )
+        _anchor_relative_patch_centers_pt = lookup_view_relative_patch_centers_pt(
+            probe_state,
+            sample_index=int(_record["anchor_sample_index"]),
+            view_index=int(_record["anchor_view_index"]),
+        )
+        _target_relative_patch_centers_pt = lookup_view_relative_patch_centers_pt(
+            probe_state,
+            sample_index=int(_record["target_sample_index"]),
+            view_index=int(_record["target_view_index"]),
+        )
+        if _anchor_relative_patch_centers_pt is not None:
+            _anchor_view["patch_centers_pt"] = (
+                _anchor_relative_patch_centers_pt
+                + np.asarray(_anchor_view["prism_center_pt"], dtype=np.float32).reshape(1, 3)
+            ).tolist()
+        if _target_relative_patch_centers_pt is not None:
+            _target_view["patch_centers_pt"] = (
+                _target_relative_patch_centers_pt
+                + np.asarray(_target_view["prism_center_pt"], dtype=np.float32).reshape(1, 3)
+            ).tolist()
+        _anchor_window_params = lookup_view_window_params(
+            probe_state,
+            sample_index=int(_record["anchor_sample_index"]),
+            view_index=int(_record["anchor_view_index"]),
+        )
+        _target_window_params = lookup_view_window_params(
+            probe_state,
+            sample_index=int(_record["target_sample_index"]),
+            view_index=int(_record["target_view_index"]),
+        )
+        if _anchor_window_params is not None:
+            _anchor_view["wc"], _anchor_view["ww"] = _anchor_window_params
+            _anchor_view["window_source"] = "sampled"
+        else:
+            _anchor_view["window_source"] = "volume_p01_p99_fallback"
+        if _target_window_params is not None:
+            _target_view["wc"], _target_view["ww"] = _target_window_params
+            _target_view["window_source"] = "sampled"
+        else:
+            _target_view["window_source"] = "volume_p01_p99_fallback"
         _anchor_patches = lookup_view_patches(
             probe_state,
             sample_index=int(_record["anchor_sample_index"]),
@@ -1449,8 +1545,13 @@ def _(
                         "thin_axis": _thin_axis_name,
                         "wc": round(float(view_row.get("wc", 0.0)), 1),
                         "ww": round(float(view_row.get("ww", 0.0)), 1),
+                        "window_source": str(view_row.get("window_source", "unknown")),
                         "prism_center_vox": str(tuple(int(v) for v in _prism_center_vox.tolist())),
-                        "patch_centers_total": int(_patch_centers_vox.shape[0]),
+                        "patch_centers_total": int(
+                            _patch_centers_vox.shape[0]
+                            if _patch_centers_vox.size
+                            else np.asarray(view_row.get("patch_centers_pt", []), dtype=np.float32).reshape(-1, 3).shape[0]
+                        ),
                     }
                 ]
             )
@@ -1571,6 +1672,7 @@ def _(
 @app.cell
 def _(
     anchor_slice_slider,
+    load_canonical_scan,
     selected_position_payload,
     target_slice_slider,
     mo,
@@ -1587,9 +1689,18 @@ def _(
         def _visible_count(view_row: dict[str, object], slice_value: int) -> int:
             _thin_axis_name = str(view_row.get("native_thin_axis_name", "z")).lower()
             _thin_axis = {"x": 0, "y": 1, "z": 2}.get(_thin_axis_name, 2)
-            _patch_centers_vox = np.asarray(view_row.get("patch_centers_vox", []), dtype=np.int64).reshape(-1, 3)
-            if _patch_centers_vox.size == 0:
-                return 0
+            _patch_centers_vox = np.asarray(view_row.get("patch_centers_vox", []), dtype=np.float32).reshape(-1, 3)
+            if not _patch_centers_vox.size:
+                _patch_centers_pt = np.asarray(view_row.get("patch_centers_pt", []), dtype=np.float32).reshape(-1, 3)
+                if not _patch_centers_pt.size:
+                    return 0
+                _resolved_path = str(view_row.get("resolved_nifti_path") or view_row.get("series_path") or "")
+                _, _affine = load_canonical_scan(_resolved_path)
+                _patch_centers_vox = np.rint(
+                    nib.affines.apply_affine(np.linalg.inv(_affine), _patch_centers_pt)
+                ).astype(np.int64)
+            else:
+                _patch_centers_vox = np.rint(_patch_centers_vox).astype(np.int64)
             return int(np.sum(_patch_centers_vox[:, _thin_axis] == int(slice_value)))
 
         _anchor_visible = _visible_count(_anchor_view, int(anchor_slice_slider.value))

@@ -737,6 +737,12 @@ def build_eval_batch(examples: Sequence[Mapping[str, Any]], *, sample_offset: in
                     "native_thin_axis_name": str(result.get("native_thin_axis_name", "")),
                     "prism_center_vox": tuple(int(v) for v in np.asarray(result["prism_center_vox"]).tolist()),
                     "prism_center_pt": tuple(float(v) for v in np.asarray(result["prism_center_pt"]).tolist()),
+                    "patch_centers_vox": [
+                        tuple(int(v) for v in center)
+                        for center in np.asarray(result["patch_centers_vox"], dtype=np.int64).tolist()
+                    ],
+                    "wc": float(result.get("wc", 0.0)),
+                    "ww": float(result.get("ww", 0.0)),
                 }
             )
 
