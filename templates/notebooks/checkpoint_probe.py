@@ -1392,6 +1392,9 @@ def _(
 
     if not _selected_records:
         _detail_panel = mo.callout("Click a total-heatmap cell to inspect the two sampled positions behind that decoder comparison.", kind="info")
+        _selected_position_payload = None
+        _anchor_slice_slider = None
+        _target_slice_slider = None
     else:
         _record = _selected_records[0]
         _anchor_view = lookup_view_row(
@@ -1430,7 +1433,7 @@ def _(
                 pl.col("frac_high_clip").round(3),
             ]
         )
-        def _slice_browser(title: str, view_row: dict[str, object]):
+        def _browser_meta(title: str, view_row: dict[str, object]) -> tuple[pl.DataFrame, object]:
             _thin_axis_name = str(view_row.get("native_thin_axis_name", "z")).lower()
             _thin_axis = {"x": 0, "y": 1, "z": 2}.get(_thin_axis_name, 2)
             _resolved_path = str(view_row.get("resolved_nifti_path") or view_row.get("series_path") or "")
@@ -1438,18 +1441,6 @@ def _(
             _prism_center_vox = np.asarray(view_row.get("prism_center_vox", [0, 0, 0]), dtype=np.int64).reshape(3)
             _patch_centers_vox = np.asarray(view_row.get("patch_centers_vox", []), dtype=np.int64).reshape(-1, 3)
             _default_slice = int(np.clip(int(_prism_center_vox[_thin_axis]), 0, int(_volume.shape[_thin_axis]) - 1))
-            _slice_slider = mo.ui.slider(
-                start=0,
-                stop=max(int(_volume.shape[_thin_axis]) - 1, 0),
-                step=1,
-                value=_default_slice,
-                label=f"{title} {_thin_axis_name}-slice",
-            )
-            _visible_centers = (
-                int(np.sum(_patch_centers_vox[:, _thin_axis] == int(_slice_slider.value)))
-                if _patch_centers_vox.size
-                else 0
-            )
             _meta = pl.DataFrame(
                 [
                     {
@@ -1459,23 +1450,21 @@ def _(
                         "wc": round(float(view_row.get("wc", 0.0)), 1),
                         "ww": round(float(view_row.get("ww", 0.0)), 1),
                         "prism_center_vox": str(tuple(int(v) for v in _prism_center_vox.tolist())),
-                        "visible_patch_centers": _visible_centers,
+                        "patch_centers_total": int(_patch_centers_vox.shape[0]),
                     }
                 ]
             )
-            return mo.vstack(
-                [
-                    mo.md(f"### {title} scan"),
-                    _meta,
-                    mo.md(f"`{_resolved_path}`"),
-                    _slice_slider,
-                    mo.image(render_windowed_slice(view_row, slice_index=int(_slice_slider.value)), width=420),
-                    mo.md("Red = prism center. Cyan = patch centers on the current slice."),
-                ]
+            _slider = mo.ui.slider(
+                start=0,
+                stop=max(int(_volume.shape[_thin_axis]) - 1, 0),
+                step=1,
+                value=_default_slice,
+                label=f"{title} {_thin_axis_name}-slice",
             )
+            return _meta, _slider
 
-        _anchor_browser = _slice_browser("Anchor", _anchor_view)
-        _target_browser = _slice_browser("Target", _target_view)
+        _anchor_meta, _anchor_slice_slider = _browser_meta("Anchor", _anchor_view)
+        _target_meta, _target_slice_slider = _browser_meta("Target", _target_view)
         _metrics = pl.DataFrame(
             [
                 {"axis": "total", "truth": "-", "pred": "-", "correct": "-", "accuracy": metric_display(float(_record["total_accuracy"]))},
@@ -1529,9 +1518,36 @@ def _(
                         ),
                     ]
                 ),
-                mo.hstack([_anchor_browser, _target_browser]),
+                mo.hstack(
+                    [
+                        mo.vstack(
+                            [
+                                mo.md("### Anchor scan"),
+                                _anchor_meta,
+                                mo.md(f"`{str(_anchor_view.get('resolved_nifti_path') or _anchor_view.get('series_path') or '')}`"),
+                                _anchor_slice_slider,
+                            ]
+                        ),
+                        mo.vstack(
+                            [
+                                mo.md("### Target scan"),
+                                _target_meta,
+                                mo.md(f"`{str(_target_view.get('resolved_nifti_path') or _target_view.get('series_path') or '')}`"),
+                                _target_slice_slider,
+                            ]
+                        ),
+                    ]
+                ),
             ]
         )
+        _selected_position_payload = {
+            "record": dict(_record),
+            "anchor_view": dict(_anchor_view),
+            "target_view": dict(_target_view),
+        }
+    anchor_slice_slider = _anchor_slice_slider
+    target_slice_slider = _target_slice_slider
+    selected_position_payload = _selected_position_payload
     _ui = mo.vstack(
         [
             mo.md("## Selected Position Comparison"),
@@ -1549,6 +1565,66 @@ def _(
         ]
     )
     _ui
+    return anchor_slice_slider, selected_position_payload, target_slice_slider
+
+
+@app.cell
+def _(
+    anchor_slice_slider,
+    selected_position_payload,
+    target_slice_slider,
+    mo,
+    np,
+    pl,
+    render_windowed_slice,
+):
+    if selected_position_payload is None or anchor_slice_slider is None or target_slice_slider is None:
+        _browser_ui = mo.md("")
+    else:
+        _anchor_view = dict(selected_position_payload["anchor_view"])
+        _target_view = dict(selected_position_payload["target_view"])
+
+        def _visible_count(view_row: dict[str, object], slice_value: int) -> int:
+            _thin_axis_name = str(view_row.get("native_thin_axis_name", "z")).lower()
+            _thin_axis = {"x": 0, "y": 1, "z": 2}.get(_thin_axis_name, 2)
+            _patch_centers_vox = np.asarray(view_row.get("patch_centers_vox", []), dtype=np.int64).reshape(-1, 3)
+            if _patch_centers_vox.size == 0:
+                return 0
+            return int(np.sum(_patch_centers_vox[:, _thin_axis] == int(slice_value)))
+
+        _anchor_visible = _visible_count(_anchor_view, int(anchor_slice_slider.value))
+        _target_visible = _visible_count(_target_view, int(target_slice_slider.value))
+        _browser_stats = pl.DataFrame(
+            [
+                {"sample": "anchor", "visible_patch_centers": _anchor_visible, "slice_index": int(anchor_slice_slider.value)},
+                {"sample": "target", "visible_patch_centers": _target_visible, "slice_index": int(target_slice_slider.value)},
+            ]
+        )
+
+        _browser_ui = mo.vstack(
+            [
+                mo.md("### Scan browser"),
+                _browser_stats,
+                mo.hstack(
+                    [
+                        mo.vstack(
+                            [
+                                mo.image(render_windowed_slice(_anchor_view, slice_index=int(anchor_slice_slider.value)), width=420),
+                                mo.md("Anchor: red = prism center, cyan = patch centers on this slice."),
+                            ]
+                        ),
+                        mo.vstack(
+                            [
+                                mo.image(render_windowed_slice(_target_view, slice_index=int(target_slice_slider.value)), width=420),
+                                mo.md("Target: red = prism center, cyan = patch centers on this slice."),
+                            ]
+                        ),
+                    ]
+                ),
+            ]
+        )
+
+    _browser_ui
     return
 
 
