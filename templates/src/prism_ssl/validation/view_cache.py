@@ -404,30 +404,10 @@ def _eligible_scan_row(row: Mapping[str, Any], spec: ValidationBuilderSpec, targ
     }
 
 
-def _select_validation_scans(eligible_rows: Sequence[Mapping[str, Any]], *, target_scans: int, seed: int) -> list[dict[str, Any]]:
-    remaining = [dict(row) for row in eligible_rows]
-    if len(remaining) < int(target_scans):
-        raise ValueError(f"Requested {target_scans} scans but only {len(remaining)} eligible scans are available")
-
-    selected: list[dict[str, Any]] = []
-    counts = {target.key: 0 for target in SEMANTIC_TARGETS}
-    while len(selected) < int(target_scans):
-        best_idx = -1
-        best_score: tuple[float, int, int] | None = None
-        for idx, row in enumerate(remaining):
-            keys = [str(k) for k in row.get("available_semantic_keys", [])]
-            primary = float(sum(1.0 / (1.0 + counts.get(key, 0)) for key in keys))
-            secondary = int(len(keys))
-            tertiary = -int(_stable_seed(seed, row["scan_id"], "select"))
-            score = (primary, secondary, tertiary)
-            if best_score is None or score > best_score:
-                best_score = score
-                best_idx = idx
-        chosen = remaining.pop(best_idx)
-        selected.append(chosen)
-        for key in chosen.get("available_semantic_keys", []):
-            counts[str(key)] += 1
-    return selected
+def _shuffled_ct_catalog_rows(catalog: str | Path | pl.DataFrame, *, seed: int) -> list[dict[str, Any]]:
+    rows = _ct_catalog_rows(catalog)
+    rows.sort(key=lambda row: _stable_seed(seed, build_scan_id(dict(row)), "candidate_order"))
+    return rows
 
 
 def _target_schedule(available_keys: Sequence[str], views_per_scan: int) -> list[str]:
@@ -652,11 +632,24 @@ def build_ct_view_validation_cache(
         )
 
     eligible_rows: list[dict[str, Any]] = []
-    catalog_rows = _ct_catalog_rows(catalog)
+    catalog_rows = _shuffled_ct_catalog_rows(catalog, seed=int(spec.seed))
     for row_index, row in enumerate(catalog_rows, start=1):
         eligible = _eligible_scan_row(row, spec, target_label_ids)
         if eligible is not None:
             eligible_rows.append(eligible)
+            if len(eligible_rows) >= int(spec.n_scans):
+                if progress is not None:
+                    progress(
+                        {
+                            "stage": "eligible_scans",
+                            "status": "complete",
+                            "processed_rows": int(row_index),
+                            "total_rows": int(len(catalog_rows)),
+                            "eligible_scans": int(len(eligible_rows)),
+                            "early_stop": True,
+                        }
+                    )
+                break
         if progress is not None and (row_index % 128 == 0 or row_index == len(catalog_rows)):
             progress(
                 {
@@ -673,7 +666,7 @@ def build_ct_view_validation_cache(
     if len(eligible_df) < int(spec.n_scans):
         raise RuntimeError(f"Only {len(eligible_df)} eligible CT scans with TotalSegmentator targets found; need {spec.n_scans}")
 
-    selected_rows = _select_validation_scans(eligible_rows, target_scans=int(spec.n_scans), seed=int(spec.seed))
+    selected_rows = [dict(row) for row in eligible_rows[: int(spec.n_scans)]]
 
     if progress is not None:
         progress(
@@ -682,6 +675,7 @@ def build_ct_view_validation_cache(
                 "status": "complete",
                 "eligible_scans": int(len(eligible_rows)),
                 "selected_scans": int(len(selected_rows)),
+                "selection_mode": "deterministic_random_early_stop",
             }
         )
 

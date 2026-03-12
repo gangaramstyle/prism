@@ -152,7 +152,7 @@ def test_ct_view_cache_build_and_load(tmp_path: Path) -> None:
     assert len(sorted((output_dir / "shards").glob("shard_*.pt"))) >= 1
 
     eligible = pl.read_parquet(output_dir / "eligible_scans.parquet")
-    assert eligible.height == 3
+    assert eligible.height == 2
 
     cache = load_ct_view_validation_cache(output_dir)
     assert cache["scans_df"].height == 2
