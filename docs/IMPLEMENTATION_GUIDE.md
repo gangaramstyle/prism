@@ -228,6 +228,114 @@ Loader and health metrics remain part of the run summary:
 - Only one durable local checkpoint is kept by default.
 - Broken scans are skipped, but the run aborts once the configured broken-ratio threshold is exceeded after the minimum-attempt gate.
 
+## Offline CT Semantic View Cache
+
+### Purpose
+The repo also includes an offline validation artifact builder for semantic CT views:
+- CT only
+- TotalSegmentator required
+- no training-loop integration
+
+The builder lives at [`templates/scripts/validation/build_ct_view_validation_cache.py`](/Users/vineethgangaram/prism/templates/scripts/validation/build_ct_view_validation_cache.py), and the implementation lives in [`templates/src/prism_ssl/validation/view_cache.py`](/Users/vineethgangaram/prism/templates/src/prism_ssl/validation/view_cache.py).
+
+The maintained default target is:
+- `128` scans
+- `16` single cached views per scan
+- `2048` total views
+- tensor payload below `5 GB`
+
+### Cache contract
+The cache is view-level, not pair-level.
+
+Directory layout:
+
+```text
+output_dir/
+  summary.json
+  build_config.json
+  eligible_scans.parquet
+  scans.parquet
+  views.parquet
+  shards/
+    shard_000.pt
+    ...
+```
+
+Each shard stores:
+
+```python
+{
+    "view_index": LongTensor[V],
+    "normalized_patches": Float16Tensor[V, N, 16, 16, 1],
+    "raw_patches": Float16Tensor[V, N, 16, 16, 1],
+    "relative_patch_centers_pt": Float32Tensor[V, N, 3],
+    "patch_centers_pt": Float32Tensor[V, N, 3],
+    "patch_centers_vox": Int32Tensor[V, N, 3],
+}
+```
+
+Metadata rows preserve:
+- `scan_id`
+- `series_id`
+- `protocol_key`
+- `series_description`
+- `semantic_target_key`
+- `prism_center_pt`
+- `patch_vox_shape`
+- `source_patch_mm`
+- `wc`
+- `ww`
+- local patch statistics
+- shard index and shard-local offset
+
+### Semantic target set
+The cache uses a fixed curated semantic target set:
+- heart
+- lung
+- esophagus
+- stomach
+- right kidney
+- spleen
+- bladder
+- pancreas
+
+TotalSegmentator label-name resolution is explicit and checked at startup. The builder fails fast if any required label mapping is missing.
+
+### View construction
+Each cached item is a single semantic view:
+1. choose a semantic target for the scan
+2. sample a valid prism center from TotalSegmentator voxels for that target
+3. sample `source_patch_mm` using the same size range and distribution as training
+4. extract raw native-plane patches around that center
+5. apply validation-only prism-local window sampling with bounded retries
+6. reject views that remain uninformative after retries
+
+The informative-view gate rejects views when:
+- normalized patch std is too low
+- too many pixels saturate near `-1`
+- too many pixels saturate near `+1`
+
+This local-window retry path is validation-specific. The actual training sampler still uses the normal training path.
+
+### Loss computability
+The cache is designed so the current training objectives can be recomputed offline.
+
+Derived from ordered within-scan view pairs:
+- pair relation
+  - `center_delta_mm = center_b - center_a`
+  - `center_distance_mm = ||center_delta_mm||`
+  - `window_delta = [wc_b - wc_a, ww_b - ww_a]`
+
+Stored directly per view:
+- exact-instance SupCon label via `series_id`
+- protocol-family SupCon label via `protocol_key`
+- patch-size target via `source_patch_mm`
+- self-MIM inputs via normalized patches and relative patch positions
+
+Helper utilities build the full ordered within-scan comparison grid at load time:
+- `16 x 16 = 256` ordered pairs per scan with self-pairs included
+- `16 x 15 = 240` ordered pairs per scan with self-pairs excluded
+
 ## Ablations
 The maintained ablation surface now focuses on:
 - exact-series SupCon weight

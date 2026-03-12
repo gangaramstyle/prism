@@ -47,6 +47,29 @@ Important defaults:
 7. Collate pairwise tensors plus exact-series and protocol-family labels.
 8. Train the pair-relation, dual-SupCon, self-MIM, and patch-size heads.
 
+## Offline validation cache
+The maintained validation artifact is an offline CT semantic view cache built with [`scripts/validation/build_ct_view_validation_cache.py`](/Users/vineethgangaram/prism/templates/scripts/validation/build_ct_view_validation_cache.py).
+
+Defaults:
+- CT only
+- TotalSegmentator required
+- `128` scans
+- `16` cached single views per scan
+- fixed semantic target set: heart, lung, esophagus, stomach, right kidney, spleen, bladder, pancreas
+- shard payloads in `.pt` plus metadata in parquet
+- full ordered within-scan comparison grid derived at load time (`16 x 16` per scan)
+
+The cache stores enough view-level tensors and metadata to reconstruct the current training losses offline:
+- pair-relation targets from derived within-scan view pairs
+- exact-instance and protocol-family SupCon labels
+- patch-size targets
+- self-MIM inputs
+
+The cache builder uses prism-local window retries to filter uninformative all-black or all-white views. This is validation-specific behavior and is not wired into the training loop.
+
+Example build command:
+`uv run python scripts/validation/build_ct_view_validation_cache.py --config-path configs/baseline.yaml --catalog-path data/pmbb_catalog.csv.gz`
+
 ## Betty notes
 - W&B online is the default cluster mode.
 - Heavy transient files go under `/tmp/$USER`.

@@ -140,6 +140,24 @@ def compute_robust_stats(data: np.ndarray) -> tuple[float, float, float, float]:
     return median, std, float(p_low), float(p_high)
 
 
+def compute_patch_robust_stats(raw_patches: np.ndarray) -> tuple[float, float, float, float]:
+    """Return robust stats over a sampled patch stack."""
+    arr = np.asarray(raw_patches, dtype=np.float32)
+    if arr.size == 0:
+        return 0.0, 1.0, 0.0, 1.0
+    return compute_robust_stats(arr.reshape(-1))
+
+
+def apply_window_to_raw_patches(raw_patches: np.ndarray, wc: float, ww: float) -> tuple[np.ndarray, float, float]:
+    """Apply window center/width to raw patches and normalize to [-1, 1]."""
+    ww_value = max(float(ww), 1e-3)
+    w_min = float(wc) - 0.5 * ww_value
+    w_max = float(wc) + 0.5 * ww_value
+    clipped = np.clip(np.asarray(raw_patches, dtype=np.float32), w_min, w_max)
+    normalized = ((clipped - w_min) / max(w_max - w_min, 1e-6)) * 2.0 - 1.0
+    return normalized.astype(np.float32, copy=False), float(w_min), float(w_max)
+
+
 def _affine_linear_translation(affine: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     arr = np.asarray(affine, dtype=np.float32)
     if arr.shape != (4, 4):
@@ -408,20 +426,19 @@ class NiftiScan:
 
         return out
 
-    def train_sample(
+    def sample_view_raw(
         self,
         n_patches: int,
         *,
         seed: int | None = None,
         source_patch_mm: float | None = None,
-        wc: float | None = None,
-        ww: float | None = None,
         sampling_radius_mm: float | None = None,
         subset_center_vox: np.ndarray | None = None,
         patch_centers_vox: np.ndarray | None = None,
         sampled_body_center: bool | None = None,
         target_patch_size: int | None = None,
     ) -> dict[str, Any]:
+        """Sample a prism view and return raw patches plus geometry metadata."""
         resolved_patch_size = int(self.target_patch_size if target_patch_size is None else target_patch_size)
         rng = np.random.default_rng(seed)
         resolved_source_patch_mm = (
@@ -439,8 +456,6 @@ class NiftiScan:
         patch_vox = self.mm_patch_vox_shape(resolved_source_patch_mm)
 
         min_center_idx, max_center_idx = self._center_bounds_for_full_patch(patch_vox)
-
-        # No artificial radius clamping — use the requested radius as-is
         sampling_radius_mm = float(rng.uniform(20.0, 30.0)) if sampling_radius_mm is None else float(sampling_radius_mm)
         sampling_radius_mm = max(sampling_radius_mm, 0.0)
 
@@ -471,7 +486,6 @@ class NiftiScan:
                 attempts += 1
                 if self._patch_has_overlap(center, patch_vox):
                     centers.append(center)
-            # If we couldn't fill all patches, duplicate last valid or use prism center
             while len(centers) < int(n_patches):
                 centers.append(centers[-1] if centers else prism_center.copy())
             centers_arr = np.asarray(centers, dtype=np.int64)
@@ -485,25 +499,13 @@ class NiftiScan:
                 )
 
         raw_patches = self._extract_patches(centers_arr, patch_vox, resolved_patch_size)
-
-        if wc is None or ww is None:
-            wc = float(rng.uniform(self.robust_median - self.robust_std, self.robust_median + self.robust_std))
-            ww = float(rng.uniform(2.0 * self.robust_std, 6.0 * self.robust_std))
-        ww = max(float(ww), 1e-3)
-
-        w_min = float(wc) - 0.5 * ww
-        w_max = float(wc) + 0.5 * ww
-        clipped = np.clip(raw_patches, w_min, w_max)
-        normalized = ((clipped - w_min) / max(w_max - w_min, 1e-6)) * 2.0 - 1.0
-
         prism_center_pt = voxel_points_to_world(prism_center.astype(np.float32), self.affine)[0]
         patch_centers_pt = voxel_points_to_world(centers_arr.astype(np.float32), self.affine)
         relative_patch_centers_pt = patch_centers_pt - prism_center_pt
-
         geometry = self.geometry
+
         return {
-            "normalized_patches": normalized.astype(np.float32, copy=False),
-            "raw_patches": raw_patches,
+            "raw_patches": raw_patches.astype(np.float32, copy=False),
             "target_patch_size": int(resolved_patch_size),
             "source_patch_mm": float(resolved_source_patch_mm),
             "patch_vox_shape": tuple(int(v) for v in patch_vox.tolist()),
@@ -515,13 +517,49 @@ class NiftiScan:
             "native_thin_axis": int(geometry.thin_axis),
             "native_thin_axis_name": str(geometry.thin_axis_name),
             "native_acquisition_plane": str(geometry.acquisition_plane),
-            "wc": float(wc),
-            "ww": float(ww),
-            "w_min": float(w_min),
-            "w_max": float(w_max),
             "sampling_radius_mm": float(sampling_radius_mm),
             "body_sampling_source": str(self.body_sampling_source),
             "sampled_body_center": bool(center_from_body),
+        }
+
+    def train_sample(
+        self,
+        n_patches: int,
+        *,
+        seed: int | None = None,
+        source_patch_mm: float | None = None,
+        wc: float | None = None,
+        ww: float | None = None,
+        sampling_radius_mm: float | None = None,
+        subset_center_vox: np.ndarray | None = None,
+        patch_centers_vox: np.ndarray | None = None,
+        sampled_body_center: bool | None = None,
+        target_patch_size: int | None = None,
+    ) -> dict[str, Any]:
+        raw_view = self.sample_view_raw(
+            n_patches,
+            seed=seed,
+            source_patch_mm=source_patch_mm,
+            sampling_radius_mm=sampling_radius_mm,
+            subset_center_vox=subset_center_vox,
+            patch_centers_vox=patch_centers_vox,
+            sampled_body_center=sampled_body_center,
+            target_patch_size=target_patch_size,
+        )
+        rng = np.random.default_rng(seed)
+        raw_patches = np.asarray(raw_view["raw_patches"], dtype=np.float32)
+        if wc is None or ww is None:
+            wc = float(rng.uniform(self.robust_median - self.robust_std, self.robust_median + self.robust_std))
+            ww = float(rng.uniform(2.0 * self.robust_std, 6.0 * self.robust_std))
+        ww_value = max(float(ww), 1e-3)
+        normalized, w_min, w_max = apply_window_to_raw_patches(raw_patches, wc=float(wc), ww=ww_value)
+        return {
+            **raw_view,
+            "normalized_patches": normalized,
+            "wc": float(wc),
+            "ww": float(ww_value),
+            "w_min": float(w_min),
+            "w_max": float(w_max),
         }
 
 

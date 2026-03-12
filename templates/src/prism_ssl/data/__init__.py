@@ -15,6 +15,8 @@ from prism_ssl.data.preflight import (
     NiftiResolutionError,
     ScanGeometry,
     SmallScanError,
+    apply_window_to_raw_patches,
+    compute_patch_robust_stats,
     compute_robust_stats,
     infer_scan_geometry,
     load_nifti_scan,
@@ -38,6 +40,8 @@ __all__ = [
     "NiftiResolutionError",
     "ScanGeometry",
     "SmallScanError",
+    "apply_window_to_raw_patches",
+    "compute_patch_robust_stats",
     "compute_robust_stats",
     "infer_scan_geometry",
     "load_nifti_scan",
@@ -50,4 +54,3 @@ __all__ = [
     "BrokenScanRateExceeded",
     "ShardedScanDataset",
 ]
-
