@@ -21,9 +21,11 @@ from prism_ssl.config.schema import ScanRecord
 from prism_ssl.data import (
     apply_window_to_raw_patches,
     compute_patch_robust_stats,
+    infer_scan_geometry,
     load_catalog,
     load_nifti_scan,
     normalize_series_description,
+    resolve_nifti_path,
 )
 from prism_ssl.data.catalog import build_scan_id, protocol_key_from_row, series_id_from_row
 from prism_ssl.data.filters import filter_modalities, filter_nonempty_series_path
@@ -241,6 +243,33 @@ def _load_totalseg_segmentation(series_path: str, reference_shape: tuple[int, in
         return None, ts_path
 
 
+def _load_nifti_metadata(series_path: str) -> tuple[str, tuple[int, int, int], np.ndarray, np.ndarray]:
+    nifti_path = resolve_nifti_path(series_path)
+    raw = nib.load(nifti_path)
+    try:
+        img = nib.as_closest_canonical(raw)
+    except Exception:
+        img = raw
+    shape = tuple(int(v) for v in img.shape[:3])
+    if len(shape) != 3:
+        raise ValueError(f"Expected 3D NIfTI for {series_path}, got shape={img.shape}")
+    affine = np.asarray(img.affine, dtype=np.float32)
+    linear = np.asarray(affine[:3, :3], dtype=np.float32)
+    spacing = np.linalg.norm(linear.astype(np.float64), axis=0).astype(np.float32)
+    if spacing.shape != (3,) or np.any(spacing <= 0):
+        header_zooms = np.asarray(img.header.get_zooms()[:3], dtype=np.float32)
+        spacing = np.clip(header_zooms, 1e-6, None)
+    return str(nifti_path), shape, affine, np.asarray(spacing, dtype=np.float32)
+
+
+def _mm_patch_vox_shape(shape_vox: Sequence[int], spacing_mm: np.ndarray, patch_mm: float) -> np.ndarray:
+    geometry = infer_scan_geometry(tuple(int(v) for v in shape_vox), tuple(float(v) for v in spacing_mm))
+    spacing = np.asarray(spacing_mm, dtype=np.float32).reshape(3)
+    n_vox = np.maximum(np.ceil(float(patch_mm) / np.clip(spacing, 1e-6, None)).astype(np.int64), 1)
+    n_vox[int(geometry.thin_axis)] = 1
+    return np.asarray(n_vox, dtype=np.int64)
+
+
 def _target_center_candidates(
     seg: np.ndarray,
     target_ids: Sequence[int],
@@ -335,22 +364,15 @@ def _sample_source_patch_mm(spec: ValidationBuilderSpec, rng: np.random.Generato
 def _eligible_scan_row(row: Mapping[str, Any], spec: ValidationBuilderSpec, target_label_ids: Mapping[str, Sequence[int]]) -> dict[str, Any] | None:
     record = _scan_record_from_row(row)
     try:
-        scan, nifti_path = load_nifti_scan(
-            record,
-            base_patch_mm=float(spec.source_patch_mm_max),
-            source_patch_mm_min=float(spec.source_patch_mm_min),
-            source_patch_mm_max=float(spec.source_patch_mm_max),
-            source_patch_mm_distribution=str(spec.source_patch_mm_distribution),
-            use_totalseg_body_centers=False,
-        )
+        nifti_path, shape_vox, affine, spacing = _load_nifti_metadata(record.series_path)
     except Exception:
         return None
 
-    seg, ts_path = _load_totalseg_segmentation(record.series_path, tuple(int(v) for v in scan.data.shape), scan.affine)
+    seg, ts_path = _load_totalseg_segmentation(record.series_path, tuple(int(v) for v in shape_vox), affine)
     if seg is None or not ts_path:
         return None
 
-    patch_vox = scan.mm_patch_vox_shape(float(spec.source_patch_mm_max))
+    patch_vox = _mm_patch_vox_shape(shape_vox, spacing, float(spec.source_patch_mm_max))
     counts: dict[str, int] = {}
     available: list[str] = []
     for target in SEMANTIC_TARGETS:
@@ -374,8 +396,8 @@ def _eligible_scan_row(row: Mapping[str, Any], spec: ValidationBuilderSpec, targ
         "series_path": record.series_path,
         "nifti_path": str(nifti_path),
         "totalseg_path": str(ts_path),
-        "shape_vox": [int(v) for v in scan.data.shape],
-        "spacing_mm": [float(v) for v in scan.spacing.tolist()],
+        "shape_vox": [int(v) for v in shape_vox],
+        "spacing_mm": [float(v) for v in spacing.tolist()],
         "available_semantic_keys": list(available),
         "semantic_voxel_counts_json": json.dumps(counts, sort_keys=True),
         "n_available_semantic_keys": int(len(available)),
@@ -630,10 +652,21 @@ def build_ct_view_validation_cache(
         )
 
     eligible_rows: list[dict[str, Any]] = []
-    for row in _ct_catalog_rows(catalog):
+    catalog_rows = _ct_catalog_rows(catalog)
+    for row_index, row in enumerate(catalog_rows, start=1):
         eligible = _eligible_scan_row(row, spec, target_label_ids)
         if eligible is not None:
             eligible_rows.append(eligible)
+        if progress is not None and (row_index % 128 == 0 or row_index == len(catalog_rows)):
+            progress(
+                {
+                    "stage": "eligible_scans",
+                    "status": "progress",
+                    "processed_rows": int(row_index),
+                    "total_rows": int(len(catalog_rows)),
+                    "eligible_scans": int(len(eligible_rows)),
+                }
+            )
 
     eligible_df = pl.DataFrame(eligible_rows).sort("scan_id") if eligible_rows else pl.DataFrame([])
     eligible_df.write_parquet(_cache_eligible_scans_path(output_root))
