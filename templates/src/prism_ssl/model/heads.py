@@ -14,6 +14,10 @@ from prism_ssl.model.backbone import AbsoluteSinCosPositionEmbedding3D, Transfor
 @dataclass
 class PrismModelOutput:
     pair_relation_logits: torch.Tensor | None = None  # [B, 5] => (x, y, z, wc, ww) sign logits
+    view_cls_a: torch.Tensor | None = None
+    view_cls_b: torch.Tensor | None = None
+    series_cls_a: torch.Tensor | None = None
+    series_cls_b: torch.Tensor | None = None
     proj_instance_a: torch.Tensor | None = None
     proj_instance_b: torch.Tensor | None = None
     proj_protocol_a: torch.Tensor | None = None
@@ -237,6 +241,10 @@ class PrismSSLModel(nn.Module):
 
         return PrismModelOutput(
             pair_relation_logits=pair_relation_logits,
+            view_cls_a=view_cls_a,
+            view_cls_b=view_cls_b,
+            series_cls_a=series_cls_a,
+            series_cls_b=series_cls_b,
             proj_instance_a=proj_instance_a,
             proj_instance_b=proj_instance_b,
             proj_protocol_a=proj_protocol_a,
@@ -248,4 +256,3 @@ class PrismSSLModel(nn.Module):
             mim_target_a=masked_patches_a,
             mim_target_b=masked_patches_b,
         )
-
