@@ -10,6 +10,7 @@
 #     "pyyaml",
 #     "timm",
 #     "torch",
+#     "wandb",
 # ]
 # ///
 
@@ -20,9 +21,12 @@ app = marimo.App(width="full")
 
 
 with app.setup:
+    import atexit
     import os
     import sys
+    import tempfile
     from pathlib import Path
+    from urllib.parse import urlparse
 
     import altair as alt
     import marimo as mo
@@ -58,6 +62,13 @@ def _(Image, Path, PrismSSLModel, build_ordered_within_scan_view_pairs, load_ct_
         "wc": "delta_wc",
         "ww": "delta_ww",
     }
+    session_tmp_dir = Path(
+        tempfile.mkdtemp(
+            prefix="prism_ssl_checkpoint_probe_",
+            dir=os.environ.get("TMPDIR", tempfile.gettempdir()),
+        )
+    )
+    atexit.register(lambda: __import__("shutil").rmtree(session_tmp_dir, ignore_errors=True))
 
     def default_checkpoint_path() -> str:
         env = str(os.environ.get("PRISM_NOTEBOOK_CHECKPOINT", "")).strip()
@@ -74,6 +85,46 @@ def _(Image, Path, PrismSSLModel, build_ordered_within_scan_view_pairs, load_ct_
         if env:
             return env
         return str((Path.home() / "prism-ssl-validation" / "ct_view_phase1").expanduser())
+
+    def default_wandb_artifact_ref() -> str:
+        return "prism-ssl-ckpt:latest"
+
+    def parse_wandb_run_ref(run_ref: str) -> tuple[str, str, str]:
+        text = str(run_ref).strip()
+        if not text:
+            raise ValueError("W&B run reference is empty")
+        if "://" in text:
+            parsed = urlparse(text)
+            parts = [part for part in parsed.path.split("/") if part]
+        else:
+            parts = [part for part in text.split("/") if part]
+        if len(parts) < 3:
+            raise ValueError(f"Could not parse W&B run reference: {text}")
+        if len(parts) >= 4 and parts[-2] == "runs":
+            entity, project, run_id = parts[-4], parts[-3], parts[-1]
+        else:
+            entity, project, run_id = parts[-3], parts[-2], parts[-1]
+        return entity, project, run_id
+
+    def download_wandb_run_checkpoint(run_ref: str, artifact_ref: str) -> Path:
+        import wandb
+
+        entity, project, run_id = parse_wandb_run_ref(run_ref)
+        full_ref = str(artifact_ref).strip()
+        if not full_ref:
+            raise ValueError("artifact_ref must be non-empty")
+        if "/" not in full_ref:
+            full_ref = f"{entity}/{project}/{full_ref}"
+        safe_name = full_ref.replace("/", "__").replace(":", "__")
+        download_root = session_tmp_dir / "wandb_artifacts" / run_id / safe_name
+        download_root.mkdir(parents=True, exist_ok=True)
+        api = wandb.Api(timeout=60)
+        artifact = api.artifact(full_ref, type="model")
+        artifact_dir = Path(artifact.download(root=str(download_root)))
+        candidates = sorted(artifact_dir.rglob("*.ckpt"))
+        if not candidates:
+            raise FileNotFoundError(f"No .ckpt files found in W&B artifact {full_ref}")
+        return candidates[0].resolve()
 
     def resolve_device(device_key: str) -> torch.device:
         key = str(device_key).strip().lower()
@@ -401,10 +452,13 @@ def _(Image, Path, PrismSSLModel, build_ordered_within_scan_view_pairs, load_ct_
         confusion_table,
         default_cache_dir,
         default_checkpoint_path,
+        default_wandb_artifact_ref,
+        download_wandb_run_checkpoint,
         enrich_pair_metadata,
         error_examples,
         evaluate_pair_relation,
         example_pair_images,
+        parse_wandb_run_ref,
         resolve_device,
         slice_summary_table,
     )
@@ -436,8 +490,10 @@ Use it to inspect:
 
 
 @app.cell
-def _(axis_order, default_cache_dir, default_checkpoint_path):
+def _(axis_order, default_cache_dir, default_checkpoint_path, default_wandb_artifact_ref):
     checkpoint_path = mo.ui.text(label="Checkpoint path", value=default_checkpoint_path())
+    wandb_run_ref = mo.ui.text(label="W&B run ref", value="")
+    wandb_artifact_ref = mo.ui.text(label="W&B artifact ref", value=default_wandb_artifact_ref())
     cache_dir = mo.ui.text(label="Validation cache dir", value=default_cache_dir())
     device_key = mo.ui.dropdown(options=["auto", "cpu", "cuda"], value="auto", label="Device")
     batch_size = mo.ui.slider(16, 512, value=128, step=16, label="Eval batch size")
@@ -463,38 +519,50 @@ def _(axis_order, default_cache_dir, default_checkpoint_path):
     run_eval = mo.ui.button(label="Load checkpoint and run evaluation")
     mo.vstack(
         [
-            mo.hstack([checkpoint_path, cache_dir]),
+            mo.hstack([checkpoint_path, wandb_run_ref]),
+            mo.hstack([wandb_artifact_ref, cache_dir]),
             mo.hstack([device_key, batch_size, max_scans, max_pairs]),
             mo.hstack([include_self, low_variation_threshold, axis_key, filter_mode]),
             mo.hstack([embedding_stream, embedding_color]),
             mo.hstack([slice_group, min_group_count, example_mode, run_eval]),
         ]
     )
-    return axis_key, batch_size, cache_dir, checkpoint_path, device_key, embedding_color, embedding_stream, example_mode, filter_mode, include_self, low_variation_threshold, max_pairs, max_scans, min_group_count, run_eval, slice_group
+    return axis_key, batch_size, cache_dir, checkpoint_path, device_key, embedding_color, embedding_stream, example_mode, filter_mode, include_self, low_variation_threshold, max_pairs, max_scans, min_group_count, run_eval, slice_group, wandb_artifact_ref, wandb_run_ref
 
 
 @app.cell
-def _(cache_dir, checkpoint_path, is_script_mode, run_eval):
+def _(cache_dir, checkpoint_path, is_script_mode, run_eval, wandb_run_ref):
     should_run = bool(is_script_mode or run_eval.value)
     checkpoint_exists = Path(checkpoint_path.value).expanduser().exists() if checkpoint_path.value.strip() else False
     cache_exists = Path(cache_dir.value).expanduser().exists() if cache_dir.value.strip() else False
+    wandb_enabled = bool(wandb_run_ref.value.strip())
     mo.ui.table(
         pl.DataFrame(
             {
-                "item": ["should_run", "checkpoint_exists", "cache_exists"],
-                "value": [str(should_run), str(checkpoint_exists), str(cache_exists)],
+                "item": ["should_run", "checkpoint_exists", "cache_exists", "wandb_enabled"],
+                "value": [str(should_run), str(checkpoint_exists), str(cache_exists), str(wandb_enabled)],
             }
         ),
         label="Input status",
     )
-    return cache_exists, checkpoint_exists, should_run
+    return cache_exists, checkpoint_exists, should_run, wandb_enabled
 
 
 @app.cell
-def _(build_model_from_checkpoint, checkpoint_exists, checkpoint_path, device_key, resolve_device, should_run):
+def _(build_model_from_checkpoint, checkpoint_exists, checkpoint_path, device_key, download_wandb_run_checkpoint, resolve_device, should_run, wandb_artifact_ref, wandb_enabled, wandb_run_ref):
     if should_run and checkpoint_exists:
         model, config, payload, device = build_model_from_checkpoint(checkpoint_path.value, device_key.value)
-        model_status = {"status": "loaded", "device": str(device), "step": int(payload.get("step", 0)), "n_patches": int(config.data.n_patches)}
+        model_status = {"status": "loaded_local", "device": str(device), "step": int(payload.get("step", 0)), "n_patches": int(config.data.n_patches)}
+    elif should_run and wandb_enabled:
+        ckpt_path = download_wandb_run_checkpoint(wandb_run_ref.value, wandb_artifact_ref.value)
+        model, config, payload, device = build_model_from_checkpoint(ckpt_path, device_key.value)
+        model_status = {
+            "status": "loaded_wandb_artifact",
+            "device": str(device),
+            "step": int(payload.get("step", 0)),
+            "n_patches": int(config.data.n_patches),
+            "checkpoint_path": str(ckpt_path),
+        }
     else:
         model = None
         device = resolve_device(device_key.value)
