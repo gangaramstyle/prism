@@ -13,6 +13,7 @@ set -euo pipefail
 
 REPO_ROOT="${REPO_ROOT:-$HOME/prism-ssl/templates}"
 cd "$REPO_ROOT"
+source scripts/cluster-runtime-env.sh
 export PATH="$HOME/.local/bin:$PATH"
 if ! command -v uv >/dev/null 2>&1; then
   echo "uv not found. Run scripts/setup_betty_uv.sh first." >&2

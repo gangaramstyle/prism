@@ -1,0 +1,22 @@
+# macOS
+.DS_Store
+
+# Local Codex/agent runtime state
+.agent/
+.agents/
+
+# Local-only reference data artifacts
+full_study.dcm
+test.dcm
+pmbb_catalog.csv.gz
+reference_warning/
+skills-lock.json
+
+# Optional local-only skills installed outside repo source
+.claude/skills/add-molab-badge
+.claude/skills/anywidget-generator
+.claude/skills/jupyter-to-marimo
+.claude/skills/marimo-batch
+.claude/skills/marimo-notebook
+.claude/skills/streamlit-to-marimo
+.claude/skills/wasm-compatibility

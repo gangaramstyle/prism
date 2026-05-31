@@ -1,7 +1,37 @@
+# Python environments and caches
 .venv/
+.uv-cache/
 .pytest_cache/
+.ruff_cache/
 __pycache__/
-*.pyc
+*.py[cod]
+*.so
+
+# Runtime artifacts
 logs/
 results/
+artifacts/
+wandb/
+checkpoints/
+tmp/
 /tmp/
+*.out
+*.err
+slurm-*.out
+
+# Local data and notebook scratch
+data/
+notebooks/__marimo__/
+.ipynb_checkpoints/
+
+# Cluster/local machine env files
+.cluster.env
+.env
+.env.*
+!.env.example
+
+# Optional local model caches (project-scoped)
+.hf-cache/
+.torch-cache/
+.wandb-cache/
+.wandb-config/

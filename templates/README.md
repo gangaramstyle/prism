@@ -63,3 +63,30 @@ Use this when you want a cleaner subset for rotation-heavy pretraining.
    `cd ~/prism-ssl/templates && SHARD_DIR=results/manifests/pmbb_catalog_near_iso_shards OUTPUT_PATH=results/manifests/pmbb_catalog_near_iso.csv REQUIRE_NUM_SHARDS=8 sbatch scripts/job_merge_near_iso_manifest_shards.sh`
 3. Summarize merged manifest:
    `cd ~/prism-ssl/templates && uv run python scripts/summarize_manifest.py --manifest-path results/manifests/pmbb_catalog_near_iso.csv --top-k 30 --output-dir results/manifests/near_iso_summary`
+
+## Local-to-cluster workflow
+This repo includes lightweight sync and remote command helpers:
+
+1. Copy `templates/.cluster.env.example` to `templates/.cluster.env` and set:
+   - `CLUSTER_HOST` (usually your SSH alias like `betty`)
+   - `CLUSTER_PROJECT` (remote repo path)
+2. Sync local source to cluster:
+   - `cd templates && ./scripts/sync-up.sh`
+3. Run a cluster command in the project directory:
+   - `cd templates && ./scripts/cluster.sh 'pwd && hostname && squeue --me'`
+4. Sync notebook/source edits back down after live marimo edits:
+   - `cd templates && ./scripts/sync-down.sh`
+
+The sync helpers intentionally exclude heavy/generated paths (`.venv`, `data`, `results`, `logs`, `wandb`, `checkpoints`, caches).
+
+## Cluster runtime env helper
+Use `scripts/cluster-runtime-env.sh` on cluster shells/jobs to set safe cache defaults:
+
+- `UV_CACHE_DIR=$PWD/.uv-cache`
+- `WANDB_CACHE_DIR=$PWD/.wandb-cache`
+- `WANDB_CONFIG_DIR=$PWD/.wandb-config`
+- `HF_HOME=$PWD/.hf-cache`
+- `TORCH_HOME=$PWD/.torch-cache`
+
+Example:
+- `cd ~/prism-ssl/templates && source scripts/cluster-runtime-env.sh`

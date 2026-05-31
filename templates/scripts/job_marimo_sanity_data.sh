@@ -15,6 +15,7 @@ MARIMO_PORT="${MARIMO_PORT:-2718}"
 CATALOG_PATH="${CATALOG_PATH:-$HOME/nvreason/data/pmbb_catalog.csv}"
 
 cd "$REPO_ROOT"
+source scripts/cluster-runtime-env.sh
 export PATH="$HOME/.local/bin:$PATH"
 
 if ! command -v uv >/dev/null 2>&1; then
@@ -33,10 +34,10 @@ echo "Port: $MARIMO_PORT"
 echo "Catalog: $CATALOG_PATH"
 echo ""
 echo "Tunnel from local machine:"
-echo "  ssh -L ${MARIMO_PORT}:${NODE_NAME}:${MARIMO_PORT} ${USER}@login.betty.parcc.upenn.edu"
+echo "  ssh -N -J ${USER}@login.betty.parcc.upenn.edu ${USER}@${NODE_NAME} -L ${MARIMO_PORT}:127.0.0.1:${MARIMO_PORT}"
 echo ""
 echo "Open in browser:"
-echo "  http://localhost:${MARIMO_PORT}"
+echo "  http://127.0.0.1:${MARIMO_PORT}"
 echo "============================================"
 
-uv run marimo edit "$NOTEBOOK_PATH" --headless --no-token --port "$MARIMO_PORT" --host 0.0.0.0
+uv run marimo edit "$NOTEBOOK_PATH" --headless --no-token --port "$MARIMO_PORT" --host 127.0.0.1
