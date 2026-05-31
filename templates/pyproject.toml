@@ -14,7 +14,7 @@ dependencies = [
   "pillow>=10.0",
   "matplotlib>=3.9",
   "wandb>=0.18",
-  "marimo>=0.11",
+  "marimo[mcp]>=0.23.8",
   "altair>=5.0",
   "pyyaml>=6.0",
 ]
