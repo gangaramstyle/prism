@@ -16,7 +16,9 @@
    `uv run marimo edit notebooks/sanity_data_pipeline.py`
 2. Batch/label sanity:
    `uv run marimo edit notebooks/sanity_batch_labels.py`
-3. On cluster, set `CATALOG_PATH` first if needed:
+3. Representation probe:
+   `uv run marimo edit notebooks/representation_probe.py`
+4. On cluster, set `CATALOG_PATH` first if needed:
    `export CATALOG_PATH=~/nvreason/data/pmbb_catalog.csv`
 
 ### Betty runbook (recommended)
@@ -26,14 +28,18 @@ Run notebooks on a compute allocation (not login nodes).
    `cd ~/prism-ssl/templates && CATALOG_PATH=~/nvreason/data/pmbb_catalog.csv sbatch scripts/job_marimo_sanity_data.sh`
 2. Submit batch/label sanity notebook:
    `cd ~/prism-ssl/templates && CATALOG_PATH=~/nvreason/data/pmbb_catalog.csv sbatch scripts/job_marimo_sanity_batch.sh`
-3. Get node for a job:
+3. Submit representation probe notebook:
+   `cd ~/prism-ssl/templates && CATALOG_PATH=~/prism-ssl/templates/results/manifests/pmbb_catalog_near_iso.csv sbatch scripts/job_marimo_representation_probe.sh`
+4. Get node for a job:
    `cd ~/prism-ssl/templates && squeue -j <jobid> -o "%.18i %.8T %N"`
-4. Tunnel from local machine (replace `<node>`):
+5. Tunnel from local machine (replace `<node>`):
    - data notebook (port 2718): `ssh -L 2718:<node>:2718 gangaram@login.betty.parcc.upenn.edu`
    - batch notebook (port 2719): `ssh -L 2719:<node>:2719 gangaram@login.betty.parcc.upenn.edu`
-5. Open in browser:
+   - representation notebook (port 2720): `ssh -N -J gangaram@login.betty.parcc.upenn.edu gangaram@<node> -L 2720:127.0.0.1:2720`
+6. Open in browser:
    - data notebook: `http://localhost:2718`
    - batch notebook: `http://localhost:2719`
+   - representation notebook: `http://127.0.0.1:2720`
 
 ## Required runtime policies
 - W&B online logging.
