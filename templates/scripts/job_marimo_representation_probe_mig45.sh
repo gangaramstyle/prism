@@ -35,8 +35,13 @@ export WANDB_ARTIFACT_DIR="${TMP_BASE}/wandb_artifacts"
 mkdir -p logs "$TMPDIR" "$WANDB_DIR" "$WANDB_CACHE_DIR" "$WANDB_ARTIFACT_DIR"
 export CATALOG_PATH PRISM_WANDB_ARTIFACT_REF
 
+UV_RUN_ARGS=(run)
+if [[ "$MARIMO_ENABLE_MCP" == "1" ]]; then
+  UV_RUN_ARGS+=(--with "marimo[mcp]>=0.23.8")
+fi
+
 MARIMO_ARGS=(edit "$NOTEBOOK_PATH" --headless --no-token --port "$MARIMO_PORT" --host 127.0.0.1)
-if [[ "$MARIMO_ENABLE_MCP" == "1" ]] && uv run marimo edit --help 2>/dev/null | grep -q -- "--mcp"; then
+if [[ "$MARIMO_ENABLE_MCP" == "1" ]] && uv "${UV_RUN_ARGS[@]}" marimo edit --help 2>/dev/null | grep -q -- "--mcp"; then
   MARIMO_ARGS+=(--mcp)
 fi
 
@@ -56,4 +61,4 @@ echo "Open in browser:"
 echo "  http://127.0.0.1:${MARIMO_PORT}"
 echo "============================================"
 
-uv run marimo "${MARIMO_ARGS[@]}"
+uv "${UV_RUN_ARGS[@]}" marimo "${MARIMO_ARGS[@]}"
