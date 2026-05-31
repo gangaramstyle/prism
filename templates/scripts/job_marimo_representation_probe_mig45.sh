@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=prism-marimo-repr
-#SBATCH --partition=dgx-b200-mig45
+#SBATCH --partition=b200-mig45
 #SBATCH --gpus=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
