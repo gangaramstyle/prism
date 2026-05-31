@@ -16,6 +16,7 @@
 
 import marimo
 
+# ruff: noqa: F401
 __generated_with = "0.13.0"
 app = marimo.App(width="full")
 
@@ -33,11 +34,15 @@ with app.setup:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
     from prism_ssl.eval.representation_probe import (
+        collect_pairwise_predictions,
         collect_representations,
+        embedding_similarity_pair_table,
+        embedding_similarity_summary_table,
         knn_probe_table,
         label_count_table,
         load_probe_model,
         nearest_neighbor_table,
+        pair_prediction_long_table,
         projection_table,
         resolve_checkpoint_path,
     )
@@ -83,6 +88,7 @@ def _():
     eval_batch_size = mo.ui.slider(start=1, stop=32, value=4, step=1, label="Eval batch")
     seed = mo.ui.number(label="Seed", value=42, step=1)
     modality_csv = mo.ui.text(label="Modalities", value="CT,MR")
+    max_similarity_pairs = mo.ui.number(label="Max similarity pairs", value=30000, step=1000)
     run_probe = mo.ui.run_button(label="Build embeddings")
 
     mo.vstack(
@@ -91,6 +97,7 @@ def _():
             mo.hstack([checkpoint_path, artifact_ref]),
             catalog_path,
             mo.hstack([device_key, n_scans, views_per_scan, n_patches, eval_batch_size, seed, modality_csv]),
+            max_similarity_pairs,
             run_probe,
         ]
     )
@@ -100,6 +107,7 @@ def _():
         checkpoint_path,
         device_key,
         eval_batch_size,
+        max_similarity_pairs,
         modality_csv,
         n_patches,
         n_scans,
@@ -287,6 +295,153 @@ def _(alt, counts, mo, neighbor_label, pl, probe_metrics):
     )
     metric_row = probe_metrics.filter(pl.col("label") == str(neighbor_label.value))
     mo.vstack([mo.md("## Selected Label Detail"), metric_row, count_chart])
+    return
+
+
+@app.cell
+def _(
+    alt,
+    embedding_similarity_pair_table,
+    embedding_similarity_summary_table,
+    embeddings,
+    max_similarity_pairs,
+    metadata,
+    mo,
+    seed,
+):
+    similarity_pairs = embedding_similarity_pair_table(
+        metadata,
+        embeddings,
+        max_pairs=int(max_similarity_pairs.value),
+        seed=int(seed.value),
+    )
+    similarity_summary = embedding_similarity_summary_table(similarity_pairs)
+    similarity_chart = (
+        alt.Chart(similarity_pairs.to_dicts())
+        .mark_bar(opacity=0.75)
+        .encode(
+            x=alt.X("cosine_similarity:Q", bin=alt.Bin(maxbins=50), title="Cosine similarity"),
+            y=alt.Y("count():Q", title="Pair count"),
+            color=alt.Color("pair_type:N", title="Pair type"),
+            tooltip=["pair_type:N", "count():Q"],
+        )
+        .properties(height=300)
+    )
+    mo.vstack(
+        [
+            mo.md("## Embedding Similarity Distributions"),
+            mo.md("This checks whether same-scan / same-family / same-anatomy pairs are closer than less-related pairs."),
+            similarity_summary,
+            similarity_chart,
+        ]
+    )
+    return similarity_pairs, similarity_summary
+
+
+@app.cell
+def _(mo):
+    pair_n_scans = mo.ui.slider(start=2, stop=128, value=24, step=2, label="Pairwise audit scans")
+    pairs_per_scan = mo.ui.slider(start=1, stop=8, value=2, step=1, label="Pairs per scan")
+    pair_n_patches = mo.ui.dropdown(options=[64, 128, 256, 512, 1024], value=256, label="Pair patches")
+    pair_batch_size = mo.ui.slider(start=1, stop=16, value=2, step=1, label="Pair batch")
+    run_pair_audit = mo.ui.run_button(label="Run pairwise relation audit")
+    mo.vstack(
+        [
+            mo.md("## Pairwise Loss-Head Audit Controls"),
+            mo.md("Samples two independent views from each scan through the same A/B path used by training."),
+            mo.hstack([pair_n_scans, pairs_per_scan, pair_n_patches, pair_batch_size]),
+            run_pair_audit,
+        ]
+    )
+    return pair_batch_size, pair_n_patches, pair_n_scans, pairs_per_scan, run_pair_audit
+
+
+@app.cell
+def _(
+    catalog_path,
+    collect_pairwise_predictions,
+    eval_batch_size,
+    loaded_model,
+    modality_csv,
+    mo,
+    pair_batch_size,
+    pair_n_patches,
+    pair_n_scans,
+    pairs_per_scan,
+    run_pair_audit,
+    seed,
+):
+    mo.stop(
+        not bool(run_pair_audit.value),
+        mo.callout("Run this after loading a checkpoint to audit center, rotation, and window heads.", kind="info"),
+    )
+    pair_modalities = tuple(part.strip().upper() for part in str(modality_csv.value).split(",") if part.strip())
+    pair_batch = collect_pairwise_predictions(
+        loaded=loaded_model,
+        catalog_path=str(catalog_path.value),
+        n_scans=int(pair_n_scans.value),
+        pairs_per_scan=int(pairs_per_scan.value),
+        n_patches=int(pair_n_patches.value),
+        seed=int(seed.value) + 19_001,
+        batch_size=max(int(pair_batch_size.value), int(eval_batch_size.value)),
+        modality_filter=pair_modalities,
+    )
+    return (pair_batch,)
+
+
+@app.cell
+def _(alt, mo, pair_batch, pair_prediction_long_table, pl):
+    pair_predictions = pair_batch.predictions
+    pair_metrics = pair_batch.metrics
+    pair_broken = pair_batch.broken
+    pair_long = pair_prediction_long_table(pair_predictions)
+    pair_long_plot = pair_long.with_columns((pl.col("field") + pl.lit(" / ") + pl.col("axis")).alias("target_name"))
+    mae_chart = (
+        alt.Chart(pair_metrics.to_dicts())
+        .mark_bar()
+        .encode(
+            x=alt.X("axis:N", title="Axis / value"),
+            y=alt.Y("mae:Q", title="MAE"),
+            color=alt.Color("field:N"),
+            column=alt.Column("field:N", title=None),
+            tooltip=["field:N", "axis:N", "n:Q", "mae:Q", "rmse:Q", "pearson:Q", "pred_to_target_std:Q"],
+        )
+        .properties(height=240)
+    )
+    scatter = (
+        alt.Chart(pair_long_plot.to_dicts())
+        .mark_circle(size=42, opacity=0.7)
+        .encode(
+            x=alt.X("target:Q", title="Target"),
+            y=alt.Y("pred:Q", title="Prediction"),
+            color=alt.Color("field:N"),
+            tooltip=["pair_id:N", "field:N", "axis:N", "target:Q", "pred:Q", "abs_error:Q", "series_family:N", "body_part:N"],
+        )
+        .properties(width=210, height=180)
+        .facet(facet=alt.Facet("target_name:N", title=None), columns=3)
+        .resolve_scale(x="independent", y="independent")
+    )
+    broken_note = mo.md("No broken scans during pairwise audit.") if pair_broken.height == 0 else pair_broken
+    mo.vstack(
+        [
+            mo.md("## Pairwise Loss-Head Audit"),
+            mo.md("Lower MAE, useful target variance, and non-collapsed prediction variance are the first sanity checks here."),
+            pair_metrics,
+            mae_chart,
+            scatter,
+            mo.md("### Pairwise Broken Scan Log"),
+            broken_note,
+        ]
+    )
+    return pair_long, pair_metrics, pair_predictions
+
+
+@app.cell
+def _(mo):
+    mo.callout(
+        "MAE-style reconstructions are not available in the current PRISM checkpoint: the active model has regression heads plus SupCon projections, but no decoder/reconstruction head. To inspect reconstructions, we need to add and train a masked-patch decoder rather than rendering input patches as if they were model output.",
+        kind="warn",
+    )
     return
 
 

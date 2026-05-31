@@ -19,7 +19,7 @@ from prism_ssl.config import RunConfig, apply_overrides, load_run_config
 from prism_ssl.config.schema import ScanRecord
 from prism_ssl.data.catalog import build_scan_id, load_catalog
 from prism_ssl.data.preflight import load_nifti_scan
-from prism_ssl.data.sample_contract import tensorize_sample_view
+from prism_ssl.data.sample_contract import compute_pair_targets, tensorize_sample_view
 from prism_ssl.model import PrismSSLModel
 from prism_ssl.utils.hashing import stable_int_hash
 
@@ -39,6 +39,20 @@ class RepresentationBatch:
     cls_embeddings: np.ndarray
     projection_embeddings: np.ndarray
     broken: pl.DataFrame
+
+
+@dataclass
+class PairwisePredictionBatch:
+    predictions: pl.DataFrame
+    metrics: pl.DataFrame
+    broken: pl.DataFrame
+
+
+_PAIR_FIELD_SPECS = (
+    ("center_delta_mm", ("x", "y", "z"), "mm"),
+    ("rotation_delta_deg", ("x", "y", "z"), "deg"),
+    ("window_delta", ("wc", "ww"), "intensity"),
+)
 
 
 def resolve_device(device_key: str) -> torch.device:
@@ -96,9 +110,10 @@ def load_probe_model(checkpoint_path: str | Path, device_key: str = "auto") -> L
     if not isinstance(flat_config, dict):
         raise ValueError(f"Checkpoint missing flat config payload: {ckpt}")
     config = run_config_from_flat(flat_config)
-    target_patch_size = int(math.sqrt(256))
+    state_dict = payload["model_state_dict"]
+    patch_dim = _checkpoint_patch_dim(state_dict)
     model = PrismSSLModel(
-        patch_dim=target_patch_size * target_patch_size,
+        patch_dim=patch_dim,
         model_name=config.model.name,
         d_model=config.model.d_model,
         proj_dim=config.model.proj_dim,
@@ -107,7 +122,7 @@ def load_probe_model(checkpoint_path: str | Path, device_key: str = "auto") -> L
         mlp_ratio=config.model.mlp_ratio,
         dropout=config.model.dropout,
     )
-    model.load_state_dict(payload["model_state_dict"])
+    model.load_state_dict(state_dict)
     model.to(device)
     model.eval()
     return LoadedProbeModel(
@@ -208,6 +223,7 @@ def collect_representations(
     view_tensors: list[dict[str, torch.Tensor]] = []
     metadata_rows: list[dict[str, Any]] = []
     broken_rows: list[dict[str, Any]] = []
+    target_patch_size = _model_target_patch_size(loaded.model)
 
     for row_idx, row in enumerate(rows):
         record = scan_record_from_row(row)
@@ -221,7 +237,7 @@ def collect_representations(
                     method=config.data.method,
                     apply_native_orientation_hint=config.data.apply_native_orientation_hint,
                     rotation_augmentation_max_degrees=config.data.rotation_augmentation_max_degrees,
-                    target_patch_size=16,
+                    target_patch_size=target_patch_size,
                 )
                 tensors = tensorize_sample_view(sample, position_frame=config.data.position_frame_for_model)
                 view_tensors.append(tensors)
@@ -269,6 +285,114 @@ def collect_representations(
         metadata=pl.DataFrame(metadata_rows),
         cls_embeddings=np.concatenate(cls_chunks, axis=0),
         projection_embeddings=np.concatenate(proj_chunks, axis=0),
+        broken=pl.DataFrame(broken_rows),
+    )
+
+
+def collect_pairwise_predictions(
+    *,
+    loaded: LoadedProbeModel,
+    catalog_path: str,
+    n_scans: int,
+    pairs_per_scan: int,
+    n_patches: int,
+    seed: int,
+    batch_size: int,
+    modality_filter: tuple[str, ...] = ("CT", "MR"),
+) -> PairwisePredictionBatch:
+    """Sample A/B views through the training path and compare labels to heads."""
+    config = loaded.config
+    rows = deterministic_catalog_rows(
+        catalog_path,
+        n_scans=int(n_scans),
+        seed=int(seed),
+        modality_filter=modality_filter,
+    )
+    views_a: list[dict[str, torch.Tensor]] = []
+    views_b: list[dict[str, torch.Tensor]] = []
+    prediction_rows: list[dict[str, Any]] = []
+    broken_rows: list[dict[str, Any]] = []
+    target_patch_size = _model_target_patch_size(loaded.model)
+
+    for row_idx, row in enumerate(rows):
+        record = scan_record_from_row(row)
+        try:
+            scan, _ = load_nifti_scan(record, base_patch_mm=float(config.data.patch_mm))
+            for pair_idx in range(int(pairs_per_scan)):
+                sample_seed = int(seed) + row_idx * 1_000_000 + pair_idx
+                sample_kwargs = {
+                    "method": config.data.method,
+                    "apply_native_orientation_hint": config.data.apply_native_orientation_hint,
+                    "rotation_augmentation_max_degrees": config.data.rotation_augmentation_max_degrees,
+                    "target_patch_size": target_patch_size,
+                }
+                result_a = scan.train_sample(int(n_patches), seed=sample_seed * 2, **sample_kwargs)
+                result_b = scan.train_sample(int(n_patches), seed=sample_seed * 2 + 1, **sample_kwargs)
+                view_a = tensorize_sample_view(result_a, position_frame=config.data.position_frame_for_model)
+                view_b = tensorize_sample_view(result_b, position_frame=config.data.position_frame_for_model)
+                pair_targets = compute_pair_targets(view_a, view_b)
+                row_base = metadata_from_row(
+                    row,
+                    view_index=pair_idx,
+                    scan_id=record.scan_id,
+                    series_id=record.series_id,
+                    sample=result_a,
+                )
+                row_base["pair_id"] = f"{record.scan_id}:{pair_idx}"
+                row_base["view_a_seed"] = int(sample_seed * 2)
+                row_base["view_b_seed"] = int(sample_seed * 2 + 1)
+                _add_pair_values(row_base, "target", pair_targets)
+                views_a.append(view_a)
+                views_b.append(view_b)
+                prediction_rows.append(row_base)
+        except Exception as exc:
+            broken_rows.append(
+                {
+                    "scan_id": record.scan_id,
+                    "series_path": record.series_path,
+                    "error": str(exc),
+                }
+            )
+
+    if not views_a:
+        empty = pl.DataFrame(prediction_rows)
+        return PairwisePredictionBatch(predictions=empty, metrics=pl.DataFrame([]), broken=pl.DataFrame(broken_rows))
+
+    model = loaded.model
+    device = loaded.device
+    with torch.inference_mode():
+        for start in range(0, len(views_a), max(int(batch_size), 1)):
+            end = start + max(int(batch_size), 1)
+            chunk_a = views_a[start:end]
+            chunk_b = views_b[start:end]
+            patches_a = torch.stack([item["patches"] for item in chunk_a]).to(device=device, dtype=torch.float32)
+            positions_a = torch.stack([item["positions"] for item in chunk_a]).to(device=device, dtype=torch.float32)
+            patches_b = torch.stack([item["patches"] for item in chunk_b]).to(device=device, dtype=torch.float32)
+            positions_b = torch.stack([item["positions"] for item in chunk_b]).to(device=device, dtype=torch.float32)
+            outputs = model(patches_a, positions_a, patches_b, positions_b)
+            pred_values = {
+                "center_delta_mm": outputs.center_delta_mm.detach().cpu(),
+                "rotation_delta_deg": outputs.rotation_delta_deg.detach().cpu(),
+                "window_delta": outputs.window_delta.detach().cpu(),
+            }
+            for local_idx in range(patches_a.shape[0]):
+                row = prediction_rows[start + local_idx]
+                _add_pair_values(
+                    row,
+                    "pred",
+                    {key: value[local_idx] for key, value in pred_values.items()},
+                )
+
+    for row in prediction_rows:
+        for field, axes, _unit in _PAIR_FIELD_SPECS:
+            for axis in axes:
+                key = f"{field}_{axis}"
+                row[f"abs_error_{key}"] = abs(float(row[f"pred_{key}"]) - float(row[f"target_{key}"]))
+
+    predictions = pl.DataFrame(prediction_rows)
+    return PairwisePredictionBatch(
+        predictions=predictions,
+        metrics=pair_prediction_metric_table(predictions),
         broken=pl.DataFrame(broken_rows),
     )
 
@@ -377,6 +501,183 @@ def nearest_neighbor_table(
     return pl.DataFrame(rows)
 
 
+def embedding_similarity_pair_table(
+    metadata: pl.DataFrame,
+    embeddings: np.ndarray,
+    *,
+    max_pairs: int = 50_000,
+    seed: int = 0,
+) -> pl.DataFrame:
+    """Sample pairwise cosine similarities with interpretable relationship labels."""
+    if metadata.height < 2:
+        return pl.DataFrame(
+            schema={
+                "left_view_id": pl.Utf8,
+                "right_view_id": pl.Utf8,
+                "left_series_family": pl.Utf8,
+                "right_series_family": pl.Utf8,
+                "left_body_part": pl.Utf8,
+                "right_body_part": pl.Utf8,
+                "left_modality": pl.Utf8,
+                "right_modality": pl.Utf8,
+                "pair_type": pl.Utf8,
+                "cosine_similarity": pl.Float64,
+            }
+        )
+    x = _l2_normalize(np.asarray(embeddings, dtype=np.float32))
+    n = int(x.shape[0])
+    total_pairs = n * (n - 1) // 2
+    rng = np.random.default_rng(int(seed))
+    rows_as_dicts = metadata.to_dicts()
+
+    if total_pairs <= int(max_pairs):
+        pairs = [(i, j) for i in range(n) for j in range(i + 1, n)]
+    else:
+        chosen: set[tuple[int, int]] = set()
+        target = min(int(max_pairs), total_pairs)
+        while len(chosen) < target:
+            i = int(rng.integers(0, n))
+            j = int(rng.integers(0, n - 1))
+            if j >= i:
+                j += 1
+            chosen.add((min(i, j), max(i, j)))
+        pairs = sorted(chosen)
+
+    out = []
+    for i, j in pairs:
+        left = rows_as_dicts[i]
+        right = rows_as_dicts[j]
+        out.append(
+            {
+                "left_view_id": str(left.get("view_id", i)),
+                "right_view_id": str(right.get("view_id", j)),
+                "left_series_family": str(left.get("series_family", "unknown")),
+                "right_series_family": str(right.get("series_family", "unknown")),
+                "left_body_part": str(left.get("body_part", "unknown")),
+                "right_body_part": str(right.get("body_part", "unknown")),
+                "left_modality": str(left.get("modality", "unknown")),
+                "right_modality": str(right.get("modality", "unknown")),
+                "pair_type": _metadata_pair_type(left, right),
+                "cosine_similarity": float(np.dot(x[i], x[j])),
+            }
+        )
+    return pl.DataFrame(out)
+
+
+def embedding_similarity_summary_table(pair_table: pl.DataFrame) -> pl.DataFrame:
+    if pair_table.height == 0 or "pair_type" not in pair_table.columns:
+        return pl.DataFrame(
+            schema={
+                "pair_type": pl.Utf8,
+                "n_pairs": pl.UInt32,
+                "mean_cosine": pl.Float64,
+                "median_cosine": pl.Float64,
+                "p10_cosine": pl.Float64,
+                "p90_cosine": pl.Float64,
+            }
+        )
+    return (
+        pair_table.group_by("pair_type")
+        .agg(
+            [
+                pl.len().alias("n_pairs"),
+                pl.col("cosine_similarity").mean().alias("mean_cosine"),
+                pl.col("cosine_similarity").median().alias("median_cosine"),
+                pl.col("cosine_similarity").quantile(0.10).alias("p10_cosine"),
+                pl.col("cosine_similarity").quantile(0.90).alias("p90_cosine"),
+            ]
+        )
+        .sort("mean_cosine", descending=True)
+    )
+
+
+def pair_prediction_long_table(predictions: pl.DataFrame) -> pl.DataFrame:
+    if predictions.height == 0:
+        return pl.DataFrame(
+            schema={
+                "pair_id": pl.Utf8,
+                "scan_id": pl.Utf8,
+                "series_family": pl.Utf8,
+                "body_part": pl.Utf8,
+                "field": pl.Utf8,
+                "axis": pl.Utf8,
+                "unit": pl.Utf8,
+                "target": pl.Float64,
+                "pred": pl.Float64,
+                "abs_error": pl.Float64,
+            }
+        )
+    rows = []
+    for row in predictions.to_dicts():
+        for field, axes, unit in _PAIR_FIELD_SPECS:
+            for axis in axes:
+                key = f"{field}_{axis}"
+                rows.append(
+                    {
+                        "pair_id": row.get("pair_id", ""),
+                        "scan_id": row.get("scan_id", ""),
+                        "series_family": row.get("series_family", "unknown"),
+                        "body_part": row.get("body_part", "unknown"),
+                        "field": field,
+                        "axis": axis,
+                        "unit": unit,
+                        "target": float(row.get(f"target_{key}", 0.0)),
+                        "pred": float(row.get(f"pred_{key}", 0.0)),
+                        "abs_error": float(row.get(f"abs_error_{key}", 0.0)),
+                    }
+                )
+    return pl.DataFrame(rows)
+
+
+def pair_prediction_metric_table(predictions: pl.DataFrame) -> pl.DataFrame:
+    long = pair_prediction_long_table(predictions)
+    if long.height == 0:
+        return pl.DataFrame(
+            schema={
+                "field": pl.Utf8,
+                "axis": pl.Utf8,
+                "n": pl.Int64,
+                "mae": pl.Float64,
+                "rmse": pl.Float64,
+                "bias": pl.Float64,
+                "target_std": pl.Float64,
+                "pred_std": pl.Float64,
+                "pred_to_target_std": pl.Float64,
+                "pearson": pl.Float64,
+                "sign_accuracy": pl.Float64,
+            }
+        )
+    rows = []
+    for (field, axis), group in long.group_by(["field", "axis"], maintain_order=True):
+        target = np.asarray(group["target"].to_list(), dtype=np.float64)
+        pred = np.asarray(group["pred"].to_list(), dtype=np.float64)
+        err = pred - target
+        target_std = float(np.std(target))
+        pred_std = float(np.std(pred))
+        if target.size > 1 and target_std > 1e-8 and pred_std > 1e-8:
+            corr = float(np.corrcoef(target, pred)[0, 1])
+        else:
+            corr = None
+        nonzero = np.abs(target) > 1e-6
+        sign_acc = float(np.mean(np.sign(pred[nonzero]) == np.sign(target[nonzero]))) if bool(np.any(nonzero)) else None
+        rows.append(
+            {
+                "field": str(field),
+                "axis": str(axis),
+                "n": int(target.size),
+                "mae": float(np.mean(np.abs(err))) if target.size else None,
+                "rmse": float(np.sqrt(np.mean(err**2))) if target.size else None,
+                "bias": float(np.mean(err)) if target.size else None,
+                "target_std": target_std,
+                "pred_std": pred_std,
+                "pred_to_target_std": pred_std / max(target_std, 1e-8),
+                "pearson": corr,
+                "sign_accuracy": sign_acc,
+            }
+        )
+    return pl.DataFrame(rows)
+
+
 def label_count_table(metadata: pl.DataFrame, label_columns: list[str], *, top_k: int = 20) -> pl.DataFrame:
     rows = []
     for col in label_columns:
@@ -391,6 +692,50 @@ def label_count_table(metadata: pl.DataFrame, label_columns: list[str], *, top_k
 def _l2_normalize(x: np.ndarray) -> np.ndarray:
     denom = np.linalg.norm(x, axis=1, keepdims=True)
     return x / np.clip(denom, 1e-8, None)
+
+
+def _checkpoint_patch_dim(state_dict: dict[str, torch.Tensor]) -> int:
+    weight = state_dict.get("encoder.patch_proj.weight")
+    if weight is None or getattr(weight, "ndim", 0) != 2:
+        return 256
+    return int(weight.shape[1])
+
+
+def _model_target_patch_size(model: PrismSSLModel) -> int:
+    patch_dim = int(model.encoder.patch_proj.in_features)
+    side = int(round(math.sqrt(patch_dim)))
+    if side * side != patch_dim:
+        raise ValueError(f"Model patch_dim must be square for 2D patch sampling, got {patch_dim}")
+    return side
+
+
+def _add_pair_values(row: dict[str, Any], prefix: str, values: dict[str, torch.Tensor]) -> None:
+    for field, axes, _unit in _PAIR_FIELD_SPECS:
+        arr = values[field]
+        if isinstance(arr, torch.Tensor):
+            arr_np = arr.detach().cpu().float().numpy().reshape(-1)
+        else:
+            arr_np = np.asarray(arr, dtype=np.float32).reshape(-1)
+        for idx, axis in enumerate(axes):
+            row[f"{prefix}_{field}_{axis}"] = float(arr_np[idx])
+
+
+def _metadata_pair_type(left: dict[str, Any], right: dict[str, Any]) -> str:
+    if str(left.get("scan_id", "")) and str(left.get("scan_id", "")) == str(right.get("scan_id", "")):
+        return "same_scan"
+    if str(left.get("series_id", "")) and str(left.get("series_id", "")) == str(right.get("series_id", "")):
+        return "same_series_id"
+    left_family = str(left.get("series_family", "unknown"))
+    right_family = str(right.get("series_family", "unknown"))
+    if left_family != "unknown" and left_family == right_family:
+        return "same_series_family"
+    left_body = str(left.get("body_part", "unknown"))
+    right_body = str(right.get("body_part", "unknown"))
+    if left_body != "unknown" and left_body == right_body:
+        return "same_body_part"
+    if str(left.get("modality", "")) and str(left.get("modality", "")) == str(right.get("modality", "")):
+        return "same_modality_only"
+    return "different"
 
 
 def _safe_path_token(text: str) -> str:
