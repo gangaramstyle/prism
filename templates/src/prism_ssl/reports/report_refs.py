@@ -13,9 +13,10 @@ import math
 import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass
+from functools import lru_cache
 from hashlib import sha1
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 import nibabel as nib
 import numpy as np
@@ -303,12 +304,17 @@ def parse_report_references(report_path: str | Path) -> list[ReportReference]:
     return refs
 
 
-def _read_json(path: Path) -> dict[str, Any]:
+@lru_cache(maxsize=16384)
+def _read_json_cached(path_text: str) -> dict[str, Any]:
     try:
-        payload = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+        payload = json.loads(Path(path_text).read_text(encoding="utf-8", errors="replace"))
     except Exception:
         return {}
     return payload if isinstance(payload, dict) else {}
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    return _read_json_cached(str(path))
 
 
 def _candidate_metadata_json(series_dir: Path) -> Path | None:
@@ -417,6 +423,7 @@ def _instance_number(instance: dict[str, Any]) -> int | None:
     return _as_int(instance.get("InstanceNumber", instance.get("instance_number")))
 
 
+@lru_cache(maxsize=8192)
 def _canonical_affine_and_shape(nifti_path: str) -> tuple[np.ndarray, tuple[int, int, int]]:
     img = nib.as_closest_canonical(nib.load(nifti_path))
     shape = tuple(int(v) for v in img.shape[:3])
@@ -467,6 +474,32 @@ def _sort_instances_for_ordinal(instances: list[dict[str, Any]]) -> list[dict[st
     return instances
 
 
+@lru_cache(maxsize=8192)
+def _series_mapping_context(
+    tree_path: str,
+    nifti_path: str,
+) -> tuple[
+    list[dict[str, Any]],
+    dict[int, list[dict[str, Any]]],
+    list[dict[str, Any]],
+    np.ndarray,
+    tuple[int, int, int],
+    int | None,
+]:
+    tree = _read_json(Path(tree_path))
+    instances = _find_instance_list(tree)
+    affine, shape = _canonical_affine_and_shape(nifti_path)
+    inv_affine = np.linalg.inv(affine)
+    slice_axis = _slice_axis_from_instances(instances, inv_affine, shape) if instances else None
+    by_number: dict[int, list[dict[str, Any]]] = defaultdict(list)
+    for inst in instances:
+        number = _instance_number(inst)
+        if number is not None:
+            by_number[number].append(inst)
+    sorted_instances = _sort_instances_for_ordinal(instances)
+    return instances, dict(by_number), sorted_instances, inv_affine, shape, slice_axis
+
+
 def map_reported_image_to_slice(series: SeriesInfo, image_number: int) -> SliceMapping:
     """Map a reported image number to a canonical RAS voxel/slice coordinate."""
     empty_shape: tuple[int | None, int | None, int | None] = (None, None, None)
@@ -485,26 +518,18 @@ def map_reported_image_to_slice(series: SeriesInfo, image_number: int) -> SliceM
     if not series.nifti_path:
         return SliceMapping("unmapped", "missing_nifti", None, None, "", empty_voxel, None, empty_shape)
 
-    tree = _read_json(Path(series.tree_path))
-    instances = _find_instance_list(tree)
+    try:
+        instances, by_number, sorted_instances, inv_affine, shape, slice_axis = _series_mapping_context(
+            series.tree_path,
+            series.nifti_path,
+        )
+    except Exception as exc:
+        return SliceMapping("unmapped", f"series_mapping_context_error:{type(exc).__name__}", None, None, "", empty_voxel, None, empty_shape)
+
     if not instances:
         return SliceMapping("unmapped", "missing_instance_list", None, None, "", empty_voxel, None, empty_shape)
-
-    try:
-        affine, shape = _canonical_affine_and_shape(series.nifti_path)
-    except Exception as exc:
-        return SliceMapping("unmapped", f"nifti_affine_error:{type(exc).__name__}", None, None, "", empty_voxel, None, empty_shape)
-
-    inv_affine = np.linalg.inv(affine)
-    slice_axis = _slice_axis_from_instances(instances, inv_affine, shape)
     axis_names = ("x", "y", "z")
     slice_axis_name = axis_names[slice_axis] if slice_axis is not None else ""
-
-    by_number: dict[int, list[dict[str, Any]]] = defaultdict(list)
-    for inst in instances:
-        number = _instance_number(inst)
-        if number is not None:
-            by_number[number].append(inst)
 
     selected: dict[str, Any] | None = None
     exact = by_number.get(int(image_number), [])
@@ -513,7 +538,6 @@ def map_reported_image_to_slice(series: SeriesInfo, image_number: int) -> SliceM
         base_confidence = "high_exact_instance" if len(exact) == 1 else "medium_ambiguous_exact_instance"
         reason = "matched_dicom_instance_number"
     else:
-        sorted_instances = _sort_instances_for_ordinal(instances)
         if 1 <= int(image_number) <= len(sorted_instances):
             selected = sorted_instances[int(image_number) - 1]
             base_confidence = "medium_ordinal"
