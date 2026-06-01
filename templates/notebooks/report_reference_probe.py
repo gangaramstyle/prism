@@ -165,7 +165,7 @@ def _(alt, count_table, mo, report_refs):
     section_counts = count_table(report_refs, ["report_section"], top_k=30)
 
     confidence_chart = (
-        alt.Chart(confidence_counts.to_dicts())
+        alt.Chart({"values": confidence_counts.to_dicts()})
         .mark_bar()
         .encode(
             x=alt.X("count:Q"),
@@ -175,7 +175,7 @@ def _(alt, count_table, mo, report_refs):
         .properties(height=180)
     )
     organ_chart = (
-        alt.Chart(organ_counts.to_dicts())
+        alt.Chart({"values": organ_counts.to_dicts()})
         .mark_bar(color="#2b7a78")
         .encode(
             x=alt.X("count:Q"),
@@ -185,7 +185,7 @@ def _(alt, count_table, mo, report_refs):
         .properties(height=360)
     )
     nesting_heatmap = (
-        alt.Chart(modality_organ_counts.to_dicts())
+        alt.Chart({"values": modality_organ_counts.to_dicts()})
         .mark_rect()
         .encode(
             x=alt.X("modality:N"),
@@ -196,7 +196,7 @@ def _(alt, count_table, mo, report_refs):
         .properties(height=360)
     )
     section_chart = (
-        alt.Chart(section_counts.to_dicts())
+        alt.Chart({"values": section_counts.to_dicts()})
         .mark_bar(color="#cc8b65")
         .encode(
             x=alt.X("count:Q"),
@@ -321,7 +321,7 @@ def _(IPYNIIVUE_AVAILABLE, NiiVue, ShowRender, mo, selected_row):
 def _(alt, count_table, mo, report_refs):
     series_counts = count_table(report_refs, ["modality", "organ_hint", "series_description"], top_k=80)
     chart = (
-        alt.Chart(series_counts.to_dicts())
+        alt.Chart({"values": series_counts.to_dicts()})
         .mark_bar()
         .encode(
             x=alt.X("count:Q"),
