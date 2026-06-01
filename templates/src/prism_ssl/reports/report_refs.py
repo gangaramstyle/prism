@@ -53,6 +53,7 @@ REPORT_REF_COLUMNS = [
     "dicom_instance_number",
     "slice_axis",
     "slice_axis_name",
+    "voxel_coordinate_kind",
     "canonical_voxel_x",
     "canonical_voxel_y",
     "canonical_voxel_z",
@@ -660,6 +661,11 @@ def _row_for_match(
             "dicom_instance_number": None if mapping.dicom_instance_number is None else int(mapping.dicom_instance_number),
             "slice_axis": None if mapping.slice_axis is None else int(mapping.slice_axis),
             "slice_axis_name": mapping.slice_axis_name,
+            "voxel_coordinate_kind": (
+                "dicom_image_position_patient_slice_anchor"
+                if mapping.canonical_slice_index is not None
+                else None
+            ),
             "canonical_voxel_x": None if voxel[0] is None else int(voxel[0]),
             "canonical_voxel_y": None if voxel[1] is None else int(voxel[1]),
             "canonical_voxel_z": None if voxel[2] is None else int(voxel[2]),
@@ -681,7 +687,7 @@ def build_report_reference_manifest(
     modalities: tuple[str, ...] = ("CT", "MR"),
     max_rows: int = 0,
     max_reports_per_study: int = 0,
-    matched_series_scope: str = "catalog",
+    matched_series_scope: str = "study",
     include_unmapped: bool = True,
     num_shards: int = 1,
     shard_index: int = 0,

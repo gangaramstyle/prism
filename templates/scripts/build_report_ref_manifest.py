@@ -36,7 +36,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--max-reports-per-study", default=0, type=int, help="0 means all report txt files.")
     p.add_argument(
         "--matched-series-scope",
-        default="catalog",
+        default="study",
         choices=("catalog", "study"),
         help="catalog restricts matches to series present in the input manifest; study scans all series dirs.",
     )
