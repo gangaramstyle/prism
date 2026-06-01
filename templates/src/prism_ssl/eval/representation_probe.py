@@ -105,7 +105,9 @@ def resolve_checkpoint_path(
 def load_probe_model(checkpoint_path: str | Path, device_key: str = "auto") -> LoadedProbeModel:
     device = resolve_device(device_key)
     ckpt = Path(checkpoint_path).expanduser().resolve()
-    payload = torch.load(ckpt, map_location=device)
+    # Load checkpoint payloads on CPU first so optimizer/cache tensors do not
+    # consume MIG/GPU memory during notebook probing.
+    payload = torch.load(ckpt, map_location="cpu")
     flat_config = payload.get("config")
     if not isinstance(flat_config, dict):
         raise ValueError(f"Checkpoint missing flat config payload: {ckpt}")

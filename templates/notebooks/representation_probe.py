@@ -60,6 +60,11 @@ def _():
 Load a trained checkpoint, sample real PRISM views through the shared data path,
 and inspect whether embeddings organize by series type, anatomy, contrast, and
 nearest-neighbor retrieval behavior.
+
+Note: W&B `prism-ssl-ckpt:latest` currently comes from the pair-relation +
+dual-SupCon + MIM training branch. This notebook probes the older regression-head
+model interface; if you load that artifact here, the notebook will stop with a
+compatibility note instead of a raw PyTorch state-dict error.
 """
         )
     )
@@ -74,7 +79,7 @@ def _():
     )
     default_artifact = os.environ.get(
         "PRISM_WANDB_ARTIFACT_REF",
-        "vineeth-gangaram-penn/nvreason-prism-ssl/prism-ssl-ckpt:best",
+        "vineeth-gangaram-penn/nvreason-prism-ssl/prism-ssl-ckpt:latest",
     )
     default_checkpoint = os.environ.get("PRISM_NOTEBOOK_CHECKPOINT", "")
 
@@ -147,7 +152,21 @@ def _(
         artifact_ref=str(artifact_ref.value),
         download_root=tmp_root,
     )
-    loaded_model = load_probe_model(ckpt_path, device_key=str(device_key.value))
+    try:
+        loaded_model = load_probe_model(ckpt_path, device_key=str(device_key.value))
+    except RuntimeError as exc:
+        message = str(exc)
+        if "pair_relation_head" in message and "distance_head" in message:
+            mo.stop(
+                True,
+                mo.callout(
+                    "Checkpoint/model mismatch: this artifact was trained with the pair-relation + dual-SupCon + MIM "
+                    "architecture, while this notebook expects the older regression-head architecture. Use the exact "
+                    "`codex/clean-pair2-dual-supcon-flexipatch` checkpoint probe for `prism-ssl-ckpt:latest`.",
+                    kind="warn",
+                ),
+            )
+        raise
     repr_batch = collect_representations(
         loaded=loaded_model,
         catalog_path=str(catalog_path.value),

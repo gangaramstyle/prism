@@ -14,7 +14,7 @@ REPO_ROOT="${REPO_ROOT:-$HOME/prism-ssl/templates}"
 NOTEBOOK_PATH="${NOTEBOOK_PATH:-notebooks/representation_probe.py}"
 MARIMO_PORT="${MARIMO_PORT:-2720}"
 CATALOG_PATH="${CATALOG_PATH:-$HOME/prism-ssl/templates/results/manifests/pmbb_catalog_near_iso.csv}"
-PRISM_WANDB_ARTIFACT_REF="${PRISM_WANDB_ARTIFACT_REF:-vineeth-gangaram-penn/nvreason-prism-ssl/prism-ssl-ckpt:best}"
+PRISM_WANDB_ARTIFACT_REF="${PRISM_WANDB_ARTIFACT_REF:-vineeth-gangaram-penn/nvreason-prism-ssl/prism-ssl-ckpt:latest}"
 MARIMO_ENABLE_MCP="${MARIMO_ENABLE_MCP:-1}"
 
 cd "$REPO_ROOT"
