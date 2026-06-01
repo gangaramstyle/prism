@@ -28,7 +28,8 @@ fi
 TMP_BASE="/tmp/${USER}/prism_report_ref_probe/${SLURM_JOB_ID}"
 export TMPDIR="${TMP_BASE}/tmp"
 export PRISM_NOTEBOOK_TMP="${TMP_BASE}"
-mkdir -p logs "$TMPDIR"
+export UV_CACHE_DIR="${TMP_BASE}/uv-cache"
+mkdir -p logs "$TMPDIR" "$UV_CACHE_DIR"
 export REPORT_REF_PATH
 
 UV_RUN_ARGS=(run --with "ipyniivue>=2.2.2")
