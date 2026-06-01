@@ -160,7 +160,17 @@ def _stable_shard(value: str, num_shards: int) -> int:
     return int(digest[:16], 16) % int(num_shards)
 
 
+def _dicom_value(value: Any) -> Any:
+    """Unwrap pydicom-json style tag dicts to their actual Value payload."""
+    if isinstance(value, dict) and "Value" in value:
+        value = value.get("Value")
+    if isinstance(value, list) and len(value) == 1:
+        return value[0]
+    return value
+
+
 def _as_int(value: Any) -> int | None:
+    value = _dicom_value(value)
     if value is None:
         return None
     if isinstance(value, bool):
@@ -185,6 +195,7 @@ def _parse_series_token(value: str) -> tuple[int | None, str, str]:
 
 
 def _parse_float_sequence(value: Any) -> tuple[float, ...] | None:
+    value = _dicom_value(value)
     if value is None:
         return None
     if isinstance(value, (list, tuple)):
@@ -362,7 +373,7 @@ def discover_study_series(
             metadata: dict[str, Any] = {}
         else:
             metadata = _read_json(meta_path)
-        number_value = metadata.get("SeriesNumber", metadata.get("series_number", ""))
+        number_value = _dicom_value(metadata.get("SeriesNumber", metadata.get("series_number", "")))
         series_number, series_text, suffix = _parse_series_token(str(number_value))
         if series_number is None:
             series_number = _as_int(number_value)
@@ -377,9 +388,9 @@ def discover_study_series(
                 series_number_text=series_text,
                 series_suffix=suffix,
                 series_description=str(
-                    metadata.get("SeriesDescription", metadata.get("series_description", series_dir.name))
+                    _dicom_value(metadata.get("SeriesDescription", metadata.get("series_description", series_dir.name)))
                 ),
-                modality=str(metadata.get("Modality", metadata.get("modality", ""))).upper(),
+                modality=str(_dicom_value(metadata.get("Modality", metadata.get("modality", "")))).upper(),
             )
         )
     return out
@@ -465,7 +476,7 @@ def _sort_instances_for_ordinal(instances: list[dict[str, Any]]) -> list[dict[st
     for idx, inst in enumerate(instances):
         location = None
         try:
-            location = float(inst.get("SliceLocation"))
+            location = float(_dicom_value(inst.get("SliceLocation")))
         except Exception:
             pass
         with_location.append((idx, location, inst))
