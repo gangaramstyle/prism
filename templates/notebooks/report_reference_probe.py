@@ -45,8 +45,9 @@ with app.setup:
         filter_report_refs,
         load_report_ref_manifest,
         load_report_ref_slice_preview,
+        report_ref_table_dataframe,
         resolve_report_ref_manifest_path,
-        row_at,
+        selected_table_row,
     )
 
     alt.data_transformers.disable_max_rows()
@@ -222,16 +223,47 @@ def _(alt, count_table, mo, report_refs):
 @app.cell
 def _(mo, report_refs):
     mo.stop(report_refs.height == 0, mo.callout("No rows match the current filters.", kind="warn"))
-    row_index = mo.ui.slider(start=0, stop=max(report_refs.height - 1, 0), value=0, step=1, label="Selected row")
+    table_limit = mo.ui.slider(start=25, stop=2000, value=500, step=25, label="Rows shown in selectable table")
+    full_report_max_chars = mo.ui.number(label="Full report max chars (0 = no truncation)", value=12000, start=0, step=1000)
     max_display_px = mo.ui.slider(start=256, stop=1024, value=640, step=64, label="Slice preview max px")
     show_slice_anchor = mo.ui.checkbox(label="Show DICOM slice anchor marker", value=False)
-    mo.hstack([row_index, max_display_px, show_slice_anchor])
-    return max_display_px, row_index, show_slice_anchor
+    mo.hstack([table_limit, full_report_max_chars, max_display_px, show_slice_anchor])
+    return full_report_max_chars, max_display_px, show_slice_anchor, table_limit
 
 
 @app.cell
-def _(report_refs, row_at, row_index):
-    selected_row = row_at(report_refs, int(row_index.value))
+def _(full_report_max_chars, mo, report_ref_table_dataframe, report_refs, table_limit):
+    table_df = report_ref_table_dataframe(
+        report_refs,
+        limit=int(table_limit.value),
+        full_report_max_chars=int(full_report_max_chars.value),
+    )
+    report_ref_table = mo.ui.table(
+        table_df,
+        selection="single",
+        initial_selection=[0],
+        pagination=True,
+        page_size=10,
+        wrapped_columns=["sentence", "report_section", "full_report"],
+        freeze_columns_left=["_filtered_row_index", "modality", "organ_hint"],
+        show_column_summaries=False,
+        show_data_types=False,
+        max_height=560,
+        label="Report references",
+    )
+    mo.vstack(
+        [
+            mo.md("## Select A Report Reference"),
+            mo.md("Selecting a row drives the sentence/detail panel, slice preview, and NiiVue viewer below."),
+            report_ref_table,
+        ]
+    )
+    return report_ref_table, table_df
+
+
+@app.cell
+def _(report_ref_table, selected_table_row, table_df):
+    selected_row = selected_table_row(report_ref_table.value, table_df)
     return (selected_row,)
 
 
@@ -241,6 +273,7 @@ def _(mo, pl, selected_row):
         "modality",
         "organ_hint",
         "report_section",
+        "full_report",
         "slice_mapping_confidence",
         "series_match_confidence",
         "series_number_reported",
@@ -253,15 +286,18 @@ def _(mo, pl, selected_row):
     ]
     details = pl.DataFrame([{col: selected_row.get(col) for col in detail_columns}])
     sentence = selected_row.get("sentence") or ""
+    full_report = selected_row.get("full_report") or ""
     mo.vstack(
         [
             mo.md("## Selected Reference"),
             details,
             mo.md("### Report Sentence"),
             mo.callout(str(sentence), kind="neutral"),
+            mo.md("### Full Report"),
+            mo.ui.text_area(value=str(full_report), label="", full_width=True, rows=18),
         ]
     )
-    return details, sentence
+    return details, full_report, sentence
 
 
 @app.cell

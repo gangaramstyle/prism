@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -97,6 +98,73 @@ def row_at(df: pl.DataFrame, index: int) -> dict[str, Any]:
         raise IndexError("Cannot select from an empty report-reference table")
     idx = int(np.clip(index, 0, df.height - 1))
     return df.row(idx, named=True)
+
+
+@lru_cache(maxsize=4096)
+def read_report_text(report_path: str, max_chars: int = 0) -> str:
+    path = Path(str(report_path)).expanduser()
+    text = path.read_text(encoding="utf-8", errors="replace")
+    if int(max_chars) > 0 and len(text) > int(max_chars):
+        return text[: int(max_chars)] + "\n\n[TRUNCATED]"
+    return text
+
+
+def report_ref_table_dataframe(
+    df: pl.DataFrame,
+    *,
+    limit: int = 500,
+    full_report_max_chars: int = 12_000,
+) -> pl.DataFrame:
+    """Create a UI-table friendly report-ref dataframe with full report text."""
+    if df.height == 0:
+        return pl.DataFrame([])
+    base = df.with_row_index("_filtered_row_index").head(max(int(limit), 1))
+    wanted = [
+        "_filtered_row_index",
+        "modality",
+        "organ_hint",
+        "report_section",
+        "sentence",
+        "full_report",
+        "slice_mapping_confidence",
+        "series_match_confidence",
+        "series_number_reported",
+        "image_number_reported",
+        "dicom_instance_number",
+        "slice_axis_name",
+        "canonical_slice_index",
+        "series_description",
+        "report_path",
+        "nifti_path",
+    ]
+    rows: list[dict[str, Any]] = []
+    for row in base.to_dicts():
+        report_path = str(row.get("report_path") or "")
+        row["full_report"] = read_report_text(report_path, int(full_report_max_chars)) if report_path else ""
+        rows.append({col: row.get(col) for col in wanted})
+    return pl.DataFrame(rows)
+
+
+def selected_table_row(table_value: Any, fallback_df: pl.DataFrame) -> dict[str, Any]:
+    """Normalize marimo table.value to a selected row dict."""
+    if table_value is None:
+        return row_at(fallback_df, 0)
+    if isinstance(table_value, pl.DataFrame):
+        if table_value.height > 0:
+            return table_value.row(0, named=True)
+        return row_at(fallback_df, 0)
+    if isinstance(table_value, dict):
+        # marimo may return column-oriented data for dataframe-backed tables.
+        if table_value:
+            lengths = [len(v) for v in table_value.values() if isinstance(v, list)]
+            if lengths and min(lengths) > 0:
+                return {k: (v[0] if isinstance(v, list) else v) for k, v in table_value.items()}
+        return row_at(fallback_df, 0)
+    if isinstance(table_value, list) and table_value:
+        first = table_value[0]
+        if isinstance(first, dict):
+            return first
+    return row_at(fallback_df, 0)
 
 
 def load_report_ref_slice_preview(
